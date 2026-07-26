@@ -279,8 +279,10 @@ COMPOSE_REGISTRY = {
     # here): required_sm=9.0 gates launch to NVIDIA's supported set (Hopper
     # sm_90 / Blackwell sm_100+ incl. 5090 sm_120, GB10 sm_121); the first
     # community booter is the validation, not a confirmation. NVFP4 *KV* stays
-    # off everywhere (consumer Blackwell has no FP4 FMHA — see hardware
-    # rtx-5090.yml note); fp8_e4m3 KV is the FP4-era KV. NOTE (corrected
+    # off everywhere (stock consumer Blackwell has no FP4 FMHA route — see the
+    # hardware rtx-5090.yml note, incl. the 2026-07-26 correction: a community
+    # FA2+XQA route DOES reach FP4 KV on sm_120, we stay closed pending
+    # vllm#44851); fp8_e4m3 KV is the FP4-era KV. NOTE (corrected
     # 2026-07-06): hf_quant_config DECLARES kv_cache_quant_algo=FP8 but the
     # checkpoint ships NO k_scale/v_scale tensors (index-verified) → runs at
     # scale=1.0, the #594-quality-tied regime. Same for the 35B-A3B sibling.

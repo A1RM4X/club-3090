@@ -5,10 +5,15 @@ sm: 12.0
 vram_gb: 96
 arch: blackwell-workstation
 mem_util_safe: 0.96
-# NOTE: nvfp4 KV is DELIBERATELY NOT listed — it needs the trtllm-gen FP4 FMHA
-# kernel, built only for datacenter Blackwell (sm_100/103). This is CONSUMER
-# Blackwell (sm_120): FP4 weights work, but nvfp4 KV has no FMHA build and
-# crashes (vLLM #43562 / TRT-LLM #10241). fp8_e4m3 is the FP4-era KV here.
+# NOTE: nvfp4 KV is DELIBERATELY NOT listed — on STOCK vLLM it routes to the
+# trtllm-gen FP4 FMHA kernel, built only for datacenter Blackwell (sm_100/103).
+# This is CONSUMER Blackwell (sm_120): FP4 weights work, but that route has no
+# FMHA build and crashes (vLLM #43562 / TRT-LLM #10241). fp8_e4m3 is the
+# FP4-era KV here.
+#
+# ⚠️ 2026-07-26 — pin limit, not a hardware one: the vllm#49011 / #44851
+# community route (FA2 prefill + XQA decode) reaches real FP4 KV on sm_120,
+# validated on a 5090 (disc #765). Rationale + re-open trigger: rtx-5090.yml.
 supported_kv_formats:
   - bf16
   - fp16

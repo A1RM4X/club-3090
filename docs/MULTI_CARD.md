@@ -39,10 +39,95 @@ own compose when the shipped `multi4` composes aren't your topology.
 1. **More cards = much more headroom**, especially for long-context
    single-prompt workloads. On TP=4 the 24 GB-per-card pressure that
    drives Cliff 2 disappears entirely — weights and KV pool both split.
-2. **Per-stream TPS doesn't scale** without NVLink. PCIe NCCL all-reduce
-   overhead grows with TP count; per-stream decode at TP=4 may be
-   *lower* than TP=2. Aggregate concurrent throughput still scales, but
-   you don't get faster single-stream answers from more PCIe cards.
+2. **Per-stream TPS doesn't scale *on our recipes*** — but read the scoping
+   below before treating that as a law of PCIe.
+
+> [!IMPORTANT]
+> **⚠️ Scoped 2026-07-26.** This bullet used to read *"Per-stream TPS doesn't
+> scale without NVLink. PCIe NCCL all-reduce overhead grows with TP count;
+> per-stream decode at TP=4 may be lower than TP=2."* That states a **topology
+> law**, and it isn't one — it's a property of the **recipe** we measure on.
+>
+> Every shipped config in the table above runs **MTP K=3 speculative decoding**.
+> [@alesha-pro](https://github.com/noonghunna/club-3090/discussions/773) ran the
+> same TP sweep on 4× 3090 with **no spec decoding at all** and got the opposite
+> result. Decode tok/s, Qwen3.6-27B fp8, single stream:
+>
+> | | TP=2 | TP=4 | scaling |
+> |---|--:|--:|--:|
+> | **no spec** (@alesha-pro, 220 W, patched P2P) | 38.07 | 61.60 | **+62%** |
+> | **MTP n=3** (our shipped configs) | 70.7 <sup>a</sup> | 74.76 <sup>b</sup> | **+5.7%** |
+>
+> <sup>a</sup> `vllm/qwen-27b-dual-fast`, v0.24.0 · <sup>b</sup> `vllm/qwen-27b-multi-fast`, @ryanmpelletier 4× 3090 all-x16, v0.24.0
+>
+> **Both are correct.** vLLM TP scaling is real; our TP=2 baseline just already
+> has ~1.85× of drafter folded into it, so there's nothing left for cards 3 and 4
+> to recover. The decisive number: **his TP=4 (61.60) lands 13% *below* our TP=2
+> (70.7).**
+>
+> So the *practical* advice survives — **on a PCIe rig you buy single-stream speed
+> with a drafter, not with more cards** — but the stated *mechanism* (all-reduce
+> overhead growing with TP) is not what either dataset shows. Ours shows TP=4 ≈
+> TP=2, not TP=4 < TP=2.
+>
+> One engine caveat from the same report: this is a **vLLM** property. On the
+> llama.cpp leg (tensor-split, not TP) the same box gained only 3–13% going 2→4,
+> with a repeat spread wide enough to swamp it (Q8_0 gave 52.9 and 71.8 on
+> identical settings). If you're on a GGUF engine, "more cards ≠ faster per
+> stream" holds much more strongly.
+
+   Aggregate concurrent throughput still scales — see **Replication vs
+   tensor-parallel** below, which is usually the bigger lever.
+
+---
+
+## Replication vs tensor-parallel — the fork this page used to ignore
+
+Everything else on this page reasons in the **TP dimension**: how do I split one
+model across N cards? For **aggregate** throughput that is frequently the wrong
+question. If the model fits on one card, running **N independent instances**
+beats splitting it N ways — by a lot.
+
+Measured by [@alesha-pro](https://github.com/noonghunna/club-3090/discussions/773)
+on 4× 3090 PCIe, all arms matched at 220 W, peak aggregate tok/s
+(`--max-num-seqs 256 --enable-chunked-prefill`):
+
+| Model | TP=4, 1 instance | replicated | gain |
+|---|--:|--:|--:|
+| gemma-4-12B AWQ | 1,007 | **3,425** (TP=1 × 4) | **3.40×** |
+| Qwen3.6-27B INT8-W8A8 | 358 | **741** (TP=2 × 2) | 2.07× |
+| Qwen3.6-27B INT4 | 307 | **737** (TP=2 × 2) | 2.40× |
+
+**The rule of thumb: latency wants max TP, throughput wants max instances.**
+(@alesha-pro's phrasing.) Same cards, same weights, opposite answer depending on
+which you're optimizing.
+
+The trap is that **the same run flips winner** depending on which number you
+read. AutoRound INT4 on that rig, one sitting, one power cap:
+
+| | TP=2 | TP=4 |
+|---|--:|--:|
+| single stream (wall) | 53.80 | **69.26** |
+| aggregate peak @ c=64 | **473.1** | 294.8 |
+
+TP=4 is **29% faster for one user and 38% slower for a full queue.** So "which
+TP should I run" has no answer without "for what workload".
+
+**This agrees with what we measured from the concurrency side.** Our own sweep
+(2026-07-10, 2× 3090, agent-shaped 16K prompts) found the dense 27B's batching
+knee at **N=2** — decode-aggregate *halves* by N=8, because per-stream falls
+faster than N grows. Meanwhile the 35B-A3B MoE holds ~250–270 flat to N=16.
+Same lesson from the other direction: past a low N, stop feeding one big engine
+and start adding engines. See the concurrency sweep in
+[BENCHMARKS.md](../BENCHMARKS.md) and the FAQ entry on serving multiple coding
+agents.
+
+**Caveats before you replicate.** Each instance needs its own full weight copy
+(so the model must fit on one card *with* a useful KV pool), its own port, and
+its own KV pool — you lose the pooled-KV benefit that is the main reason to run
+TP=4 for long-context single-prompt work. Replication is the answer for **many
+short-to-medium requests**; TP is the answer for **one very long one**. We don't
+ship a replication compose today — [PODS.md](PODS.md) is the closest thing.
 
 ---
 

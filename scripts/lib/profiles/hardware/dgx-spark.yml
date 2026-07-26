@@ -10,8 +10,13 @@ arch: blackwell-gb10
 mem_util_safe: 0.85
 # NOTE: nvfp4 KV is DELIBERATELY NOT listed — like consumer Blackwell (sm_120),
 # GB10 (sm_121) has no trtllm-gen FP4 FMHA build (that kernel is datacenter
-# Blackwell sm_100/103 only). FP4 weights work; nvfp4 KV crashes. fp8_e4m3 is
-# the FP4-era KV here. The #574 nvfp4 gate already excludes sm_121.
+# Blackwell sm_100/103 only). FP4 weights work; stock nvfp4 KV crashes.
+# fp8_e4m3 is the FP4-era KV here. The #574 nvfp4 gate already excludes sm_121.
+#
+# ⚠️ 2026-07-26 — pin limit, not a hardware one: the vllm#49011 / #44851
+# community route (FA2 prefill + XQA decode) reaches real FP4 KV on sm_120,
+# validated on a 5090 (disc #765). Whether it extends to sm_121 is UNTESTED —
+# GB10 is a distinct target and nobody has booted it. Rationale: rtx-5090.yml.
 supported_kv_formats:
   - bf16
   - fp16
