@@ -771,8 +771,8 @@ COMPOSE_REGISTRY = {
         weights_companions=("anbeeld-dflash-iq4xs",),  # DFlash draft GGUF the compose mounts
         default_port=8065,
         kvcalc_key="SKIP",
-        status="experimental",
-        status_note="Dual-card beellama Qwen3.6-27B Q8_K_XL + DFlash (Anbeeld DFlash-IQ4_XS draft, --spec-type dflash). v0.3.0 sm_86 2026-06-01: boots + coherent at full 262K (fixed draft footprint; tensor-split 0.575,0.425 → ~21.2 GB/card). DFlash prose net-positive on tok/s (+52% vs no-spec @262K, re-tested 2026-06-03; earlier 'prose regression' RETRACTED — AR over-read + wrong baseline). Tool-grammar-neutral spec-dec for Qwen agents (club-3090#237). Promote on a STABLE tag.",
+        status="upstream-gated",
+        status_note="⏸️ UPSTREAM-GATED — cannot load on the pinned image. Blocked on the beellama v0.4.0 pin bump: Anbeeld re-exported the drafter repo in upstream format 2026-07-19 and dropped IQ4_XS, and our pinned v0.3.2-preview digest is a fork build whose llama.cpp base predates the current Qwen3.6 GGUF conversion — it refuses the new-format drafter (missing hidden_norm.weight) and the referenced anbeeld-dflash-iq4xs artifact no longer exists. Same stale base gibberishes on Ada (#693); both un-break on v0.4.0 (Anbeeld#91). Re-statused from experimental 2026-07-26 per #740. HISTORICAL: v0.3.0 sm_86 2026-06-01 booted + coherent at 262K, code accept 0.58 / prose ~0.41.",
     ),
     "beellama/gemma-q8-dflash-dual": _entry(
         model="gemma-4-31b", weights_variant="beellama-q8kxl-dflash", workload="fast-chat",
