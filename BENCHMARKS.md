@@ -571,6 +571,33 @@ Same endpoint, same thinking-off default. **Note** — `BENCHLOCAL_HERMES_RESOLV
 | cli-40 | 21/40 (52%) | 20/40 (50%) | −2 pp | CLI task completion |
 | **TOTAL** | **100/150 (67%)** | **102/150 (68%)** | **+1 pp** | |
 
+### Quality — 8-pack cross-rig, thinking ON vs OFF (community)
+
+First cross-rig 8-pack for Qwen 3.6 27B, and the only one we have that runs **both reasoning modes on the same rig, same day, with repeats**. Contributed by [@henrykrinkle01](https://github.com/noonghunna/club-3090/issues/770) — `vllm/qwen-27b-dual-max` (FP8 weights, fp8 KV), 2× RTX 3090 @ **250 W/card**, vLLM, benchlocal-cli **v0.9.9**, `repeat=3` (450 scenarios per arm).
+
+| Pack | Thinking OFF | Thinking ON | Δ | p50 latency OFF → ON |
+|---|---:|---:|---:|---|
+| toolcall-15 | 42/45 (93%) | 42/45 (93%) | tied | 1.33s → 1.92s |
+| instructfollow-15 | 39/45 (87%) | **45/45 (100%)** | **+13 pp** | 0.48s → 17.55s (**37×**) |
+| structoutput-15 | 42/45 (93%) | 42/45 (93%) | tied | 1.00s → 17.44s (17×) |
+| dataextract-15 | **39/45 (87%)** | 35/45 (78%) | **−9 pp** | 2.16s → 24.80s |
+| reasonmath-15 | 33/45 (73%) | **39/45 (87%)** | **+13 pp** | 4.16s → 16.49s |
+| bugfind-15 | 39/45 (87%) | **42/45 (93%)** | +7 pp | 4.23s → 35.28s |
+| hermesagent-20 | 36/60 (60%) | 34/60 (57%) | −3 pp | 21.45s → 20.27s |
+| cli-40 | 81/120 (68%) | **93/120 (78%)** | **+10 pp** | 1.26s → 9.56s |
+| **TOTAL** | **351/450 (78%)** | **372/450 (83%)** | **+5 pp** | |
+| *equivalent /150* | *117/150* | *124/150* | | |
+
+**Notable**:
+- **The domain split is reproduced on an independent rig.** Reasoning and agentic packs gain (reasonmath +13, instructfollow +13, cli-40 +10, bugfind +7); **mechanical extraction loses** (dataextract −9). That's the evidence base for the global `enable_thinking: false` default — thinking is not uniformly better, and the packs it hurts are the ones agents lean on.
+- **The latency column is the real verdict.** instructfollow buys +13 pp for a **37× p50 increase** (0.48s → 17.55s). For an agent loop that trade is unaffordable regardless of the score, which is why the default is off rather than the higher-scoring setting.
+- **Determinism is excellent** — `CV 0.00` on 7 of 8 packs (thinking-off) across 3 repeats, so these deltas are signal, not sampling noise.
+- At 78% thinking-off this sits **above** the 100/150 (67%) maintainer-rig figure in the table above — but see the caveat: that row is a different compose *and* a different benchlocal version, so it is not a like-for-like comparison.
+
+⚠️ **Not comparable to the 8-pack table above.** Different benchlocal-cli version (grader fidelity has moved), different compose, different power cap. Read this table internally (OFF vs ON on one rig) rather than against other rows.
+
+*No TPS row for this submission — quality only; `bench.sh` numbers were not included, so it does not appear in the dual-card matrix.*
+
 ### Quality — Aider Polyglot 30 (per-language breakdown)
 
 Cross-reference [Quality benches — Aider Polyglot 30](#quality-benches--aider-polyglot-30) above. Same `dual.yml` configs, same compose, single-shot.
