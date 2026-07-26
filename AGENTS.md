@@ -71,11 +71,38 @@ When adding the first vendored patch to a previously-rolling engine: pin in the 
 
 **Delivery model (vLLM):** patches reach the container by **volume-mounting into the pinned *stock* `vllm/vllm-openai` image** (python sidecars / site-package overlays / install scripts — see `delivery_mechanism` in `scripts/lib/profiles/patches.yml`), **not** by baking a custom image. The older baked-image path (`ghcr.io/noonghunna/vllm-club3090`, which shipped the release images through `club-v0.8.3`) is **retired** — no compose or engine-pin references it, and the `dockerfile_bake` `delivery:` block in `patches.yml` is legacy/test-only. The GHCR package is kept as historical release artifacts (users pinned to a `club-v0.8.x` tag can still pull); it is not deleted and not produced by anything in-repo.
 
-### File encoding in scripts — always `encoding="utf-8"`
-Any Python read of a repo source file (compose YAML, profile YAML, `baselines.yml`, …) — including python heredocs inside shell scripts — MUST pass `encoding="utf-8"`. `Path.read_text()` / `open()` default to the **locale** encoding, and community rigs run non-UTF-8 locales (minimal VMs / containers with `LC_ALL=C` → `ANSI_X3.4-1968`). Repo files are full of unicode (`— × → ⚠` in compose headers), so a bare read that works on the dev machine crashes `switch.sh`/`launch.sh` on those rigs (#599). Corollaries:
-- **Writes too:** a *piped* stdout under the C locale defaults to ASCII — printing a status note with unicode raises `UnicodeEncodeError`. Python emit blocks on launcher paths pin it with `sys.stdout.reconfigure(encoding="utf-8")`.
+### File encoding — UTF-8 mode is the guarantee; `encoding="utf-8"` is the backstop
+
+Repo sources are full of unicode (`— × → ⚠` in compose headers), and Python decodes file reads, stdout **and `sys.argv`** with the **locale** codec. On a rig whose locale is neither UTF-8 nor C that broke most of the script layer (#779: 46 pass / 38 fail on a real `en_US.ISO-8859-1`).
+
+**The systemic fix — every script that runs python3 carries this, above its first call:**
+
+```bash
+export PYTHONUTF8="${PYTHONUTF8:-1}"
+```
+
+Python's UTF-8 mode (PEP 540) overrides the locale for reads, writes, stdout and argv in one move. Exported, so nested scripts and child processes inherit it. **Defaulted, not forced** (`:-1`, never `=1`) so a user who deliberately sets `PYTHONUTF8=0` keeps control. `test-locale-utf8.sh` enforces all of that — presence, placement above the first call, and default-not-force — plus a functional leg on a real single-byte locale built with `localedef`. **Add the line when you add a script that shells out to python3**; the gate is there because this invariant is what decays.
+
+**⚠️ `LC_ALL=C` is NOT the at-risk case, and this guide used to say it was.** Python auto-enables UTF-8 mode for the C/POSIX locale, so C-locale rigs were always fine:
+
+| environment | result |
+|---|---|
+| `LC_ALL=C` | `utf8_mode=1  stdout=utf-8` — protected |
+| `LC_ALL=C PYTHONCOERCECLOCALE=0 PYTHONUTF8=0` | `utf8_mode=0  stdout=ascii` — synthetic repro only |
+| a real `en_US.ISO-8859-1` / `de_DE.iso88591` | `utf8_mode=0  stdout=iso8859-1` — **the genuine at-risk case** |
+
+Reproduce with a **real** single-byte locale (`localedef -f ISO-8859-1 -i en_US "$dir/en_US.ISO-8859-1"` + `LOCPATH`), not `PYTHONUTF8=0`. And note the failure shape differs: a single-byte locale **decodes any byte happily and corrupts quietly** — only the encode side raises. Compare output byte-for-byte across locales; don't probe for one character.
+
+**Still write `encoding="utf-8"` explicitly** — belt and braces if the env var is ever overridden, and mandatory in these cases:
+
+- **Writes, always paired with their reads.** `Path.write_text()` opens with mode `w`, which **truncates on open** — so pinning a read without pinning its paired write converts a clean crash into **data loss** (#777/#780: a `BENCHMARKS.md` copy went 180693 bytes → 0). For anything overwriting a file that matters, write a temp sibling and `os.replace()`: atomic, and a failed encode leaves the original intact.
+- **`subprocess` output.** `subprocess.run(..., text=True)` decodes the child's stdout with the locale codec too. `patch_attribution.py` pinned every one of its own reads, was fully compliant with this rule, and still died reading `docker compose config` (#781). Pass `encoding="utf-8"` on the call.
+- **`sys.argv`.** Under a non-UTF-8 locale argv is decoded with ASCII + `surrogateescape`, so unicode arguments arrive as *lone surrogates* that no `encoding=` pin can write. Recover with `os.fsencode(sys.argv[i]).decode("utf-8", "replace")` — correct under any locale — or pass long unicode payloads via stdin/file (#777).
+- **Emit blocks that print unicode to a pipe:** `sys.stdout.reconfigure(encoding="utf-8")`.
+
+Other corollaries:
 - **The launcher table path is python-STDLIB-ONLY** — no PyYAML, no pip deps (community VMs ship bare python3; #584's `ModuleNotFoundError: yaml`). The `--json` contract path may require PyYAML but must fail with a `Fix:` hint, not a traceback. `test-registry-emit-no-yaml` guards both plus the locale cases.
-- **Repro before claiming fixed:** modern Python coerces `C` → `C.UTF-8`, so plain `LC_ALL=C` won't reproduce — use `PYTHONUTF8=0 PYTHONCOERCECLOCALE=0 LC_ALL=C`.
+- **A `.py` tool invoked directly** (`python3 tools/kv-calc.py`) gets no shell script to export the var. In-repo callers all go through the scripts; a user doing this on a single-byte locale is still exposed.
 - **Don't blind-`2>/dev/null` launcher derive paths** — swallowing the traceback hid this exact class for months; capture stderr and surface it on failure instead.
 
 ### CHANGELOG
