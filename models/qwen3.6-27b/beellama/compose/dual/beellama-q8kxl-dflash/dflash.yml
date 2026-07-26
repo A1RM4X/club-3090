@@ -27,19 +27,29 @@
 #              (2026-06-01: code accept 0.58, prose accept ~0.41 net-positive re-tested
 #              2026-06-03, 10K-prefill clean @262K, 0 OOM). That validation stands for the
 #              image it ran on; it is not reachable from the currently pinned one.
-#   Caveats:   ⛔ BLOCKED ON: the beellama v0.4.0 pin bump (engines/beellama-local.yml
-#              install.spec, currently digest-pinned to the v0.3.2-preview build).
-#              Failure mechanism: Anbeeld re-exported the drafter repo in UPSTREAM format on
-#              2026-07-19 and dropped IQ4_XS from the lineup. Our pinned digest is a fork
-#              build whose llama.cpp base predates the current Qwen3.6 GGUF conversion, so it
-#              refuses the new-format drafter with a missing `hidden_norm.weight` tensor —
-#              and the old IQ4_XS artifact this compose references (registry
+#   Caveats:   ⛔ BLOCKED ON: an UPSTREAM llama.cpp fix to DFlash memory. NOT on a beellama
+#              pin bump — that was tried and rejected (see below). Slug is queued for
+#              retirement with the rest of the beellama engine (todo 2026-07-26).
+#              Failure mechanism on the CURRENT pin: Anbeeld re-exported the drafter repo in
+#              UPSTREAM format on 2026-07-19 and dropped IQ4_XS. Our pinned v0.3.2-preview is
+#              a fork build whose llama.cpp base predates the current Qwen3.6 GGUF conversion,
+#              so it refuses the new-format drafter with a missing `hidden_norm.weight`
+#              tensor — and the old IQ4_XS artifact this compose references (registry
 #              weights_companions=anbeeld-dflash-iq4xs) no longer exists to fall back to.
-#              Same stale base carries the fork DFlash that gibberishes on Ada (#693), so
-#              BOTH un-break on the same event: v0.4.0 rebases on current upstream and
-#              replaces fork-DFlash with upstream `draft-dflash` (Anbeeld#91, closed).
-#              ⚠️ The companion + `--spec-type` rename + drafter quant must all move in the
-#              SAME commit as the image bump — none of them works without the others.
+#              ⚠️ CORRECTION (2026-07-26): an earlier version of this block claimed the Ada
+#              gibberish (#693) and the load failure "BOTH un-break on the same event: v0.4.0
+#              rebases on current upstream". FALSE. v0.4.x replaces fork-DFlash with upstream
+#              `draft-dflash`, which builds a full MTP context for the drafter → this compose
+#              OOMs card0 at 262K (live Ampere validation 2026-07-21; single-card sibling
+#              102K → ~27K). It trades one break for a worse one. Anbeeld CLOSED our report
+#              (Anbeeld#98) as won't-fix: "the issue is on their side… architectural level so
+#              I'm not touching that. You can use v0.3.1/v0.3.2 for the time being." And
+#              v0.4.1 stable (2026-07-26) is the SAME COMMIT as the preview we OOM'd on
+#              (0 commits between the tags) — do not re-test against it.
+#              ⚠️ If this is ever revived: the companion + `--spec-type draft-dflash` rename +
+#              drafter quant must all move in the SAME commit as the image — none works alone.
+#              Mainline llama.cpp is NOT an escape: its DFlash is the same upstream code
+#              (~32K single-card ceiling measured in #759).
 #              Local test compose (untracked). beellama v0.3.0 was a DEV branch (efe856397),
 #              not a tagged release — same upstream gate as the gemma dual (Anbeeld #39 / #48).
 #              ✅ Qwen DFlash is net-positive on BOTH code (~145 TPS) AND prose: 35.6 t/s
