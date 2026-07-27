@@ -95,8 +95,14 @@ own compose when the shipped `multi4` composes aren't your topology.
 > TP=4 arm cannot (engine-gated at >2 PCIe GPUs —
 > [#786](https://github.com/noonghunna/club-3090/issues/786); every
 > dual-vs-multi4 comparison shares this asymmetry, recorded as Rig-cell field 4
-> in BENCHMARKS), and cross-*version* reads against the v0.24.0 numbers above
-> are confounded until our `dual-fast` v0.25.1 re-run lands.
+> in BENCHMARKS), and the cross-*version* question is **resolved (2026-07-27)**:
+> our first-party v0.25.1 re-run reproduces the v0.24.0 numbers (decode
+> 68.5/92.1 vs 70.7/93.5, at 230 W vs stock caps — flat within power+CV
+> noise), so the +11–16% by which the #773 rig's dual arm beats ours is
+> **rig-side, not the engine** — their TP=2 runs custom all-reduce +
+> transfer-verified P2P; ours runs neither. That difference matching the ~15%
+> they measured for custom-AR alone is the strongest hint yet of what the
+> interconnect stack is worth at TP=2.
 >
 > One engine caveat from the same report: this is a **vLLM** property. On the
 > llama.cpp leg (tensor-split, not TP) the same box gained only 3–13% going 2→4,
