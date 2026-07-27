@@ -8,6 +8,20 @@ This is the home for **getting the most out of a PCIe-only multi-GPU rig** — u
 
 ---
 
+## The three layers of "is P2P on?" — read this first
+
+"P2P" is three independent questions stacked on top of each other, and every confused triage in our tracker came from conflating them ([disc #773](https://github.com/noonghunna/club-3090/discussions/773) has the worked example):
+
+| Layer | Question | How to check |
+|---|---|---|
+| **1. Driver** | Is direct GPU↔GPU access *granted*? | `nvidia-smi topo -p2p rw` (= OK), module flavor (§5); strongest: a transfer-verified cache (§7) |
+| **2. NCCL** | Is the granted path *used* for transfers? | `NCCL_P2P_LEVEL` set + layer 1 granted — this is where most of the P2P benefit flows, at any GPU count |
+| **3. vLLM's custom all-reduce** | Is vLLM's *extra* kernel on top of NCCL active? | vLLM's own log: the `Custom allreduce is disabled…` line means no. At >2 GPUs it requires a **full NVLink mesh** and never consults P2P ([#786](https://github.com/noonghunna/club-3090/issues/786)) — so on 3+-card PCIe rigs layer 3 is always off, *by design, not misconfiguration*, and P2P still pays through layer 2 |
+
+**Where NVLink fits:** a bridge is the native version of layer 1 (no patched driver needed) and a faster layer 2 for the bridged pair. Layer 3 follows the same mesh rule: **2× 3090 + bridge → all three layers on**; **4× 3090 with two pairwise bridges → layer 3 still off** (consumer cards bridge exactly two GPUs; full meshes are NVSwitch/SXM territory). `report.sh`'s *Interconnect verdict* (§7) resolves all three layers for you.
+
+---
+
 ## 1. Reading your topology: why `PHB`, not `PIX`
 
 `nvidia-smi topo -m` labels each GPU↔GPU link by the *closest common point* the two cards share:
@@ -110,7 +124,7 @@ From cross-rig data on this stack (2× 3090, TP=2):
 |---|---|---|
 | `dual.yml` (fp8 KV) — patched P2P vs unpatched | **+2% narrative / +9% code** | [#91](https://github.com/noonghunna/club-3090/issues/91) |
 | DFlash / spec-decode path — patched P2P | **+19–22%** | [#95](https://github.com/noonghunna/club-3090/issues/95) |
-| NVLink hardware (reference, power-matched A/B) | **~+15%** | [#77](https://github.com/noonghunna/club-3090/issues/77) |
+| NVLink hardware — workload-shaped (same-host A/B) | **decode +3–5% · prefill/long-ctx +35–49%** | [#698](https://github.com/noonghunna/club-3090/issues/698) — supersedes the flat ~+15% from [#77](https://github.com/noonghunna/club-3090/issues/77) (older v7.72.2 image) |
 
 **Translation:** code / spec-decode workloads see a real lift (the K+1 cross-card verify is bandwidth-bound, so it benefits most); narrative decode barely moves. For most users the stock no-P2P PCIe path is already perfectly fine — **P2P is an enthusiast tuning lever, not a requirement.**
 
