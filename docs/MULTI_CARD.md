@@ -70,6 +70,34 @@ own compose when the shipped `multi4` composes aren't your topology.
 > overhead growing with TP) is not what either dataset shows. Ours shows TP=4 ≈
 > TP=2, not TP=4 < TP=2.
 >
+> **Confirmed by measurement 2026-07-27 — the matched-recipe pair.** The clean
+> test this section was waiting for: same rig, same sitting, same 220 W on every
+> card, same weights and image (v0.25.1), **MTP n=3 on *both* arms**,
+> `switch.sh` + `bench.sh`, ~20 minutes apart
+> ([@alesha-pro again](https://github.com/noonghunna/club-3090/discussions/773)):
+>
+> | | TP=2 `dual-fast` | TP=4 `multi-fast` | Δ |
+> |---|--:|--:|--:|
+> | narrative decode TPS | 79.26 (CV 4.1%) | 82.44 (CV 3.2%) | **+4.0%** |
+> | code decode TPS | 106.50 (CV 6.2%) | 103.73 (CV 1.7%) | **−2.6%** |
+> | prefill @10K tok/s | 1556 (CV 0.1%) | 2407 (CV 0.1%) | **+54.6%** |
+> | prefill @90K tok/s | 1202 (CV 0.6%) | 1948 (CV 0.5%) | **+62.0%** |
+> | TTFT @90K | 73.1 s | 45.6 s | **−37.6%** |
+>
+> Decode is flat — reproducing the cross-rig +5.7%/−2.9% above within ~2 points,
+> from one rig in one sitting. Recipe-not-topology is now *measured*, not
+> inferred. **And the number that changes the guidance: cards 3 and 4 buy
+> prefill and TTFT, not decode.** A 90K-token prompt starts answering 27 seconds
+> sooner on four cards; the tokens then stream no faster. (Same shape as the
+> NVLink A/B in [#698](https://github.com/noonghunna/club-3090/issues/698) —
+> decode +3–5%, prefill +35–49% — with a larger prefill term.) Two caveats
+> carried from the report: the TP=2 arm runs vLLM's custom all-reduce and the
+> TP=4 arm cannot (engine-gated at >2 PCIe GPUs —
+> [#786](https://github.com/noonghunna/club-3090/issues/786); every
+> dual-vs-multi4 comparison shares this asymmetry, recorded as Rig-cell field 4
+> in BENCHMARKS), and cross-*version* reads against the v0.24.0 numbers above
+> are confounded until our `dual-fast` v0.25.1 re-run lands.
+>
 > One engine caveat from the same report: this is a **vLLM** property. On the
 > llama.cpp leg (tensor-split, not TP) the same box gained only 3–13% going 2→4,
 > with a repeat spread wide enough to swamp it (Q8_0 gave 52.9 and 71.8 on
