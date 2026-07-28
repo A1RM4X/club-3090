@@ -194,6 +194,11 @@ services:
       # exact regime (#594). NOT fp8_e5m2 (rejected with fp8-quantized
       # checkpoints), NOT nvfp4 KV (no FP4 FMHA on consumer Blackwell —
       # vllm#43562).
+      #              NVFP4 *KV* not used ON A STOCK PIN (vllm#43562 = no trtllm-gen
+      #              FP4 FMHA on sm_120/121). The sm_120 FA2+XQA route + vllm#46329
+      #              reaches it on a patched image — measured 1.64x the fp8 pool at
+      #              no decode cost on this checkpoint (#619 @seanyourhighness).
+      #              Re-test when #46329 lands in the pin; fp8/e4m3 until then.
       - --kv-cache-dtype
       - "${KV_CACHE_DTYPE:-fp8}"
       - --trust-remote-code
