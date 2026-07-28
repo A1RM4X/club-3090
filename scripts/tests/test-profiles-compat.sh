@@ -445,8 +445,15 @@ assert r.valid, (r.cross_instance_failures, {k: v.reasons for k, v in r.per_inst
 PY
 
 run_test "estate self-test: official Google Gemma QAT TP=4 on 4x3090" <<'PY'
+from pathlib import Path
 from scripts.lib.profiles.compat import load_profiles, InstanceSpec, validate_estate
+from scripts.lib.profiles.compose_registry import COMPOSE_REGISTRY
 p = load_profiles()
+entry = COMPOSE_REGISTRY["vllm/gemma-31b-multi-google-qat-w4a16"]
+assert entry["drafter"] == "gemma-it-assistant", entry  # n=2 wins the measured n=1..4 sweep
+compose = Path(entry["compose_path"]).read_text()
+assert "${SPEC_N_MAX:-2}" in compose, "production MTP depth drifted from measured n=2"
+assert "MTP_ACCEPT_MIN=${MTP_ACCEPT_MIN:-1.8}" in compose, "Gemma-specific AL floor missing"
 instances = [
     InstanceSpec("gemma", "vllm/gemma-31b-multi-google-qat-w4a16", (0, 1, 2, 3), 8034),
 ]

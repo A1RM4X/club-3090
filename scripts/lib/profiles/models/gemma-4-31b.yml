@@ -57,7 +57,7 @@ weights:
     local_subdir: gemma-4-31b-google-qat-w4a16
     size_gb: 22.0
     format: compressed-tensors
-    status: experimental
+    status: production
     hf_repo: google/gemma-4-31B-it-qat-w4a16-ct
     hf_repos:
       - google/gemma-4-31B-it-qat-w4a16-ct

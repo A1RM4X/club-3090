@@ -645,13 +645,13 @@ COMPOSE_REGISTRY = {
     ),
     "vllm/gemma-31b-multi-google-qat-w4a16": _entry(
         model="gemma-4-31b", weights_variant="google-qat-w4a16", workload="long-ctx-single", chat_template="gemma-canonical",
-        engine="vllm-stable", drafter=None, kv_format="bf16",
+        engine="vllm-stable", drafter="gemma-it-assistant", kv_format="bf16",
         tp=4, max_ctx=262144, max_num_seqs=2, mem_util=0.91,
         compose_path="models/gemma-4-31b/vllm/compose/multi4/google-qat-w4a16/base.yml",
         default_port=8034,
         kvcalc_key="gemma-4-31b:gemma-dual",
-        status="experimental",
-        status_note="Official google/gemma-4-31B-it-qat-w4a16-ct (compressed-tensors W4A16), TP=4 BF16 KV @262K native context on stock vLLM v0.25.1, MTP off. Live-gated 2026-07-28 on 4x RTX 3090 PCIe at 0.91: 659,922-token / 15.06-GiB KV pool (2.52x at 262,144); verify-full passed chat, tools, streaming tools, reasoning, and cascade; full stress recalled every standard rung through 240,584 tokens; final 240,583-token recheck retained 1,451 MiB physical VRAM. Canonical decode 82.44 narrative / 82.62 code TPS; 10K/90K prefill 1,037 / 726 tok/s. Continuous soak passed 25/25, zero errors/silent outputs/VRAM growth, 100% TPS retention. Two explicit 98.5% probes recalled cleanly at 257,544 prompt tokens with the same 1,451 MiB margin. Experimental pending full quality packs.",
+        status="caveats",
+        status_note="Official google/gemma-4-31B-it-qat-w4a16-ct (compressed-tensors W4A16), TP=4 BF16 KV @262K on stock vLLM v0.25.1 with official Gemma assistant MTP n=2. Production-gated 2026-07-28 on 4x RTX 3090 PCIe at 230W/card: 650,262-token / 14.84-GiB KV pool (2.48x at 262,144); recall passed through 257,544 tokens with 1,213 MiB/card free; verify-full passed chat, tools, streaming tools, reasoning, cascade, and profile AL floor; vision smoke identified a blue circle on red; continuous soak passed 100/100 with zero errors/silent outputs/VRAM growth and 104.2% TPS retention. Canonical decode 80.61 narrative / 92.34 code TPS; 10K/90K prefill 981/692 tok/s. Full 8-pack: 116/150 thinking-off and 122/150 thinking-on. Full n=1..4 sweep: all arms passed 20/20 streamed two-tool calls; n=2 changes narrative/code decode -2.2%/+11.7% (~+4.7% equal-weight aggregate) versus no MTP. CAVEATS: uses all four GPUs; near-max text leaves only 1.2 GiB/card, so vision plus near-max text is unvalidated.",
     ),
 
     # Gemma-4-31B unsloth QAT W4A16 (compressed-tensors int4) — QAT-int4 fidelity alt to

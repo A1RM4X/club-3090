@@ -2,21 +2,21 @@
 # Profile (at-a-glance):
 #   Model:     Gemma 4 31B — official Google QAT W4A16 (compressed-tensors INT4)
 #   Topology:  Quad 3090 (TP=4, PCIe; NVLink auto-detected via NVLINK_MODE)
-#   Drafter:   none — MTP remains off because Gemma-4 MTP × tools is unsafe
+#   Drafter:   MTP n=2 (Google's official `gemma-4-31B-it-assistant`)
 #   KV:        bf16 (engine-default; overlay-free)
-#   Vision:    yes (model path loaded; image requests not yet exercised)
-#   Max ctx:   262144 native; recall verified at 257544 prompt tokens
+#   Vision:    yes (live smoke-tested)
+#   Max ctx:   262144 native; MTP recall verified at 257544 prompt tokens
 #   Genesis:   N/A — Genesis is Qwen3-Next-specific
-#   Status:    🧪 Experimental
-#   Caveats:   Full quality packs and image requests remain unvalidated; MTP stays off for
-#              tool correctness.
-#   Quality:   Live TP=4 gate 2026-07-28: verify-full passed chat, tools, streaming tools,
-#              reasoning, and cascade; stress recalled every standard rung plus two 98.5%
-#              probes at 257,544 prompt tokens with 1,451 MiB free. Soak passed 25/25,
-#              0 errors, 0 silent, 0 MiB growth, 100% TPS retention. Canonical decode:
-#              82.44 narrative / 82.62 code TPS; 10K/90K prefill: 1,037 / 726 tok/s.
-#   Best for:  Testing Google's official Gemma-4-31B QAT checkpoint at its full native
-#              262K context limit on 4× RTX 3090.
+#   Status:    ⚠️ Production w/ caveats
+#   Caveats:   Uses all four GPUs. MTP n=2 trades -2.2% narrative for +11.7% code decode
+#              versus no MTP. At 257K, 1,213 MiB/card remains; image requests pass at short
+#              context but vision plus a near-max text prompt is not validated.
+#   Quality:   8-pack 116/150 thinking-OFF (TC12·IF14·SO15·DE12·RM13·BF14·HA14·CLI22)
+#              and 122/150 thinking-ON (TC15·IF14·SO14·DE12·RM13·BF15·HA13·CLI26).
+#              Verify-full + stress to 257,544 + vision smoke pass. Soak 100/100, 0 errors,
+#              0 silent, 0 MiB growth, 104.2% TPS retention. Decode 80.61/92.34 narr/code;
+#              10K/90K prefill 981/692 tok/s. Live-gated 2026-07-28 at 230 W/card.
+#   Best for:  Full-native-context Gemma 4 coding, tools, and vision on 4× RTX 3090.
 # ---------------------------------------------------------------------------
 # Full-context profile for google/gemma-4-31B-it-qat-w4a16-ct on 4× RTX 3090.
 #
@@ -30,8 +30,10 @@
 # and newer unpatched engines have shown a silent long-context recall cliff. FP8 KV
 # is unavailable on sm_86 for this attention path.
 #
-# Plain chat, reasoning, streaming tools, and repeated agent turns pass. MTP remains
-# off because the separate Gemma-4 MTP×tools failure class is unresolved.
+# vLLM #45588 fixes the legacy Gemma MTP parser failure on this pin: every n=1..4
+# arm passed 20/20 streamed two-tool calls. The full n-sweep selects n=2: versus
+# no MTP it changes narrative/code decode by -2.2%/+11.7% (~+4.7% equal-weight
+# aggregate). n=1 is aggregate-flat; n=3/n=4 regress aggregate throughput.
 #
 # Hardware metadata (parsed by scripts/preflight.sh):
 # Requires-min-vram-gb: 24
@@ -76,6 +78,8 @@ services:
       - OMP_NUM_THREADS=1
       - PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True,max_split_size_mb:512}
       - VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
+      # verify-full profile floor: n=2 is throughput-positive despite AL occasionally <2.
+      - MTP_ACCEPT_MIN=${MTP_ACCEPT_MIN:-1.8}
       - TRITON_CACHE_DIR=/root/.triton/cache
     shm_size: "16gb"
     ipc: host
@@ -120,13 +124,13 @@ services:
       #      KV_DTYPE=fp8_per_token_head; sm_86 Ampere cannot (no fp8e4nv kernel).
       - --kv-cache-dtype
       - "${KV_DTYPE:-auto}"
-      # The model declares a native 262,144-token window. TP=4 measured a 659,922-token
-      # BF16 KV pool; recall passed twice at 257,544 prompt tokens.
+      # The model declares a native 262,144-token window. TP=4 + MTP n=2 measured a
+      # 650,262-token BF16 KV pool; recall passed at 257,544 prompt tokens.
       - --max-model-len
       - "${MAX_MODEL_LEN:-${CTX:-262144}}"
       - --gpu-memory-utilization
       # Keep >1 GiB physical VRAM outside vLLM for sustained agent/checkpoint overhead.
-      # 0.95 left 545 MiB; 0.92 passed by only 15 MiB, so retain another 1%.
+      # Final MTP n=2 stress leaves 1,213 MiB at 0.91; another 1% would cross the gate.
       - "${GPU_MEMORY_UTILIZATION:-0.91}"
       # --max-num-seqs is a cap, not a KV reservation. Keep two streams available;
       # the measured pool determines whether two long requests can overlap.
@@ -146,4 +150,6 @@ services:
       - gemma4
       - --chat-template
       - /etc/club3090/gemma-canonical-template.jinja
-      # MTP intentionally absent: validate the checkpoint and tool path first.
+      # Full n=1..4 sweep selects n=2 for this quant. Override only for re-benchmarking.
+      - --speculative-config
+      - '{"model":"/root/.cache/huggingface/gemma-4-31b-it-assistant","num_speculative_tokens":${SPEC_N_MAX:-2}}'
