@@ -12,9 +12,11 @@
 #              SPEC=off disables it — tight-RAM / spec-dec-fails mitigation, #617)
 #   KV:        fp8 → e4m3 (this checkpoint BAKES FP8 KV scales — modelopt
 #              kv_cache_quant_algo=FP8 — unlike our weight-only fp8 tier which
-#              runs scale=1.0). NVFP4 *KV* is deliberately NOT used: consumer
-#              Blackwell (sm_120/121) has no FP4 FMHA build (see
-#              hardware/rtx-5090.yml + vllm#43562) — fp8/e4m3 is the FP4-era KV.
+#              NVFP4 *KV* not used ON A STOCK PIN (vllm#43562 = no trtllm-gen
+#              FP4 FMHA on sm_120/121). The sm_120 FA2+XQA route + vllm#46329
+#              reaches it on a patched image — measured 1.64x the fp8 pool at
+#              no decode cost on this checkpoint (#619 @seanyourhighness).
+#              Re-test when #46329 lands in the pin; fp8/e4m3 until then.
 #   Vision:    yes (full VLM — vision tower + preprocessors ship in the repo)
 #   Max ctx:   262K (kv-calc: ~22.1 GB/card on 2× 32 GB @ util 0.92 — 75% of
 #              budget, comfortable; ~11 GB/card weights vs dual-max's 14.5)
