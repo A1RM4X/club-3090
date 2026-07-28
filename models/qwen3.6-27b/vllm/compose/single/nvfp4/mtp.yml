@@ -14,7 +14,14 @@
 #   KV:        fp8 → e4m3 at scale=1.0 (hf_quant_config DECLARES FP8 KV but
 #              ships NO k_scale/v_scale tensors — index-verified 2026-07-06;
 #              hybrid disables calculate_kv_scales → the #594-tied regime).
-#              NVFP4 *KV* deliberately NOT used:
+#              NVFP4 *KV* not used ON A STOCK PIN: consumer Blackwell has no
+#              FP4 FMHA on the trtllm-gen route (rtx-5090.yml, vllm#43562) —
+#              a STOCK-IMAGE property, not a silicon one. A community FA2+XQA
+#              route reaches real FP4 KV on sm_120 (vllm#49011 / #44851) and
+#              needs vllm#46329 for the V-scale write layout or it degrades
+#              SILENTLY (pre-fix 8-pack 116/150, BELOW its own fp8 control,
+#              with every functional gate green). Stay on fp8 until #46329 is
+#              in the pin.
 #              consumer Blackwell has no FP4 FMHA (rtx-5090.yml, vllm#43562).
 #              TurboQuant *KV* (turbo4_nc) NOT viable either: it fits more ctx
 #              (160K + MTP boots where fp8 caps ~98K) but CRATERS recall — every
@@ -41,6 +48,27 @@
 #              Bigger cards raise via env (MTP on):
 #                GB10 (128 GB unified): MAX_MODEL_LEN=262144 → the single-card home.
 #                H100 (80 GB) / RTX 6000 Pro (96 GB): 262144 fits similarly.
+#              ⤷ THE 65K PIN IS FP8-KV-CONSEQUENT, NOT A HARD LIMIT (2026-07-28,
+#                #765/#613 @seanyourhighness, 1x 5090 32 GB, PATCHED image):
+#                the KV reservation is that large because fp8 is the assumed KV
+#                floor. On a build carrying the sm_120 NVFP4-KV route + the
+#                V-scale write fix (vllm#46329), 98K — the exact context #613
+#                OOMed at — boots WITH MTP and benches at full speed (100.94 vs
+#                100.60 narrative at 65K), and 131K runs too (93.60/111.27, i.e.
+#                BETTER than the shipped 65K default's 89.08/101.29 at 2x the
+#                ctx). Tell: warm-free VRAM is 4,656 MiB at 65K, 98K AND 131K
+#                alike — the constraint stopped applying, it did not merely
+#                loosen. Same envelope, only --kv-cache-dtype changed: +12.9%
+#                narrative, +12.3% code, 1.44x pool, MTP acceptance FLAT (56.6
+#                vs 57.2%) — FP4 KV does not disturb spec-decode.
+#                ⚠️ DEFAULT UNCHANGED, deliberately: vllm#46329 is UNMERGED, so
+#                this needs a patched local image — a stock pinned image still
+#                crashes on nvfp4 KV (vllm#43562). Not first-party reproducible
+#                (no SM120 on the maintainer rig). RE-TEST TRIGGER: vllm#46329
+#                lands in the vllm-stable pin -> re-derate this pin. See
+#                docs/UPSTREAM.md (#46329 row) + docs/DTYPE_MATRIX.md.
+#                NOT YET QUALIFIED at 98K/131K: throughput + boot only — no
+#                needle ladder and no 8-pack were run at those contexts.
 #   Genesis:   none — intentionally Genesis-free
 #   Status:    🧪 Experimental
 #   Best for:  27B-class Qwen with vision+tools on ONE Blackwell/Hopper card —
@@ -110,6 +138,16 @@ services:
       # mitigation for tight system-RAM rigs (laptop / consumer 5090) where the
       # extra draft-model load OOMs during boot (#617). Default = MTP on.
       - SPEC
+      # ⚠️ WSL/WDDM: set PYTORCH_CUDA_ALLOC_CONF=expandable_segments:False.
+      # Expandable segments use CUDA VMM (cuMemCreate/cuMemMap), unsupported
+      # under WDDM — every boot dies with "RuntimeError: CUDA driver error:
+      # device not ready" in nvfp4_marlin_process -> _nvfp4_compute_scale_factor
+      # right after weights load 100%, with nvidia-smi perfectly clean (no
+      # throttle, no ECC, full VRAM free). Reads like dead silicon or a corrupt
+      # checkpoint; it is neither. True is correct on native Linux, so this is
+      # an override, not a fix: prefix the env on switch.sh — no edit needed.
+      # (#617/#765 @seanyourhighness — cost five failed boots + a wrong
+      # "the GPU is degraded" diagnosis.)
       - PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True,max_split_size_mb:512}
     shm_size: "16gb"
     ipc: host

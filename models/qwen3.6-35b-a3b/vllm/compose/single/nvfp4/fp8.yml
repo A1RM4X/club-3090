@@ -28,6 +28,8 @@
 #   Genesis:   none — intentionally Genesis-free
 #   Status:    ⚠️ Production w/ caveats
 #   Caveats:   8-pack quality NOT yet cross-rig-measured — operationally validated on
+#   Caveats:   • DO NOT SET --compilation-config / cudagraph_mode — the absence
+#              of a compilation config here is DELIBERATE (see the block below).
 #              TWO independent 5090s (#619 @paulp83 + #612/#652 @guybrush01: verify-full
 #              9/9, verify-stress to ~120K, soak PASS ~311 TPS), quality run pending (#492).
 #              NVFP4 = experimental nvidia-modelopt format; Blackwell/Hopper only (sm_90+).
@@ -41,8 +43,31 @@
 # 100% retention / 0 err / p50 311 TPS). Decode 255.8 narr / 257.9 code TPS
 # @ 60 ms TTFT — ~2.5-3x our 2x3090 AutoRound tier (native FP4 GEMM). MTP
 # loaded OFF as shipped. VRAM 30.6/32 GB @131K — TIGHT but flat through soak
-# on a 32 GB card (if a longer soak OOMs on yours, MAX_MODEL_LEN=98304).
-# Stays 🧪 until an 8-pack quality number lands (that run's sandboxes weren't
+#              ⚠️ AGENT WORKLOADS AT FULL CTX: use MAX_MODEL_LEN=98304.
+#              At 131K/util 0.92 on a 32 GB card, recall is CORRECT to the
+#              ceiling (needles clean to 120,320 tok = 91% of n_ctx) but the
+#              agent-safety margin fails: 957 MB free < the 1024 MB threshold,
+#              and sustained agent load carries ~292 MiB more of prompt-cache
+#              + context-checkpoint overhead (#197). So 131K is fine for chat
+#              and long-context retrieval, NOT for sustained agent traffic at
+#              full context. Measured #619 (@seanyourhighness, verify-stress
+#              ceiling ladder) — this is the measurement behind what used to
+#              be a generic OOM fallback. NB the check that fails is an
+#              ADVISORY on headroom, not a recall failure; @paulp83's "TIGHT
+#              but flat through soak" (#619) was the same observation without
+#              a threshold to hang it on — flat is real (0 MiB growth over
+#              200 turns), tight is also real.
+# ✅ 8-PACK CLOSED 2026-07-28 (#619 @seanyourhighness, 1x 5090 32 GB, WSL2,
+# 575 W stock): thinking-on 123 + 121 (mean 122.0/150), thinking-off 115/150 —
+# at the FULL 131K envelope with the compose's own fp8 KV, not a bounded one.
+# Full chain same session: verify-full 7/7, verify-stress needles clean to
+# 120,320 tok (1 advisory — see the ceiling-margin note above), soak-continuous
+# PASS (0 MiB growth / 200 turns, 0 errors, VRAM flat 31,231 MiB), bench
+# 240.21/244.10 = 94-95% of @paulp83's v0.24.0 row (his was measured before the
+# 2026-07-16 v0.25.1 pin bump — the delta is engine version, unisolated).
+# Provenance: COMMUNITY BUILD — vLLM v0.25.1 (752a3a5) self-built + FlashInfer
+# 0.6.15.post1, checkpoint snapshot 491c2f1e, benchlocal-cli v0.9.9 (c5a88ec).
+# Not the official pinned image; recorded as community-validated, not first-party.
 # built). More Blackwell/Hopper reports still welcome (GB10 @262K especially):
 #   1. bash scripts/switch.sh vllm/qwen-35b-a3b-single-nvfp4
 #   2. bash scripts/verify-full.sh MODEL=qwen3.6-35b-a3b
@@ -99,6 +124,16 @@ services:
       # launchers auto-inject VLLM_USE_DEEP_GEMM=0 there (disc #571); raw
       # `docker compose` users on those cards set it themselves.
       - VLLM_USE_DEEP_GEMM
+      # ⚠️ WSL/WDDM: set PYTORCH_CUDA_ALLOC_CONF=expandable_segments:False.
+      # Expandable segments use CUDA VMM (cuMemCreate/cuMemMap), unsupported
+      # under WDDM — every boot dies with "RuntimeError: CUDA driver error:
+      # device not ready" in nvfp4_marlin_process -> _nvfp4_compute_scale_factor
+      # right after weights load 100%, with nvidia-smi perfectly clean (no
+      # throttle, no ECC, full VRAM free). Reads like dead silicon or a corrupt
+      # checkpoint; it is neither. True is correct on native Linux, so this is
+      # an override, not a fix: prefix the env on switch.sh — no edit needed.
+      # (#617/#765 @seanyourhighness — cost five failed boots + a wrong
+      # "the GPU is degraded" diagnosis.)
       - PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}
     shm_size: "16gb"
     ipc: host
@@ -110,6 +145,25 @@ services:
               count: all
               capabilities: [gpu]
     command:
+      # =====================================================================
+      # ⚠️ DO NOT ADD --compilation-config. The default is deliberate.
+      # This compose sets NO compilation config, so vLLM picks full decode
+      # graphs. Overriding to cudagraph_mode=PIECEWISE at max-num-seqs 1
+      # collapses capture to cudagraph_capture_sizes: [1, 2] and breaks the
+      # decode graph at every attention op: 98.85/82.81 vs 250.06/249.89
+      # narrative/code — 2.75x, measured as a matched pair, same boot config,
+      # same 336,184-token pool (#619 @seanyourhighness, 1x 5090). Explicit
+      # FULL measures 248.96/250.15 = indistinguishable from default, so the
+      # fix is NOT OVERRIDING, not selecting a different mode.
+      # It produces NO error and NO warning: verify-full 7/7, soak clean,
+      # needles clean — at a third of the throughput. Quality-neutral too
+      # (8-pack 115/123/121 fast vs 116/121/119 slow), so the 2.6x is free.
+      # SELF-CHECK if this slug benches ~90 TPS instead of ~240-250: grep the
+      # boot log — `cudagraph_capture_sizes: [1, 2]` is the tell; a healthy
+      # boot logs `cudagraph_mode=FULL_AND_PIECEWISE`.
+      # Negative recorded so nobody re-runs it: VLLM_MARLIN_USE_ATOMIC_ADD=0
+      # measures 247.40/249.04 — inside the default band, no effect.
+      # =====================================================================
       - --model
       - /root/.cache/huggingface/qwen3.6-35b-a3b-nvfp4
       - --served-model-name

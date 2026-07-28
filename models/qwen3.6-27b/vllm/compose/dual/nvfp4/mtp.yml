@@ -128,6 +128,16 @@ services:
       - SPEC
       # expandable_segments:True crashes boot on some setups (WSL2, some
       # NVLink rigs). Override via .env if boot fails in cuMemMap.
+      # ⚠️ WSL/WDDM: set PYTORCH_CUDA_ALLOC_CONF=expandable_segments:False.
+      # Expandable segments use CUDA VMM (cuMemCreate/cuMemMap), unsupported
+      # under WDDM — every boot dies with "RuntimeError: CUDA driver error:
+      # device not ready" in nvfp4_marlin_process -> _nvfp4_compute_scale_factor
+      # right after weights load 100%, with nvidia-smi perfectly clean (no
+      # throttle, no ECC, full VRAM free). Reads like dead silicon or a corrupt
+      # checkpoint; it is neither. True is correct on native Linux, so this is
+      # an override, not a fix: prefix the env on switch.sh — no edit needed.
+      # (#617/#765 @seanyourhighness — cost five failed boots + a wrong
+      # "the GPU is degraded" diagnosis.)
       - PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True,max_split_size_mb:512}
     shm_size: "16gb"
     ipc: host
