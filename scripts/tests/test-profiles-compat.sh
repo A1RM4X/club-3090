@@ -444,6 +444,16 @@ r = validate_estate(instances, [p.hardware["rtx-3090"]] * 4, p, nvlink_active=Fa
 assert r.valid, (r.cross_instance_failures, {k: v.reasons for k, v in r.per_instance.items()})
 PY
 
+run_test "estate self-test: official Google Gemma QAT TP=4 on 4x3090" <<'PY'
+from scripts.lib.profiles.compat import load_profiles, InstanceSpec, validate_estate
+p = load_profiles()
+instances = [
+    InstanceSpec("gemma", "vllm/gemma-31b-multi-google-qat-w4a16", (0, 1, 2, 3), 8034),
+]
+r = validate_estate(instances, [p.hardware["rtx-3090"]] * 4, p, nvlink_active=False)
+assert r.valid, (r.cross_instance_failures, {k: v.reasons for k, v in r.per_instance.items()})
+PY
+
 run_test "estate self-test: three-instance mix on 6x3090" <<'PY'
 from scripts.lib.profiles.compat import load_profiles, InstanceSpec, validate_estate
 p = load_profiles()

@@ -12,11 +12,13 @@ See [`docs/DUAL_CARD.md`](../../docs/DUAL_CARD.md) for workload-driven config pi
 
 | Config | Max ctx | Decode TPS | Best for |
 |--------|---------|----------------|----------|
-| `vllm/gemma-31b-dual` (default) ⭐ | **224K** | ~59 | General-purpose, vision + tools — **stock vLLM v0.24.0, overlay-free** |
+| `vllm/gemma-31b-dual` (default) ⭐ | **224K** | ~59 | General-purpose, vision + tools — overlay-free |
+| `vllm/gemma-31b-multi-google-qat-w4a16` 🧪 | **262K** | **~82.5** | Official Google QAT checkpoint; TP=4, 257K recall-verified |
 
 Run via:
 ```bash
-bash scripts/launch.sh --variant vllm/gemma-31b-dual     # bf16 @224K, v0.24.0, overlay-free
+bash scripts/launch.sh --variant vllm/gemma-31b-dual
+bash scripts/switch.sh --force vllm/gemma-31b-multi-google-qat-w4a16
 ```
 
 > **v0.24.0 consolidation (2026-07-02):** the 31b is now a single overlay-free **bf16** dual slug on
@@ -30,8 +32,9 @@ bash scripts/launch.sh --variant vllm/gemma-31b-dual     # bf16 @224K, v0.24.0, 
 
 ## Models
 
-- **Target:** [`Intel/gemma-4-31B-it-int4-AutoRound`](https://huggingface.co/Intel/gemma-4-31B-it-int4-AutoRound) (~21.2 GB, vision preserved)
-- **Draft (MTP):** [`google/gemma-4-31B-it-assistant`](https://huggingface.co/google/gemma-4-31B-it-assistant) (0.5B / 927 MB BF16)
+- **Default target:** [`cyankiwi/gemma-4-31B-it-qat-AWQ-INT4`](https://huggingface.co/cyankiwi/gemma-4-31B-it-qat-AWQ-INT4)
+- **Official QAT experiment:** [`google/gemma-4-31B-it-qat-w4a16-ct`](https://huggingface.co/google/gemma-4-31B-it-qat-w4a16-ct) (23.3 GB, vision preserved)
+- **Draft (deprecated MTP lanes):** [`google/gemma-4-31B-it-assistant`](https://huggingface.co/google/gemma-4-31B-it-assistant) (0.5B / 927 MB BF16)
 
 ## Key details
 

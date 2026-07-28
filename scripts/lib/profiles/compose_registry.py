@@ -643,6 +643,16 @@ COMPOSE_REGISTRY = {
         status="caveats",
         status_note="Gemma-4-31B cyankiwi QAT-AWQ-INT4 (compressed-tensors, lm_head bf16), dual TP=2 BF16 KV @224K, stock vLLM v0.24.0 OVERLAY-FREE — the consolidation 31b (folds onto vllm-stable, retires the 31b's vllm-gemma-stable dependence). BF16 (not int8-PTH): on v0.24.0 int8-PTH allocates 262K but SILENTLY craters recall past ~32K (needs #40391, open/conflicting upstream — verified 2026-07-01, both cyankiwi + w4a16 crater identically; the SAME cyankiwi weights on v0.22.0+#40391 recall clean to 112K+). bf16 KV is overlay-free + no cliff. rebench-full VALIDATED 2026-07-02 @0.95/229376: verify-full 9/9 (tools+streaming-tool-calls+reasoning clean, MTP-off), verify-stress ALL 5 ceiling rungs to 210K (91%) with healthy VRAM margin 1162MB>1024 (the 0.97/245K thin-margin flag is resolved at 0.95/224K), bench decode ~59 TPS (CV 0.1%, TTFT 69ms), soak PASS (0 err · 0 MiB growth · 0/100 silent · p50 58.7 · 99.6% retention). tie_weights dodged (lm_head excluded), gemma4 tool+reasoning parsers native (#45588). CAVEATS: (1) MTP DISABLED — Gemma-4 MTP×tool-calling broken on v0.24.0 (vLLM #39043; #42006 closed-unmerged); (2) ~224K ceiling (bf16 ~2×/tok vs int8-PTH's 262K) — int8-PTH+#40391 (262K) returns free when #40391 merges. Supersedes gemma-int8-mtp/gemma-bf16-mtp/qat-w4a16 for v0.24.0. 8-pack deferred (maintainer call).",
     ),
+    "vllm/gemma-31b-multi-google-qat-w4a16": _entry(
+        model="gemma-4-31b", weights_variant="google-qat-w4a16", workload="long-ctx-single", chat_template="gemma-canonical",
+        engine="vllm-stable", drafter=None, kv_format="bf16",
+        tp=4, max_ctx=262144, max_num_seqs=2, mem_util=0.91,
+        compose_path="models/gemma-4-31b/vllm/compose/multi4/google-qat-w4a16/base.yml",
+        default_port=8034,
+        kvcalc_key="gemma-4-31b:gemma-dual",
+        status="experimental",
+        status_note="Official google/gemma-4-31B-it-qat-w4a16-ct (compressed-tensors W4A16), TP=4 BF16 KV @262K native context on stock vLLM v0.25.1, MTP off. Live-gated 2026-07-28 on 4x RTX 3090 PCIe at 0.91: 659,922-token / 15.06-GiB KV pool (2.52x at 262,144); verify-full passed chat, tools, streaming tools, reasoning, and cascade; full stress recalled every standard rung through 240,584 tokens; final 240,583-token recheck retained 1,451 MiB physical VRAM. Canonical decode 82.44 narrative / 82.62 code TPS; 10K/90K prefill 1,037 / 726 tok/s. Continuous soak passed 25/25, zero errors/silent outputs/VRAM growth, 100% TPS retention. Two explicit 98.5% probes recalled cleanly at 257,544 prompt tokens with the same 1,451 MiB margin. Experimental pending full quality packs.",
+    ),
 
     # Gemma-4-31B unsloth QAT W4A16 (compressed-tensors int4) — QAT-int4 fidelity alt to
     # autoround-int4. Same dual / int8-PTH-KV(#40391) / assistant-MTP path as gemma-int8-mtp.
