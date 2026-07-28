@@ -22,7 +22,7 @@
 #              SILENTLY (pre-fix 8-pack 116/150, BELOW its own fp8 control,
 #              with every functional gate green). Stay on fp8 until #46329 is
 #              in the pin.
-#              consumer Blackwell has no FP4 FMHA (rtx-5090.yml, vllm#43562).
+#              (stock-pin property — see the reframed KV block below; vllm#43562.)
 #              TurboQuant *KV* (turbo4_nc) NOT viable either: it fits more ctx
 #              (160K + MTP boots where fp8 caps ~98K) but CRATERS recall — every
 #              NIAH depth misses with token-repetition on this scale-less
