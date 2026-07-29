@@ -181,7 +181,7 @@ def one(stream, rnd):
 
 print(f"\n{'round':>5} {'done':>7} {'silent':>7} {'errors':>7} {'vram_MB':>8} {'agg_t/s':>8} {'per-strm':>9} {'ttft_ms':>8} {'pf_t/s':>7}")
 vram0=vram_used_mb()
-vram_by_round=[]; mtps_by_round=[]; agg_by_round=[]; ttft_by_round=[]; pf_by_round=[]; bad=0
+vram_by_round=[]; mtps_by_round=[]; agg_by_round=[]; ttft_by_round=[]; pf_by_round=[]; bad=0; err_rounds=0
 for rnd in range(1,ROUNDS+1):
     t0=time.time()
     with cf.ThreadPoolExecutor(max_workers=N) as ex:
@@ -202,6 +202,7 @@ for rnd in range(1,ROUNDS+1):
     ttft_by_round.append(ttft_med); pf_by_round.append(pf)
     print(f"{rnd:>5} {done:>4}/{N:<2} {silent:>7} {errs:>7} {v:>8} {agg:>8.1f} {mtps:>9.1f} {ttft_med*1000:>8.0f} {pf:>7.0f}")
     if done<N or silent or errs: bad+=1
+    if errs: err_rounds+=1
 
 # VRAM: leak = post-warm growth (round 2 baseline), NOT the expected cold->warm fill.
 warm_i=1 if ROUNDS>=3 else 0
@@ -216,6 +217,15 @@ report_tps=mtps_by_round[-1] if mtps_by_round else 0.0
 # aggregate = summed completion tokens / wall per round (what "total rig
 # throughput at N agents" means); steady-state = last round, like per-stream.
 report_agg=agg_by_round[-1] if agg_by_round else 0.0
+# An aggregate computed over a round that had errors is not a throughput number:
+# failed streams contribute toks=0 while their prefill still counts in the wall,
+# so the figure is (survivors' tokens)/(full round wall) and reads 5-10x low. It
+# has been quoted out of context as a measured regression before. Report NaN so a
+# broken arm cannot be mistaken for a slow one — clean= and the FAIL verdict below
+# already carry the diagnosis.
+if err_rounds:
+    report_agg=float("nan")
+    report_tps=float("nan")
 warm_tps=mtps_by_round[1:] if ROUNDS>=4 else mtps_by_round
 if len(warm_tps)>=3 and warm_tps[0]>0:
     early=statistics.median(warm_tps[:2]); late=statistics.median(warm_tps[-2:])
