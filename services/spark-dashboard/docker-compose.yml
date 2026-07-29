@@ -23,7 +23,7 @@
 #                           silently disables container-based engine discovery)
 services:
   spark-dashboard:
-    image: ${SPARK_DASHBOARD_IMAGE:-ghcr.io/niklasfrick/spark-dashboard:v0.11.0}
+    image: ${SPARK_DASHBOARD_IMAGE:-ghcr.io/niklasfrick/spark-dashboard:v0.13.0}
     container_name: spark-dashboard
     restart: unless-stopped
 
@@ -45,11 +45,10 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
     group_add:
-      - "${DOCKER_GID:-999}"
+      - "${DOCKER_GID:-984}"
 
     environment:
       - SPARK_DASHBOARD_PORT=${SPARK_DASHBOARD_PORT:-3010}
       - SPARK_DASHBOARD_BIND=${SPARK_DASHBOARD_BIND:-0.0.0.0}
       - SPARK_DASHBOARD_POLL_INTERVAL=${SPARK_DASHBOARD_POLL_INTERVAL:-1000}
-      - SPARK_DASHBOARD_GPU_INDEX=${SPARK_DASHBOARD_GPU_INDEX:-0}
       - RUST_LOG=${RUST_LOG:-info}
