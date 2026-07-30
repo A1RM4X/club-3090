@@ -86,10 +86,12 @@ def delta(r, key):
     except Exception: return v
 
 VIEWS = {
- "perf":  [("arm","arm"),("reps","reps"),("N","N"),("shape","shape"),("pc","pcache"),("L","_layers"),("ctx req","ctx_req"),("ctx/slot","ctx_slot"),
+ "perf":  [("arm","arm"),("reps","reps"),("N","N"),("shape","shape"),("pc","pcache"),("L","_layers"),("ctx","ctx_req"),
            ("drafter","drafter"),("n-max","nmax"),("MB","max_batch"),
            ("no-spec agg","_bagg"),("agg","_dagg"),("per-strm","strm"),("accept","accept"),
-           ("no-spec TTFT","_bttft"),("TTFT","ttft_ms"),("err","errors"),("status","status")],
+           ("TTFT","ttft_ms"),
+           ("pool","pool_slots"),("hits","hits_pct"),("evict","evicts"),
+           ("err","errors"),("status","status")],
  "bw":    [("arm","arm"),("reps","reps"),("N","N"),("n-max","nmax"),
            ("PCIe rx MB/s","rxpci"),("PCIe tx MB/s","txpci"),("SM %","sm_pct"),
            ("memctl %","memctl_pct"),("CPU %","cpu_pct"),("RAM rd MB/s*","ram_rd_mbps"),
