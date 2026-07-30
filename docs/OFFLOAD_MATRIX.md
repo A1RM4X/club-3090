@@ -86,11 +86,13 @@ The dimensions are **not independent**. Measuring a downstream one on an unsettl
 
 Sweep top-down, in stages, rather than one giant product. `PLAN=1` prints the staged sequence. The tool warns when a sweep inverts this order.
 
-### 3b. Never compare two single-boot arms
+### 3b. Repeat before you rank
 
-On the reference rig, **within a boot** the per-request decode rate is essentially noise-free (0.9% spread across four requests). **Between boots at identical config it is 12–22%.** That is large enough to invert a ranking.
+On the reference rig, **within a boot** the per-request decode rate is essentially noise-free (0.9% spread across four requests). **Between boots at identical config it is low single digits** — three consecutive boots of the same arm landed within 0.5% of each other (37.24 / 37.09 / 37.26 tok/s).
 
-`REPS` re-boots per rep and the renderer reports **medians** — use `REPS≥3` for any decision. A single boot is fine for "does this work", never for "which is faster".
+So a single boot can resolve a large effect, but it cannot resolve a small one, and it gives you no way to tell which case you are in. `REPS` re-boots per rep and the renderer reports **medians** — use `REPS≥3` for any ranking decision.
+
+> **What actually bites is not boot noise — it is a config difference you did not notice.** The 12–22% swings that motivated this section originally turned out to be an arm running with the expert cache silently disabled (§5a), not variance. Before attributing a gap to noise, check `status`, the pool lines, and §5's trap list. Noise on this rig is small; silent misconfiguration is not.
 
 ### 3c. Workload shape flips the *sign* of speculative results
 
