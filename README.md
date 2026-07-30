@@ -292,6 +292,7 @@ club-3090/
 │   ├── verify-stress.sh                   boundary-case stress test (longctx ladder + tool prefill OOM, ~5-10 min)
 │   ├── soak-test.sh                       runtime VRAM accretion / multi-turn agent traffic (~10-30 min, opt-in)
 │   ├── bench.sh                           canonical TPS bench
+│   ├── offload-matrix.sh                  CPU-offloaded MoE config sweep (llama.cpp forks)
 │   └── report.sh                          paste-ready triage report (run before filing a bug or sharing bench numbers)
 └── tools/
     └── charts/                            re-generate docs/img/* SVGs and PNG exports (matplotlib)
