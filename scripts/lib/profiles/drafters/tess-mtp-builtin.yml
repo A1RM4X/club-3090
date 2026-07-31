@@ -4,7 +4,10 @@ display_name: Tess-4-27B built-in MTP head (vLLM)
 spec_method: mtp
 model_compat:
   - tess-4-27b
-n_default: 5
+# Lowered 5 -> 3 on 2026-07-31, PRECAUTIONARY: the architecturally-identical
+# ThinkingCap (same qwen35-dense family, same mtp.fc@BF16 head) crashes at
+# n>=4 (club-3090 #758). No Tess crashes reported.
+n_default: 3
 n_max: 8
 download: false
 vram_footprint_gb: 0
@@ -19,7 +22,7 @@ status: production
 # (83.8/84.5 — tail accept collapses to 0.12–0.36). Prose is break-even at
 # every n (tail dies ~0.2 by pos 5); the win is code/structured output.
 # No separate drafter weights → download: false. {N} substituted from
-# n_default or the compose's ${SPEC_N:-5} override.
+# n_default or the compose's ${SPEC_N:-3} override.
 # NOT valid for the NVFP4 slug (dead head there — export, not head).
 speculative_config_template: '{"method":"mtp","num_speculative_tokens":{N}}'
 local_model_path: null
