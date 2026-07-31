@@ -1,0 +1,164 @@
+#!/usr/bin/env python3
+"""Fake llama-server for the offload-matrix tier-1 suite.
+
+Reproduces the two things the sweep actually consumes:
+  1. the LOG LINES it greps for status/metrics (written to stdout; the sweep
+     redirects that into the arm log)
+  2. the HTTP surface the inline driver drives: GET /health and a streaming
+     POST /v1/chat/completions emitting `data: {...}` SSE with
+     choices[0].delta.content, terminated by `data: [DONE]`.
+
+Every log string below is one the sweep greps for. Changing a string here without
+changing the sweep (or vice versa) is exactly the drift the suite exists to catch,
+so keep this file and the sweep's grep patterns in lockstep.
+
+  [moe-cache] enabled:            -> cache_enabled
+  ... slots=N                     -> pool_slots (SUMMED over all pool lines, no tail)
+  hits=H/T                        -> hits_pct + misses
+  evictions=N                     -> evicts (tailed by NGPU)
+  expert=N KiB                    -> avg expert size, feeds derived ram_rd_mbps
+  bypassing cache                 -> INVALID_BYPASS
+  no cache budget                 -> reason text for CACHE_DISABLED
+  reserve=N MiB                   -> reserve figure in that message
+  n_ctx_seq = N                   -> ctx_slot
+  draft acceptance = F            -> accept
+  eval time ... N tokens per second -> strm
+
+FAKE_SCENARIO:
+  healthy         normal 2-GPU run, cache allocated, tokens served
+  bypass          healthy + 'bypassing cache' lines           -> INVALID_BYPASS
+  no_budget_all   no 'enabled:' line at all                   -> CACHE_DISABLED
+  partial_budget  'enabled:' PRINTS but one GPU got no pool   -> the known HOLE:
+                  reads OK today; must read CACHE_DISABLED once the detector
+                  compares pool-line count against device count (issue #824)
+  no_tokens       healthy log, zero content deltas            -> NO_TOKENS
+  req_errors      completions return HTTP 500                 -> REQ_ERRORS
+  boot_fail       exit non-zero before listening              -> BOOT_FAIL
+  hang            never answers /health                       -> TIMEOUT
+"""
+import json, os, sys, time, threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+SC    = os.environ.get("FAKE_SCENARIO", "healthy")
+NGPU  = int(os.environ.get("FAKE_NGPU", "2"))
+TOKS  = int(os.environ.get("FAKE_TOKENS", "24"))
+SLOTS = [int(s) for s in os.environ.get("FAKE_SLOTS", "742,337").split(",")]
+
+def log(s):
+    sys.stdout.write(s + "\n"); sys.stdout.flush()
+
+# --- parse only the args we care about -------------------------------------
+argv = sys.argv[1:]
+
+# --help is a CAPABILITY PROBE, not decoration. The sweep refuses to run against
+# anything that does not look like llama.cpp (no --n-gpu-layers/--override-tensor)
+# and turns the whole cache dimension off unless --moe-cache appears. FAKE_NO_CACHE
+# lets a test assert that no-moe-cache builds degrade instead of dying.
+if "--help" in argv or "-h" in argv:
+    print("usage: llama-server [options]")
+    print("  -ngl, --n-gpu-layers N")
+    print("  -ot,  --override-tensor PATTERN")
+    print("  -ctk, --cache-type-k TYPE   (f16, q8_0, q4_0, turbo4)")
+    if os.environ.get("FAKE_NO_CACHE", "0") != "1":
+        print("  --moe-cache N               expert cache pool size in MiB")
+    sys.exit(0)
+
+def opt(name, default=None):
+    return argv[argv.index(name) + 1] if name in argv else default
+host = opt("--host", "127.0.0.1")
+port = int(opt("--port", "8080"))
+ctx  = int(opt("-c", "4096"))
+
+# --- boot log ---------------------------------------------------------------
+log("build: fake (tier-1 fixture)")
+log(f"llama_context: n_ctx = {ctx}")
+log(f"llama_context: n_ctx_seq = {ctx}")
+
+if SC == "boot_fail":
+    log("ggml_backend_cuda_buffer_type_alloc_buffer: failed to allocate")
+    log("terminate called after throwing an instance of 'std::runtime_error'")
+    sys.exit(1)
+
+if SC == "no_budget_all":
+    for g in range(NGPU):
+        log(f"[moe-cache] CUDA{g} has no cache budget after 3072 MiB reserve")
+elif SC == "partial_budget":
+    # THE HOLE. 'enabled:' still prints, so a presence-check scores this healthy,
+    # while CUDA0 actually runs with no pool at all. Measured live 2026-07-30.
+    log("[moe-cache] enabled: reserve=3072 MiB admit=1/64")
+    log("[moe-cache] CUDA0 has no cache budget after 3072 MiB reserve")
+    log(f"[moe-cache] CUDA1 pool[0]: slots={SLOTS[0]} expert=1536 KiB")
+else:
+    log("[moe-cache] enabled: reserve=1536 MiB admit=1/64")
+    for g in range(NGPU):
+        log(f"[moe-cache] CUDA{g} pool[0]: slots={SLOTS[g % len(SLOTS)]} expert=1536 KiB")
+
+log(f"main: server is listening on http://{host}:{port} - starting the main loop")
+log("llama_server: listening on " + f"{host}:{port}")
+
+# --- periodic stats, so hits/misses/evictions have something to scrape ------
+def stats_loop():
+    h = 0
+    while True:
+        time.sleep(1.0)
+        h += 1000
+        for g in range(NGPU):
+            log(f"[moe-cache] CUDA{g} hits={h}/{int(h*1.35)} evictions={h//8} "
+                f"expert=1536 KiB skips=0 fill-fail=0")
+        if SC == "bypass":
+            log("[moe-cache] MAX_BATCH=8 exceeded, bypassing cache for this batch")
+
+if SC != "hang":
+    threading.Thread(target=stats_loop, daemon=True).start()
+
+# --- HTTP -------------------------------------------------------------------
+class H(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+    def log_message(self, *a): pass          # keep the arm log clean
+
+    def do_GET(self):
+        if self.path.startswith("/health"):
+            self.send_response(200); self.send_header("Content-Length", "2")
+            self.end_headers(); self.wfile.write(b"ok")
+        else:
+            self.send_response(404); self.send_header("Content-Length", "0"); self.end_headers()
+
+    def do_POST(self):
+        n = int(self.headers.get("Content-Length", 0) or 0)
+        body = self.rfile.read(n)
+        if SC == "req_errors":
+            self.send_response(500); self.send_header("Content-Length", "0"); self.end_headers()
+            return
+        try:
+            gen = int(json.loads(body).get("max_tokens", TOKS))
+        except Exception:
+            gen = TOKS
+        emit = 0 if SC == "no_tokens" else min(gen, TOKS)
+
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Transfer-Encoding", "chunked")
+        self.end_headers()
+        def chunk(s: str):
+            b = s.encode()
+            self.wfile.write(f"{len(b):X}\r\n".encode() + b + b"\r\n"); self.wfile.flush()
+        try:
+            for i in range(emit):
+                d = {"choices": [{"delta": {"content": f"tok{i} "}}]}
+                chunk("data: " + json.dumps(d) + "\n\n")
+                time.sleep(0.002)
+            chunk("data: [DONE]\n\n")
+            chunk("")                              # terminating 0-length chunk
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+        # per-request timings the sweep scrapes for server-side decode TPS
+        log(f"print_timing: eval time = 1000.00 ms / {max(emit,1)} tokens "
+            f"( 1.00 ms per token, {max(emit,1)*2.5:.2f} tokens per second)")
+        log("draft acceptance = 0.951")
+
+if SC == "hang":
+    while True:
+        time.sleep(3600)
+
+srv = ThreadingHTTPServer((host, port), H)
+srv.serve_forever()
