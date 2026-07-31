@@ -4,12 +4,18 @@
 #              weights + mtp.fc@BF16 + linear_attn.in_proj@BF16 via
 #              extra_config; ~18 GB. Native Marlin WNA16 on Ampere)
 #   Topology:  Dual 3090 PCIe (TP=2, no NVLink)
-#   Drafter:   MTP n=5 built-in (SPEC_N override) — the WORKING head. The
+#   Drafter:   MTP n=3 built-in (SPEC_N override) — the WORKING head. The
 #              NVFP4 sibling's 0% accept was the EXPORT (4-bit'd mtp.fc),
-#              not the head — settled 2026-07-17, club #662. n-sweep knee at
-#              n=5: prose break-even, code +49%; n=6/8 regress (tail accept
-#              collapses). DFlash alternative is upstream-blocked on this
-#              hybrid family (vllm#40898 — mixed layer_types).
+#              not the head — settled 2026-07-17, club #662.
+#              ⚠️ DEFAULT LOWERED 5 -> 3 on 2026-07-31, PRECAUTIONARY: the
+#              architecturally-identical ThinkingCap (same qwen35-dense family,
+#              same mtp.fc@BF16 head) crashes the engine at n>=4 on 3 rigs
+#              (#758). Tess has NO reported crashes — this is prophylactic, not
+#              evidence of a Tess fault. n-sweep knee WAS n=5 (prose break-even,
+#              code +49%; n=6/8 regress); the TPS numbers below are n=5-measured
+#              and n=3 is unbenched here. SPEC_N=5 restores the benched config.
+#              DFlash alternative is upstream-blocked on this hybrid family
+#              (vllm#40898 — mixed layer_types).
 #   KV:        fp8_e4m3 (validated); prefix caching ON by default (#736 —
 #              vllm#48375 vendored; Tess is a qwen3_5 HYBRID, 48 linear + 16
 #              full attention; hybrid prefix caching via mamba align mode)
@@ -171,10 +177,11 @@ services:
       - --tool-call-parser
       - qwen3_coder
       # The revived built-in MTP head (BF16-preserved in this checkpoint).
-      # n=5 = the measured knee; n=6/8 REGRESS (see header). SPEC_N=0 is NOT
+      # n=5 WAS the measured knee, but the default is now 3 — see the
+      # precautionary #758 note in the header. n=6/8 REGRESS. SPEC_N=0 is NOT
       # supported here — comment the block out to run spec-off.
       - --speculative-config
-      - '{"method":"mtp","num_speculative_tokens":${SPEC_N:-5}}'
+      - '{"method":"mtp","num_speculative_tokens":${SPEC_N:-3}}'
       - --override-generation-config
       - '{"temperature":${TEMP:-${TEMPERATURE:-0.6}},"top_p":${TOP_P:-0.95},"top_k":${TOP_K:-20},"min_p":${MIN_P:-0.0},"repetition_penalty":${REPEAT_PENALTY:-1.0}}'
       - --host

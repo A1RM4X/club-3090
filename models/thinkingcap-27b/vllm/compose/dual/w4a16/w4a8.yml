@@ -4,16 +4,30 @@
 #              INT4 g128 + mtp.fc/linear_attn.in_proj@BF16; VL reasoning
 #              fine-tune of Qwen3.6-27B. ~18.5 GB)
 #   Topology:  Dual 3090 PCIe (TP=2, no NVLink — auto-detected via NVLINK_MODE)
-#   Drafter:   MTP n=5 built-in (SPEC_N override) — the working head (mtp.fc@BF16,
-#              same recipe as Tess). n-sweep knee at n=5: code +64% (65->107 tok/s),
-#              prose break-even, accept-len 4.36-5.0 / 67-80%; n=6/8 regress.
+#   Drafter:   MTP n=3 built-in (SPEC_N override) — the working head (mtp.fc@BF16,
+#              same recipe as Tess). ⚠️ DEFAULT LOWERED 5 -> 3 on 2026-07-31: n=5
+#              crashes the engine under sustained multi-turn load (#758, 3 rigs).
+#              n=3 is community-validated stable (12 h + multi-session daily).
+#              The TPS numbers below were measured at n=5 and DO NOT describe the
+#              current default — n=3 is unbenched on the reference rig.
+#              n-sweep knee was n=5: code +64% (65->107 tok/s), prose break-even,
+#              accept-len 4.36-5.0 / 67-80%; n=6/8 regress. SPEC_N=5 restores the
+#              benched config at the documented crash risk; SPEC_N=0 disables spec.
 #   KV:        fp8_e4m3
 #   Vision:    base is VL-capable (tower resident) — validation is TEXT-ONLY
 #   Max ctx:   262144 (full native — dual card frees the KV headroom the
 #              single-card W4A8 lacked: single topped out ~76K)
 #   Genesis:   N/A — Genesis is Qwen3-Next-specific (this is qwen3_5)
 #   Status:    ⚠️ Production w/ caveats
-#   Caveats:   • THIN VRAM margin at the 262K ceiling: 69 MB free with MTP n=5
+#   Caveats:   • ⚠️ MTP n>=4 CRASHES THE ENGINE under sustained multi-turn load
+#                (#758). The drafter intermittently emits all-`-1` draft token IDs
+#                -> out-of-bounds embedding gather -> cudaErrorIllegalAddress ->
+#                dead worker. Independent of context depth (seen at ~25K after a
+#                clean 240K prefill) and of VRAM (lowering util and max-model-len
+#                both changed nothing). n=5 dies within 1-2 sessions, n=4
+#                eventually; n=3 and n=0 are stable. Hit on 3 rigs incl. 2x 5090.
+#                DEFAULT IS NOW n=3 — set SPEC_N=5 only if you accept the crash.
+#              • THIN VRAM margin at the 262K ceiling: 69 MB free with MTP n=5
 #                (MTP eats ~1.2 GB headroom; no-MTP ladder had 1245 MB). NIAH
 #                recall is CLEAN to 240K — but sustained agents at MAX ctx should
 #                size below 262K or lower util. Same class as Nemotron.
@@ -79,7 +93,7 @@ services:
       - ../../../cache/triton:/root/.triton/cache
     environment:
       - VLLM_MARLIN_INPUT_DTYPE=int8
-      - SPEC_N=${SPEC_N:-5}
+      - SPEC_N=${SPEC_N:-3}
       - NVIDIA_VISIBLE_DEVICES=${NVIDIA_VISIBLE_DEVICES:-all}
       - CUDA_VISIBLE_DEVICES
       - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN:-}
@@ -111,9 +125,9 @@ services:
         bash /etc/club3090/pr48375/install.sh || exit 1
         echo "[w4a8] VLLM_MARLIN_INPUT_DTYPE=$${VLLM_MARLIN_INPUT_DTYPE}"
         SPEC=""
-        if [ "$${SPEC_N:-5}" -gt 0 ] 2>/dev/null; then
-          SPEC="--speculative-config {\"method\":\"mtp\",\"num_speculative_tokens\":$${SPEC_N:-5}}"
-          echo "[mtp] SPEC_N=$${SPEC_N:-5}"
+        if [ "$${SPEC_N:-3}" -gt 0 ] 2>/dev/null; then
+          SPEC="--speculative-config {\"method\":\"mtp\",\"num_speculative_tokens\":$${SPEC_N:-3}}"
+          echo "[mtp] SPEC_N=$${SPEC_N:-3}"
         else
           echo "[mtp] SPEC_N=0 -> no speculative decoding"
         fi
