@@ -565,8 +565,18 @@ PY
   # Found live 2026-07-30: the engine's DEFAULT reserve (3072 MiB) left no budget at
   # 262K ctx, logging "CUDA0 has no cache budget after 3072 MiB reserve" -- a string the
   # bypass grep does not match. Both arms reported OK and ran ~12-22% slow.
-  local cache_enabled=0 reserve_seen=""
+  local cache_enabled=0 reserve_seen="" pool_lines=0 cache_partial=0
   command grep -q '\[moe-cache\] enabled:' "$log" && cache_enabled=1
+  # PER-DEVICE budget failure. '[moe-cache] enabled:' still prints when only SOME devices
+  # got a pool, so a presence check scores the arm healthy while it measures a half-cached
+  # path -- measured live 2026-07-30 (CUDA0 no budget, CUDA1 a 69-slot pool, status OK).
+  # The pool-init lines are ground truth: one 'slots=' line per device when fully
+  # allocated. Fewer than NGPU of them means the cache is NOT what was requested.
+  pool_lines=$(command grep -c 'slots=' "$log")
+  if (( cache_enabled == 1 && pool_lines < ${NGPU:-2} )); then
+    cache_enabled=0
+    cache_partial=1
+  fi
   reserve_seen=$(command grep -oE 'reserve=[0-9]+ MiB|after [0-9]+ MiB reserve' "$log" \
                  | command grep -oE '[0-9]+' | tail -1)
   local nobudget; nobudget=$(command grep -c 'no cache budget' "$log")
@@ -580,7 +590,12 @@ PY
   if (( HAS_MOE_CACHE )) && [[ "$cache" != 0 ]] && (( cache_enabled == 0 )); then
     status="CACHE_DISABLED"
     echo "  !! expert cache was REQUESTED (--moe-cache $cache) but NEVER ALLOCATED."
-    if (( nobudget > 0 )); then
+    if (( cache_partial )); then
+      echo "     reason: PARTIAL allocation -- only $pool_lines of ${NGPU:-2} devices got a"
+      echo "     pool (the 'enabled:' line still prints in this state). One GPU ran with no"
+      echo "     cache at all, so this arm measured a half-cached path. Lower the reserve"
+      echo "     (RESERVE_MB=1536) so every device fits a pool."
+    elif (( nobudget > 0 )); then
       echo "     reason: no budget after ${reserve_seen:-?} MiB reserve. Lower the reserve"
       echo "     (RESERVE_MB=1536) or reduce ctx/pool so the pool fits."
     else

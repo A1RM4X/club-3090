@@ -1,0 +1,76 @@
+#!/usr/bin/env python3
+"""Fake nvidia-smi for the offload-matrix tier-1 suite.
+
+Implements exactly the two invocations the sweep makes, and nothing else:
+
+  nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits
+      -> one integer MiB per GPU, one per line
+
+  nvidia-smi dmon -s ut -d 1 [-c N]
+      -> the 9-column utilisation/PCIe stream. The sweep averages it with
+         awk '!/^#/ && NF>=9 {s+=$2;m+=$3;r+=$8;t+=$9}', i.e.
+         $2=sm%  $3=memctl%  $8=rxpci MB/s  $9=txpci MB/s
+         Fewer than 9 fields on a data line and every bandwidth column
+         silently becomes '-', so the width matters.
+
+Knobs (env):
+  FAKE_NGPU        number of GPUs (default 2)
+  FAKE_VRAM_MIB    comma list of per-GPU memory.used, or one value for all
+  FAKE_SM / FAKE_MEMCTL / FAKE_RXPCI / FAKE_TXPCI   dmon values
+"""
+import os, sys, time
+
+NGPU = int(os.environ.get("FAKE_NGPU", "2"))
+
+def vram_list():
+    raw = os.environ.get("FAKE_VRAM_MIB", "12000")
+    vals = [v.strip() for v in raw.split(",") if v.strip()]
+    return (vals * NGPU)[:NGPU] if len(vals) < NGPU else vals[:NGPU]
+
+argv = sys.argv[1:]
+
+# --- query-gpu form ---
+if any(a.startswith("--query-gpu") for a in argv):
+    field = next(a for a in argv if a.startswith("--query-gpu")).split("=", 1)[1]
+    for v in vram_list():
+        if "memory.used" in field:
+            print(v)
+        elif "utilization.gpu" in field:
+            print(os.environ.get("FAKE_SM", "40"))
+        else:
+            print("0")
+    sys.exit(0)
+
+# --- dmon form ---
+if "dmon" in argv:
+    count = None
+    if "-c" in argv:
+        try: count = int(argv[argv.index("-c") + 1])
+        except Exception: count = None
+    delay = 1
+    if "-d" in argv:
+        try: delay = int(argv[argv.index("-d") + 1])
+        except Exception: delay = 1
+
+    sm  = os.environ.get("FAKE_SM", "40")
+    mem = os.environ.get("FAKE_MEMCTL", "25")
+    rx  = os.environ.get("FAKE_RXPCI", "1200")
+    tx  = os.environ.get("FAKE_TXPCI", "800")
+
+    print("# gpu    sm   mem   enc   dec   jpg   ofa  rxpci  txpci", flush=True)
+    print("# Idx     %     %     %     %     %     %   MB/s   MB/s", flush=True)
+    n = 0
+    try:
+        while count is None or n < count:
+            for g in range(NGPU):
+                # 9 fields exactly — the sweep requires NF>=9
+                print(f"{g:5d} {sm:>5} {mem:>5} {0:5d} {0:5d} {0:5d} {0:5d} {rx:>6} {tx:>6}", flush=True)
+            n += 1
+            if count is None or n < count:
+                time.sleep(delay)
+    except (KeyboardInterrupt, BrokenPipeError):
+        pass
+    sys.exit(0)
+
+# anything else: behave like a tool that exists but was asked something unknown
+sys.exit(0)

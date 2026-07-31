@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Render offload-matrix-results.tsv.
 
-The full row is 29 columns, so this offers VIEWS rather than one unreadable table:
+The full row is 34 columns, so this offers VIEWS rather than one unreadable table:
 
   --perf   (default) throughput / latency / acceptance, with paired no-spec deltas
   --bw     bandwidth + utilisation: PCIe rx/tx, SM%, mem-controller%, CPU%, RAM read
