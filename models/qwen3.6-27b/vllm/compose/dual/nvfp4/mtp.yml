@@ -18,10 +18,62 @@
 #              no decode cost on this checkpoint (#619 @seanyourhighness).
 #              Re-test when #46329 lands in the pin; fp8/e4m3 until then.
 #   Vision:    yes (full VLM — vision tower + preprocessors ship in the repo)
-#   Max ctx:   262K (kv-calc: ~22.1 GB/card on 2× 32 GB @ util 0.92 — 75% of
-#              budget, comfortable; ~11 GB/card weights vs dual-max's 14.5)
+#   Max ctx:   262K RETAINED, but DERATED around it (2026-08-01, #838) — util
+#              0.85 + batched-tokens 2048 on 2× 32 GB. The old "~22.1 GB/card
+#              @ util 0.92 = 75% of budget, comfortable" reading was AUTHORED
+#              BLIND and the first native 2× 5090 boot falsified it: the process
+#              reached 31.08 / 31.37 GiB and OOMed allocating 96.00 MiB in
+#              `chunk_gated_delta_rule_fwd_h` mid-request, ~2-3 GiB past what
+#              memory profiling had accounted for (upstream vllm#44209 — the
+#              planner under-counts the GDN activation peak; capture/serve can
+#              OOM AFTER /health already returned 200).
+#              ⤷ WHY THESE TWO KNOBS, and why NOT a ctx cut:
+#                • --max-num-batched-tokens is the real lever. The GDN prefill
+#                  scratch is linear in BATCHED tokens, not in max_ctx:
+#                  h = k.new_empty(B, NT, H, V, K) = batched × 12 KiB at TP=2
+#                  on this model (48 v-heads / 2 ranks × 128 × 128 × 2 B,
+#                  FLA chunk 64), plus v_new and o at ~6 KiB/token each. At
+#                  8192 that is exactly the 96.00 MiB that failed; at 2048 it
+#                  is 24 MiB. Cost is TTFT on long prefills — NOT context.
+#                • util 0.92 → 0.85 gives back ~2.2 GiB/card for the transients
+#                  profiling missed. Mirrors the single-card sibling's #613
+#                  derate (which pinned 65K + util 0.85 for this same class:
+#                  "KV reservation left no room for draft head + cudagraphs +
+#                  GDN prefill scratch").
+#                • Cutting MAX_MODEL_LEN would NOT have helped: vLLM sizes the
+#                  KV pool from FREE MEMORY, not from max_model_len × seqs. On
+#                  that boot the pool was 968,145 tokens while only 262,144 × 2
+#                  = 524,288 are addressable — 1.85× over-provisioned, ~7.7 GiB
+#                  per card that config could never reach. To reclaim it, pin
+#                  the pool: KV_CACHE_MEMORY_BYTES=10737418240 (10 GiB/card;
+#                  ~9.1 GiB is the arithmetic need at 18,710 B/token measured).
+#              ⚠️ THESE NUMBERS ARE DESK-DERIVED, NOT MEASURED. They come from
+#                 the #838 boot log plus the kernel source — this rig is 2× 24 GB
+#                 sm_86 and cannot boot the 32 GB envelope. @paulp83 (2× 5090)
+#                 is the validator; a confirm-or-correct from that rig replaces
+#                 this block. Report either way.
+#              ~11 GB/card weights vs dual-max's 14.5.
 #   Genesis:   none — intentionally Genesis-free
 #   Status:    🧪 Experimental
+#   Upstream-risk:  • ⚠️ MTP × hybrid-GDN wild write — vllm#50021, OPEN and LIVE IN THIS PIN.
+#                The GDN spec-decode path builds a state-block index from an UNBOUNDED
+#                accepted-token count; a zero/stale count dereferences a wild address →
+#                `CUDA error: unspecified launch failure` + Xid 13/31 and a dead worker,
+#                typically after minutes of agent-shaped traffic rather than at boot. Not
+#                quant-, topology- or depth-specific: hit on Ampere+Ada (#758) and on
+#                2× 5090 across NVFP4 AND W4A8 alike (#838). The vendored pr48375 fixes
+#                vllm#43559 (corruption) and does NOT cover this fault.
+#                MITIGATION: run the drafter off — SPEC=off. Lower n cuts
+#                frequency, NOT exposure (#758 called n=3 stable; #838 crashed AT n=3). Clears when
+#                #50021 merges and a pin bump inherits it — v0.26.0 PREDATES it.
+#                Detail + re-test trigger: docs/UPSTREAM.md.
+#              ⤷ NOT a Status downgrade. This is an OPEN UPSTREAM defect, not a
+#                property of this config, so Status is left as-is; whether it
+#                warrants moving to ⚠️ is a maintainer call (flagged here,
+#                deliberately not taken). Recorded under `Upstream-risk:` rather
+#                than `Caveats:` because AGENTS.md reserves `Caveats:` for the
+#                ⚠️/🐣/👁️/⏸️/🗑️ statuses — keeping the Status↔Caveats contract
+#                intact instead of silently widening it.
 #   Best for:  max-ctx Qwen on Blackwell/Hopper pairs at 2.5× less weight
 #              memory than bf16 — pending first community validation
 # ---------------------------------------------------------------------------
@@ -47,6 +99,12 @@
 #   - Cliff 2 (DeltaNet GDN activation spikes at >50K single-prompt) was
 #     measured on Ampere; unknown on Blackwell. VLLM_ENFORCE_EAGER=1 is the
 #     mitigation if you see mid-generation hangs at depth.
+#     ✅ CONFIRMED-ISH ON BLACKWELL 2026-08-01 (#838): a 2× 5090 boot did OOM in
+#     the GDN activation path — but as a hard `torch.OutOfMemoryError` inside
+#     `chunk_gated_delta_rule_fwd_h`, NOT as the mid-generation hang this note
+#     predicted, and it is driven by BATCHED tokens rather than prompt depth.
+#     Envelope derated accordingly (see Max ctx). Prediction kept, not deleted,
+#     so the reasoning trail stays intact — but read it with that correction.
 #   - froggeric chat-template: fixes 7 upstream Qwen3.6 template bugs; the
 #     NVFP4 repo ships the same base template, so it applies — but it has only
 #     been exercised against the AutoRound/FP8 tiers.
@@ -127,7 +185,11 @@ services:
       - VLLM_USE_DEEP_GEMM
       # SPEC=off disables the built-in MTP drafter at boot (bare passthrough;
       # tight-RAM / spec-dec-fails mitigation, #617). Default = MTP on.
+      # ⚠️ SPEC=off is ALSO the mitigation for vllm#50021 (see Caveats).
       - SPEC
+      # Optional per-card KV-pool pin (bytes). Unset = stock auto-sizing.
+      # See the entrypoint note + Max ctx header block (#838 / vllm#44209).
+      - KV_CACHE_MEMORY_BYTES
       # expandable_segments:True crashes boot on some setups (WSL2, some
       # NVLink rigs). Override via .env if boot fails in cuMemMap.
       # ⚠️ WSL/WDDM: set PYTORCH_CUDA_ALLOC_CONF=expandable_segments:False.
@@ -165,12 +227,24 @@ services:
         else
           echo "[nvfp4] SPEC=off — MTP drafter disabled (loads lighter; no spec-dec)" >&2
         fi
+        # KV_CACHE_MEMORY_BYTES pins the KV pool per card instead of letting
+        # vLLM size it from free memory (#838). vLLM does NOT derive the pool
+        # from max_model_len × max_num_seqs, so a 262K/2-seq config can be
+        # handed ~1.85x more pool than it can ever address while the GDN
+        # prefill scratch OOMs — the upstream-recommended workaround on
+        # vllm#44209. Unset = stock auto-sizing. 10 GiB/card covers
+        # 262144 × 2 tokens at the 18,710 B/token measured on a 2× 5090 boot.
+        KV_ARGS=()
+        if [ -n "$${KV_CACHE_MEMORY_BYTES:-}" ]; then
+          KV_ARGS=(--kv-cache-memory-bytes "$${KV_CACHE_MEMORY_BYTES}")
+          echo "[nvfp4] KV pool pinned to $${KV_CACHE_MEMORY_BYTES} bytes/card" >&2
+        fi
         # NVLink auto-detection (sets NCCL env vars, _NVLINK_ENABLED).
         source /etc/club3090/detect_nvlink.sh
         if [ "$${_NVLINK_ENABLED:-0}" = "1" ]; then
-          exec vllm serve $${VLLM_ENFORCE_EAGER:+--enforce-eager} "$$@" "$${SPEC_ARGS[@]}"
+          exec vllm serve $${VLLM_ENFORCE_EAGER:+--enforce-eager} "$$@" "$${SPEC_ARGS[@]}" "$${KV_ARGS[@]}"
         else
-          exec vllm serve $${VLLM_ENFORCE_EAGER:+--enforce-eager} --disable-custom-all-reduce "$$@" "$${SPEC_ARGS[@]}"
+          exec vllm serve $${VLLM_ENFORCE_EAGER:+--enforce-eager} --disable-custom-all-reduce "$$@" "$${SPEC_ARGS[@]}" "$${KV_ARGS[@]}"
         fi
       - --
     command:
@@ -197,12 +271,21 @@ services:
       - "${PP:-1}"
       - --max-model-len
       - "${MAX_MODEL_LEN:-262144}"
+      # 0.92 → 0.85 (2026-08-01, #838): the first native 2× 5090 boot ran
+      # 31.08/31.37 GiB and OOMed in the GDN prefill scratch ~2-3 GiB past the
+      # profiled budget (vllm#44209). Mirrors the single sibling's #613 derate.
       - --gpu-memory-utilization
-      - "${GPU_MEMORY_UTILIZATION:-0.92}"
+      - "${GPU_MEMORY_UTILIZATION:-0.85}"
       - --max-num-seqs
       - "2"
+      # 8192 → 2048 (2026-08-01, #838). THE lever for this failure: the GDN
+      # chunked-prefill scratch is linear in BATCHED tokens, not max_ctx —
+      # h = batched × 12 KiB/card at TP=2 here, so 8192 → 96.00 MiB (exactly
+      # the allocation that failed) and 2048 → 24 MiB. Full 262K is unaffected;
+      # the only cost is TTFT on long prefills. Raise it back only on a rig
+      # you have measured. See docs/KV_MATH.md → "GDN chunked-prefill scratch".
       - --max-num-batched-tokens
-      - "${MAX_NUM_BATCHED_TOKENS:-8192}"
+      - "${MAX_NUM_BATCHED_TOKENS:-2048}"
       # fp8 (= e4m3) at scale=1.0. hf_quant_config DECLARES FP8 KV
       # (kv_cache_quant_algo=FP8) but the checkpoint ships NO k_scale/v_scale
       # tensors (safetensors-index-verified 2026-07-06), and Qwen3-Next hybrid

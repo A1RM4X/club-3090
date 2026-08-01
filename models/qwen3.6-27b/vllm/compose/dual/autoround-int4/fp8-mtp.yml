@@ -8,6 +8,26 @@
 #   Max ctx:   262K (237K single-prompt verified)
 #   Genesis:   none — intentionally Genesis-free (isolation control + fallback)
 #   Status:    ✅ Production
+#   Upstream-risk:  • ⚠️ MTP × hybrid-GDN wild write — vllm#50021, OPEN and LIVE IN THIS PIN.
+#                The GDN spec-decode path builds a state-block index from an UNBOUNDED
+#                accepted-token count; a zero/stale count dereferences a wild address →
+#                `CUDA error: unspecified launch failure` + Xid 13/31 and a dead worker,
+#                typically after minutes of agent-shaped traffic rather than at boot. Not
+#                quant-, topology- or depth-specific: hit on Ampere+Ada (#758) and on
+#                2× 5090 across NVFP4 AND W4A8 alike (#838). The vendored pr48375 fixes
+#                vllm#43559 (corruption) and does NOT cover this fault.
+#                MITIGATION: run the drafter off — delete the --speculative-config
+#                line below. Lower n cuts frequency, NOT exposure (#758 called
+#                n=3 stable; #838 crashed AT n=3). Clears when
+#                #50021 merges and a pin bump inherits it — v0.26.0 PREDATES it.
+#                Detail + re-test trigger: docs/UPSTREAM.md.
+#              ⤷ NOT a Status downgrade. This is an OPEN UPSTREAM defect, not a
+#                property of this config, so Status is left as-is; whether it
+#                warrants moving to ⚠️ is a maintainer call (flagged here,
+#                deliberately not taken). Recorded under `Upstream-risk:` rather
+#                than `Caveats:` because AGENTS.md reserves `Caveats:` for the
+#                ⚠️/🐣/👁️/⏸️/🗑️ statuses — keeping the Status↔Caveats contract
+#                intact instead of silently widening it.
 #   Quality:   109/150 (det 64/75 · sandbox 45/75) (--full, current harness 2026-06-07).
 #                In the 3-way fast/balanced/max A/B (same harness, same day): fast 109 ·
 #                balanced 105 · max 110 — a TIE (the 8-pack doesn't separate the quants).
