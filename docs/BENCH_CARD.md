@@ -42,11 +42,44 @@ Both templates share the same four-part contract:
 **GPU:** <VRAM/card> · <power> · <util>
 **Cache (if the engine has one):** hits <start>% → <end>% (<cold | warming | plateaued>)
 
+<!-- The block below is CONDITIONAL: include it only when the run offloaded to CPU
+     (same gate the capture layer uses). It REPLACES the generic Cache line above.
+     On a GPU-resident run every row here would be a dash pretending to be data.
+     `bash scripts/bench.sh CARD=snapshot` fills all of it automatically. -->
+
+### CPU offload + expert cache
+
+**Offload:** detected via <argv -ot | --n-cpu-moe | boot log> · **RSS** <X> GiB / <Y> GiB total · swap <PASS/FAIL>
+**Cache config:** cap=<MiB> · RESERVE_MB/ADMIT_AFTER/THROTTLE/MAX_BATCH=<…>
+
+> The cache config **is** the arm identity — the pool self-limits below the requested cap, so
+> pool size alone does not identify which arm a run was.
+
+| device | pool (slots · MiB · type) | marginal hits | cumulative | evictions | skips† |
+|---|---|--:|--:|--:|--:|
+| CUDA0 | 3038 slots · 12911 MiB · mxfp4 | **60.3%** | 59.3% | 42171 | 13955 |
+| CUDA1 | 3126 slots · 13285 MiB · mxfp4 | **80.4%** | 79.4% | 9158 | 2330 |
+
+†`skips` = admission throttling (the insert queue exhausted under the configured `THROTTLE`) — a
+**load signal, not a defect**. The hard-failure counters are fill / dispatch / collect-fail, and
+those are on the integrity panel.
+
+**PCIe** (gen<cur>/<max> ×<width> — ⚠️ if cur < max under load): decode rx <mean> / <peak> MB/s
+(<%> of practical link) · prefill rx <mean> / <peak> MB/s · <note if one card dominates>
+
+**RAM path:** derived miss demand ~<X> of ~<Y> GB/s ceiling (<Z>%) — **derived, not measured**
+(misses × expert size ÷ elapsed). State the window: **decode-window** or **whole-run** (a whole-run
+figure is diluted by prefill, during which the cache is not on the hot path).
+
 ### Integrity
 - [ ] wall-TPS scrape agrees with engine-side timings (±5%) — if not, say which number is used and why
 - [ ] CVs within rig norm (decode <5%, prefill <2%)
 - [ ] quiet box: no builds / downloads / other GPU work during measured runs
 - [ ] cache state steady across measured runs (a warming cache understates the mean)
+- [ ] cache **hard-failure** counters zero (fill / dispatch / collect) — `skips` is load, not failure
+- [ ] n-usable == n for every shape (a chat-tuned model EOSing early makes n=5 mean n=1)
+- [ ] VRAM growth / leak delta — with an expert cache active this is **growth** (lazy pool + graph
+      allocation on first inference); only a monotonic rise across REPEATED runs is a leak
 
 **One-line verdict:** <what this run establishes — and what it must NOT be quoted for>
 ```
@@ -76,10 +109,31 @@ card**, not in whoever-ran-it's memory.
 | decode code | 39.96 | 38.59 | −3.4% | outside band — real |
 | TTFT short  | 1085 ms | 1604 ms | +47.8% | ⛔ decisive |
 | prefill 10K | 902   | 1035  | +14.7% | real |
+| **marginal hits** CUDA0 | 41.0% | 48.0% | +17.1% | outside band — real |
+| **marginal hits** CUDA1 | 50.0% | 58.0% | +16.0% | outside band — real |
 | **resource cost** (pool slots / KV headroom / VRAM) | 8887 | 7554 | **−15.0%** | the hidden cost |
 
+<!-- The marginal-hits rows are CONDITIONAL on both arms having offloaded, and they are the rows
+     that catch an under-warmed pool. Quote MARGINAL, never cumulative: a cumulative rate shows the
+     BIGGER pool as worse (it spent longer cold-filling), so an A/B read off cumulative numbers
+     rejects the better config. Marginal is measured over the same window in both arms. -->
+
 **Invariants (must match across arms or the A/B is confounded):**
-cache hit% __ / __ · VRAM __ / __ · ctx __ / __ · <anything the knob shouldn't touch>
+
+| field | A | B | |
+|---|---|---|---|
+| model / weights ftype | | | |
+| served ctx | | | |
+| KV cache type | | | |
+| drafter | | | |
+| moe-cache config (cap + RESERVE_MB / ADMIT_AFTER / THROTTLE / MAX_BATCH) | | | |
+| CPU-offload method (`-ot` regex / `--n-cpu-moe`) | | | |
+| serving argv (threads / ubatch / ngl / split) | | | |
+| pool census per device (slots, ±5%) — only meaningful when the config above MATCHED | | | |
+
+A **moe-cache config mismatch is a confound, exactly like a model mismatch** — it changes what is
+being measured. If one of these differences *is* the knob under test, name it (`KNOB=<text>`) so it
+is attributed rather than treated as an accident.
 
 ### Integrity
 (the Template-1 checklist, once per arm)
@@ -107,6 +161,28 @@ hand-running many A/Bs) · [RESULTS_CARD.md](RESULTS_CARD.md) (the model-level c
 
 ---
 
+## Rendering a card straight from the run
+
+```bash
+bash scripts/bench.sh                                   # no card (default, unchanged output)
+CARD=snapshot bash scripts/bench.sh | tee run-A.log     # Template 1, ready to paste
+CARD=ab BASELINE=run-A.log bash scripts/bench.sh        # Template 2 against that saved run
+```
+
+The card prints as a fenced markdown block at the end of the run. Everything the run can know is
+filled in; everything that is human judgement — the one-line verdict, the A/B decision, the knob
+name, "quiet box" — stays an explicit `<fill: …>` placeholder. **A card that guesses its own verdict
+is worse than no card**, so the renderer will not do it.
+
+A/B knobs: `KNOB=<text>` names the thing under test (differences matching it are attributed instead
+of confounding the card) · `NOISE_BAND=<pct>` overrides the band (default: 2× the worst decode CV
+across both arms, and the card says which) · `EXPECTATION="<text>"` fills the pre-registered
+expectation · `BOOT_POLICY="<text>"` fills the boot-policy line.
+
+The baseline is any previously saved `bench.sh` log. Parsing is strict: a log that is missing its
+fingerprint or summary blocks fails with `baseline unparseable: <why>` rather than rendering half a
+delta — and the run's own measurements are still printed.
+
 ## What `bench.sh` now fills in for you
 
 `bench.sh` carries a capture layer (`scripts/lib/capture.sh`) that auto-fills most of the
@@ -130,14 +206,21 @@ Add these four lines to the checklist in both templates. Each is printed by the 
       `CACHE_DISABLED` / `INVALID_BYPASS` / `OK`). **`NO_TOKENS` means the run measured nothing** —
       a `0.00` TPS printed next to a healthy-looking TTFT is a scrape failure, not a slow model.
       Do not quote a throughput number from a non-`OK` run.
-- [ ] **cache health counters all zero** — `fill-fail` / `dispatch-fail` / `collect-fail` / `skips`.
-      All-zero is the pass condition; anything else invalidates the cache reading for that run.
+- [ ] **cache hard-failure counters zero** — `fill-fail` / `dispatch-fail` / `collect-fail`. Those
+      are the real defect paths; any non-zero invalidates the cache reading for that run.
+      **`skips` is NOT one of them**: it counts admission throttling (the insert queue exhausted
+      under the configured `THROTTLE`), so under a low `ADMIT_AFTER` a non-zero value is normal
+      steady-state pressure and a `THROTTLE` tuning signal. A live run on a healthy server showed
+      skips at 0.5% of misses, tracking the per-device miss asymmetry exactly.
 - [ ] **swap check PASS** — pages of the *serving process* in swap make every number in the run
       suspect, and nothing else in the pipeline notices. Needs `SERVER_PID` (auto-detected on bare
       metal).
 - [ ] **n-usable == n per shape** — chat-tuned models EOS early, and a 5-run shape silently
       degenerates to n=1 while still printing `n=5`. When these differ the CV is not trustworthy;
       re-run with `FORCE_TOKENS=<n>`.
+- [ ] **VRAM growth / leak delta** — labelled *growth* when an expert cache is active (its pool and
+      graphs allocate lazily on first inference, so one run grows VRAM by design) and *leak*
+      otherwise. Only a monotonic rise across REPEATED runs is evidence of a leak.
 
 Two numbers on the card need their provenance stated, because both are easy to quote wrongly:
 
