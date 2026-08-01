@@ -70,7 +70,12 @@
 #                NOT YET QUALIFIED at 98K/131K: throughput + boot only — no
 #                needle ladder and no 8-pack were run at those contexts.
 #   Genesis:   none — intentionally Genesis-free
-#   Status:    🧪 Experimental
+#   Status:    ⚠️ Production w/ caveats
+#   Caveats:   MTP drafter exposed to OPEN vllm#50021 (GDN spec-decode crash
+#              class, quant-independent). Mitigate: SPEC=off. v0.26.0 predates
+#              the fix. Detail: Upstream-risk below + docs/UPSTREAM.md row.
+#              Carried from 🧪: native-W4A4 quality bound is locally-measured
+#              (W4A16 fallback) only; headless-5090 ceiling 98K (#617).
 #   Upstream-risk:  • ⚠️ MTP × hybrid-GDN wild write — vllm#50021, OPEN and LIVE IN THIS PIN.
 #                The GDN spec-decode path builds a state-block index from an UNBOUNDED
 #                accepted-token count; a zero/stale count dereferences a wild address →
@@ -83,13 +88,11 @@
 #                frequency, NOT exposure (#758 called n=3 stable; #838 crashed AT n=3). Clears when
 #                #50021 merges and a pin bump inherits it — v0.26.0 PREDATES it.
 #                Detail + re-test trigger: docs/UPSTREAM.md.
-#              ⤷ NOT a Status downgrade. This is an OPEN UPSTREAM defect, not a
-#                property of this config, so Status is left as-is; whether it
-#                warrants moving to ⚠️ is a maintainer call (flagged here,
-#                deliberately not taken). Recorded under `Upstream-risk:` rather
-#                than `Caveats:` because AGENTS.md reserves `Caveats:` for the
-#                ⚠️/🐣/👁️/⏸️/🗑️ statuses — keeping the Status↔Caveats contract
-#                intact instead of silently widening it.
+#              ⤷ Status flip TAKEN 2026-08-01 (maintainer call): moved to ⚠️
+#                while vllm#50021 is open; the summary now lives on the
+#                required `Caveats:` line above. Reverts to the prior status
+#                when a fix-carrying pin bump lands (trigger on the
+#                docs/UPSTREAM.md row).
 #   Best for:  27B-class Qwen with vision+tools on ONE Blackwell/Hopper card —
 #              5090 default 65K keeps MTP's ~2x (131/155 TPS); SPEC=off for max ctx
 # ---------------------------------------------------------------------------
