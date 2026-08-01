@@ -43,6 +43,11 @@ FAKE_SCENARIO:
                   census line shape (type=/expert=/slots=/total=) -> per-device
                   aggregation, and the #824 detector must key on DEVICES-with-a
                   -pool, not on the raw pool-line count
+  probefail       the n_layer line NEVER appears, so the layer probe times out --
+                  and the process IGNORES SIGTERM, the way a real server does
+                  while still inside model load. Only a probe that escalates past
+                  SIGTERM reaps this one; anything else leaks a server holding
+                  the model's VRAM (observed live 2026-07-30, ~22 GiB held)
 
 --- bench.sh surface (additive; the sweep's driver never calls these) ---------
   GET  /v1/models          bench.sh's reachability check
@@ -56,7 +61,7 @@ FAKE_SCENARIO:
                            request is both realistic and what keeps the sweep's
                            own suite green.
 """
-import json, os, sys, time, threading
+import json, os, signal, sys, time, threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 SC    = os.environ.get("FAKE_SCENARIO", "healthy")
@@ -117,8 +122,21 @@ if _pidfile:
     with open(_pidfile, "w", encoding="utf-8") as _fh:
         _fh.write(str(os.getpid()))
 
+if SC == "probefail":
+    # Never print n_layer and never reach "model loaded": the probe must burn its
+    # whole PROBE_TIMEOUT. Ignoring SIGTERM models a server that has not installed
+    # its shutdown handler yet -- `kill` returns 0 and the process lives on, so a
+    # probe that sends SIGTERM and calls `wait` blocks forever on a child that
+    # never exits, and is itself orphaned if the operator gives up on it.
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    log("main: loading model ...")
+    while True:
+        time.sleep(0.2)
+
 # --- boot log ---------------------------------------------------------------
 log("build: fake (tier-1 fixture)")
+log("print_info: n_layer          = 48")
+log("print_info: n_expert         = 256")
 log(f"llama_context: n_ctx = {ctx}")
 log(f"llama_context: n_ctx_seq = {ctx}")
 

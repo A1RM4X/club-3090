@@ -191,6 +191,13 @@ ROUNDS="${ROUNDS:-4}"
 GEN="${GEN:-900}"
 RESERVE_MB="${RESERVE_MB:-}"              # expert-cache reserve; unset = engine default
 PROMPT_FILE="${PROMPT_FILE:-}"            # override the built-in shapes with one static prompt
+SWEEP_PCACHE="${SWEEP_PCACHE:-on}"        # on | off — llama-server prompt (prefix) caching.
+                                          # ⚠ The engine defaults this ON and the driver sends the SAME
+                                          # prompt each round, so measured rounds reuse the prefix and SKIP
+                                          # prefill: 3115ms/2073tok on the first request vs 120ms/1tok
+                                          # after, worth ~14% on agg. Realistic for agentic multi-turn,
+                                          # optimistic for distinct-prompt fleets — so it is passed
+                                          # explicitly and recorded per arm, never left to a default.
 SWEEP_SHAPE="${SWEEP_SHAPE:-copy}"        # copy | novel | code  (workload FLIPS the sign of
                                           # spec results, so this is a first-class dimension)
 HETERO="${HETERO:-1}"                     # 1 = each slot gets a DIFFERENT prompt instance.
@@ -204,6 +211,7 @@ HETERO="${HETERO:-1}"                     # 1 = each slot gets a DIFFERENT promp
                                           # expert-union overlap and flatter multi-slot numbers.
 AVG_EXPERT_KIB="${AVG_EXPERT_KIB:-}"      # for derived RAM read; auto-read from pool lines if available
 BOOT_TIMEOUT="${BOOT_TIMEOUT:-1200}"
+PROBE_TIMEOUT="${PROBE_TIMEOUT:-300}"     # seconds the n_layer probe waits before giving up
 
 # ---- capability detection --------------------------------------------------
 # NOTE: do NOT pipe --help into `grep -q` here. grep -q exits on first match,
@@ -232,6 +240,24 @@ if (( ! HAS_MOE_CACHE )) && [[ "$SWEEP_CACHE" != "0" || "$SWEEP_ADMIT" != "defau
 fi
 
 # ---- probe total layer count once (cheap: -ngl 0, tiny ctx, killed at ready) --
+# The probe boots a REAL server, so EVERY exit path out of it must reap that
+# server -- including the ones that do not return normally. A probe that gives up
+# and leaves its child alive hands the rest of the run a VRAM-starved machine, and
+# every arm measured afterwards is then plausible and wrong, which is the exact
+# failure class this harness exists to prevent. Seen live 2026-07-30: the probe
+# timed out, printed its "set LAYERS_TOTAL" advice, and left a server resident.
+PROBE_PID=""
+probe_reap() {   # idempotent — called from the trap AND inline; must print nothing
+  [[ -n "$PROBE_PID" ]] || return 0
+  local p="$PROBE_PID" i; PROBE_PID=""
+  kill "$p" 2>/dev/null
+  # SIGTERM is a request, not a guarantee: a server still inside model load can
+  # defer or ignore it, and `wait` then blocks forever on a child that never
+  # exits. Escalate instead -- the probe holds no state worth a clean shutdown.
+  for i in $(seq 1 20); do kill -0 "$p" 2>/dev/null || break; sleep 0.5; done
+  kill -9 "$p" 2>/dev/null
+  wait "$p" 2>/dev/null
+}
 probe_layers() {
   local plog="$OUT_DIR/.probe.log"
   # -lv 4 is REQUIRED: the `print_info:` block (which carries n_layer / n_expert)
@@ -239,16 +265,19 @@ probe_layers() {
   # timeout for a line that never prints.
   "$LLAMA_SERVER" -m "$MODEL" --host "$HOST" --port "$PORT" -ngl 0 -c 256 -np 1 \
     $ROPE_ARGS -lv 4 > "$plog" 2>&1 &
-  local pp=$! i
-  for i in $(seq 1 300); do
-    kill -0 "$pp" 2>/dev/null || break
+  PROBE_PID=$!
+  trap 'probe_reap' EXIT INT TERM   # covers timeout, interrupt and any early exit
+  local i
+  for i in $(seq 1 "$PROBE_TIMEOUT"); do
+    kill -0 "$PROBE_PID" 2>/dev/null || break
     command grep -qE 'n_layer +=' "$plog" && break
     # also stop once the model is up: if n_layer has not appeared by then it is
     # not going to, so fail fast instead of burning the full timeout.
     command grep -q 'model loaded' "$plog" && break
     sleep 1
   done
-  kill "$pp" 2>/dev/null; wait "$pp" 2>/dev/null
+  probe_reap
+  trap - EXIT INT TERM
   command grep -oE 'n_layer +=[ ]*[0-9]+' "$plog" | head -1 | command grep -oE '[0-9]+'
 }
 probe_experts() {   # 0 / empty => dense model => offloading "_exps" matches nothing
@@ -290,7 +319,7 @@ print(len(sel), file=sys.stderr)
 PY
 }
 
-HDR=$'arm\trep\tshape\toffload\tlayers_total\tN\tctx_slot\tdrafter\tnmax\tmax_batch\tcache_mb\tadmit\tthrottle\tagg\tstrm\tttft_ms\taccept\tpool_slots\thits_pct\tmisses\tevicts\trxpci\ttxpci\tsm_pct\tmemctl_pct\tcpu_pct\tram_rd_mbps\tvram_peak\tvram_idle\tvram_post\tleak\tbypass\terrors\tstatus'
+HDR=$'arm\trep\tshape\tpcache\toffload\tlayers_total\tN\tctx_req\tctx_slot\tdrafter\tnmax\tmax_batch\tcache_mb\tadmit\tthrottle\tagg\tstrm\tttft_ms\taccept\tpool_slots\thits_pct\tmisses\tevicts\trxpci\ttxpci\tsm_pct\tmemctl_pct\tcpu_pct\tram_rd_mbps\tvram_peak\tvram_idle\tvram_post\tleak\tbypass\terrors\tstatus'
 [[ -f "$TSV" ]] || printf '%s\n' "$HDR" > "$TSV"
 NCOL=$(awk -F'\t' '{print NF}' <<<"$HDR")
 # Emit a row padded to the header width, with $status always last. Early-exit rows
@@ -331,7 +360,7 @@ drafter_flags() {
 
 run_arm() {
   set +u
-  local off="$1" n="$2" nmax="$3" cache="$4" admit_pair="$5" ctx="$6" drafter="$7" rep="$8" shape="${9:-copy}"
+  local off="$1" n="$2" nmax="$3" cache="$4" admit_pair="$5" ctx="$6" drafter="$7" rep="$8" shape="${9:-copy}" pcache="${10:-on}"
   local admit throttle
   if [[ "$admit_pair" == default ]]; then admit=""; throttle=""
   else admit="${admit_pair%%/*}"; throttle="${admit_pair##*/}"; fi
@@ -341,13 +370,30 @@ run_arm() {
     [[ -n "$ot" ]] || { echo "  !! could not build offload regex"; return 1; }
   fi
   local dtag="$drafter"; (( nmax == 0 )) && dtag="none"
-  local arm="off${off:-0}-n${n}-c$((ctx/1024))K-${shape}-${dtag}d${nmax}-p${cache}-a${admit_pair//\//x}"
+  local arm="off${off:-0}-n${n}-c$((ctx/1024))K-${shape}-${dtag}d${nmax}-p${cache}-a${admit_pair//\//x}-pc${pcache}"
   local log="$OUT_DIR/om-$arm-r$rep.log"
   # RULE: the expert-cache batch clamp must be >= n-max + 1 (a sequence's verify
   # block). Whether concurrency also enters it depends on whether the engine packs
   # multiple sequences into one ubatch — on hybrid/recurrent memory with
   # kv_unified=false it does not. We size for the safe upper bound.
-  local mb=$(( nmax + 1 )); (( mb < n )) && mb="$n"; (( mb < 4 )) && mb=4; (( mb > 8 )) && mb=8
+  # MAX_BATCH sizing. MEASURED 2026-07-30, and it corrects an earlier published rule
+  # of ours ("MAX_BATCH >= n-max+1, N does NOT enter it"):
+  #
+  #     N=1 n-max=0/3  clamp 4 -> clean
+  #     N=2 n-max=0    clamp 4 -> clean
+  #     N=2 n-max=3    clamp 4 -> BYPASS, packed batch 5
+  #     N=4 n-max=0    clamp 4 -> BYPASS, packed batch 6   <- no speculation at all
+  #     N=4 n-max=3    clamp 4 -> BYPASS, packed batch 6
+  #
+  # The packed decode batch grows with n-max AND N jointly. Worse, those observed
+  # sizes are LOWER BOUNDS: the engine warns once per session on the FIRST breach,
+  # never reporting the largest, so no formula can be fitted from them.
+  # Since the engine ceiling is 8 and sitting at it has no measured cost, take the
+  # ceiling whenever concurrency is in play and treat n-max+1 purely as a floor.
+  # Guessing tighter buys nothing and risks a silently uncached arm.
+  local mb=$(( nmax + 1 ))
+  (( n > 1 )) && mb=8
+  (( mb < 4 )) && mb=4; (( mb > 8 )) && mb=8
   # R03: the engine clamps MAX_BATCH to [1,8]. At n-max >= 8 the clamp CANNOT satisfy
   # mb >= nmax+1, so the expert cache would refuse every decode and the arm would
   # silently measure the no-cache path. Refuse before burning a boot on it.
@@ -368,6 +414,9 @@ run_arm() {
   fi
   local cache_args=()
   (( HAS_MOE_CACHE )) && [[ "$cache" != 0 ]] && cache_args=(--moe-cache "$cache")
+  # Passed EXPLICITLY either way, so the arm's log records the intent rather than
+  # inheriting whatever the engine happens to default to.
+  local pc_args=(); [[ "$pcache" == off ]] && pc_args=(--no-cache-prompt) || pc_args=(--cache-prompt)
 
   # R01: if the port already answers, a foreign server would satisfy our readiness
   # probe while our own boot bind-fails -- every arm then measures the SAME untouched
@@ -380,7 +429,7 @@ run_arm() {
              "-" "$dtag" "$nmax" "$mb" "$cache" "${admit:--}" "${throttle:--}"
     return 1
   fi
-  echo "### $arm rep$rep  offload=${off:-0}/${LAYERS_TOTAL:-?} N=$n ctx=$ctx depth=$nmax($dtag) clamp=$mb pool=${cache}MiB admit=${admit_pair}  $(date +%T)"
+  echo "### $arm rep$rep  offload=${off:-0}/${LAYERS_TOTAL:-?} N=$n ctx=$ctx depth=$nmax($dtag) pc=$pcache clamp=$mb pool=${cache}MiB admit=${admit_pair}  $(date +%T)"
 
   # DIAGNOSTIC HEADER. Truncates the log (the server below APPENDS), so a re-run into
   # an existing OUT_DIR can never leave stale text for the cache-stat greps to parse.
@@ -394,7 +443,7 @@ run_arm() {
     echo "# env: GGML_CUDA_MOE_CACHE_ADMIT_AFTER=${admit:-<unset>} THROTTLE=${throttle:-<unset>} MAX_BATCH=${mb}"
     echo "# cmd: $LLAMA_SERVER -m $MODEL --host $HOST --port $PORT -np $n -c $ctx $ROPE_ARGS \\"
     echo "#        -ngl $NGL $SPLIT_ARGS -fa on ${ot:+-ot \"$ot\"} -t $THREADS -ub $UBATCH -ct $KV_TYPE \\"
-    echo "#        ${cache_args[*]} ${extra[*]} $EXTRA_ARGS -lv 4"
+    echo "#        ${cache_args[*]} ${pc_args[*]} ${extra[*]} $EXTRA_ARGS -lv 4"
     echo "# =========================================================="
   } > "$log"
 
@@ -405,10 +454,10 @@ run_arm() {
     exec "$LLAMA_SERVER" -m "$MODEL" --host "$HOST" --port "$PORT" \
       -np "$n" -c "$ctx" $ROPE_ARGS -ngl "$NGL" $SPLIT_ARGS -fa on \
       ${ot:+-ot "$ot"} -t "$THREADS" -ub "$UBATCH" -ct "$KV_TYPE" \
-      "${cache_args[@]}" "${extra[@]}" $EXTRA_ARGS -lv 4 ) >> "$log" 2>&1 &
+      "${cache_args[@]}" "${pc_args[@]}" "${extra[@]}" $EXTRA_ARGS -lv 4 ) >> "$log" 2>&1 &
   local pid=$! ok=0 i
   # leading identity columns, shared by the failure rows below (padded by emit_row)
-  local -a idcols=("$arm" "$rep" "$shape" "${off:-0}" "${LAYERS_TOTAL:--}" "$n" \
+  local -a idcols=("$arm" "$rep" "$shape" "$pcache" "${off:-0}" "${LAYERS_TOTAL:--}" "$n" "$ctx" \
                    "${ctx_slot:--}" "$dtag" "$nmax" "$mb" "$cache" "${admit:--}" "${throttle:--}")
   for i in $(seq 1 "$BOOT_TIMEOUT"); do
     kill -0 "$pid" 2>/dev/null || { echo "  BOOT FAILED (see $log)"; emit_row BOOT_FAIL "${idcols[@]}"; return 1; }
@@ -612,7 +661,7 @@ PY
   # format string for the surplus arg, so every arm wrote a short row PLUS a junk row
   # containing just the status. Never hand-count columns again.
   emit_row "$status" \
-    "$arm" "$rep" "$shape" "${off:-0}" "${LAYERS_TOTAL:--}" "$n" "${ctx_slot:--}" "$dtag" "$nmax" "$mb" "$cache" \
+    "$arm" "$rep" "$shape" "$pcache" "${off:-0}" "${LAYERS_TOTAL:--}" "$n" "$ctx" "${ctx_slot:--}" "$dtag" "$nmax" "$mb" "$cache" \
     "${admit:--}" "${throttle:--}" "${agg:--}" "${strm:--}" "${ttft:--}" "${acc:--}" "${pool:--}" \
     "${hits:--}" "${miss:--}" "${ev:--}" "${rx:--}" "${tx:--}" "${smp:--}" "${memc:--}" "${cpu_pct:--}" \
     "${ramrd:--}" "${vpeak:--}" "${vram_idle:--}" "${vram_post:--}" "${leak:--}" "$byp" "${req_err:--}"
@@ -693,6 +742,35 @@ if [[ -n "${_running_pid:-}" && "${PLAN:-0}" != 1 ]]; then
   echo "   (config was inherited from it above, so re-running after the kill keeps"
   echo "   the same settings. Set ALLOW_CONCURRENT_SERVER=1 to override.)"
   [[ "${ALLOW_CONCURRENT_SERVER:-0}" == 1 ]] || exit 2
+fi
+
+# --- ARM BUDGET ---------------------------------------------------------------
+# The sweep is a cartesian product over NINE dimensions. A careless list turns
+# minutes into days: three values on three dimensions is 27 arms, and every arm
+# is a full server boot. This counts the planned work BEFORE anything boots and
+# refuses to start past the budget, so a typo costs a message instead of a night.
+#
+# Counted in BOOTS (arms x REPS), because a boot is the unit of rig time.
+MAX_BOOTS="${MAX_BOOTS:-50}"
+_n() { local c=0 x; for x in $1; do c=$((c+1)); done; (( c )) || c=1; echo "$c"; }
+_arms=1
+for _d in "${SWEEP_OFFLOAD:-0}" "$SWEEP_CTX" "$SWEEP_N" "$SWEEP_CACHE" "$SWEEP_ADMIT" \
+          "$SWEEP_SHAPE" "$SWEEP_PCACHE"; do _arms=$(( _arms * $(_n "$_d") )); done
+# n-max: each 0 is one arm (no drafter); each non-zero fans out over the drafters
+_spec=0; _base=0
+for _d in $SWEEP_NMAX; do if [[ "$_d" == 0 ]]; then _base=$((_base+1)); else _spec=$((_spec+1)); fi; done
+_arms=$(( _arms * ( _base + _spec * $(_n "$SWEEP_DRAFTER") ) ))
+_boots=$(( _arms * REPS ))
+echo "  -> planned: $_arms arms x REPS=$REPS = $_boots boots (budget MAX_BOOTS=$MAX_BOOTS)"
+if (( _boots > MAX_BOOTS )); then
+  echo
+  echo "REFUSING: $_boots boots exceeds MAX_BOOTS=$MAX_BOOTS."
+  echo "   Nine sweepable dimensions multiply, so this is usually a wider list than"
+  echo "   intended rather than a deliberate long run. Either narrow the sweep (the"
+  echo "   docs recommend staging it — run PLAN=1 to see the order), or raise the"
+  echo "   budget deliberately:  MAX_BOOTS=$(( _boots > 200 ? _boots : 200 )) $0"
+  echo "   At roughly 1-2 min per boot that is about $(( _boots * 90 / 60 )) minutes of rig time."
+  exit 2
 fi
 
 # --- PLAN mode: print the dependency-ordered sequence and exit -----------------
@@ -784,10 +862,12 @@ for r in $(seq 1 "$REPS"); do
     for c in $SWEEP_CACHE; do
      for a in $SWEEP_ADMIT; do
       for sh in $SWEEP_SHAPE; do
-       for d in $SWEEP_NMAX; do
-        if (( d == 0 )); then run_arm "$off" "$n" 0 "$c" "$a" "$x" none "$r" "$sh"
-        else for dr in $SWEEP_DRAFTER; do run_arm "$off" "$n" "$d" "$c" "$a" "$x" "$dr" "$r" "$sh"; done
-        fi
+       for pc in $SWEEP_PCACHE; do
+        for d in $SWEEP_NMAX; do
+         if (( d == 0 )); then run_arm "$off" "$n" 0 "$c" "$a" "$x" none "$r" "$sh" "$pc"
+         else for dr in $SWEEP_DRAFTER; do run_arm "$off" "$n" "$d" "$c" "$a" "$x" "$dr" "$r" "$sh" "$pc"; done
+         fi
+        done
        done
       done
      done
