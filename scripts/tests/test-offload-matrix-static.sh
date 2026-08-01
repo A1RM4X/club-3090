@@ -12,10 +12,12 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 SWEEP="$ROOT_DIR/scripts/offload-matrix.sh"
 REND="$ROOT_DIR/scripts/offload-matrix-render.py"
+LIB="$ROOT_DIR/scripts/lib/capture.sh"
 fail() { echo "FAIL: $1" >&2; exit 1; }
 
 [[ -f "$SWEEP" ]] || fail "missing $SWEEP"
 [[ -f "$REND"  ]] || fail "missing $REND"
+[[ -f "$LIB"   ]] || fail "missing $LIB — the sweep consumes the shared capture layer"
 
 # 1. both halves parse
 bash -n "$SWEEP" || fail "bash -n: syntax error in offload-matrix.sh"
@@ -71,16 +73,26 @@ echo "  ✓ emit_row pads short rows, refuses over-long rows, keeps status last"
 # 5. every status the renderer explains must be one the driver can actually emit,
 #    and vice versa. Drift in either direction means an arm renders with no
 #    explanation, or the renderer documents a state that cannot happen.
-python3 - "$SWEEP" "$REND" <<'PY' || exit 1
+#
+#    The vocabulary now has TWO sources: the sweep still emits its own early-exit
+#    states directly (BOOT_FAIL, TIMEOUT, PORT_BUSY, ...), while the four shared
+#    run-quality states (NO_TOKENS / REQ_ERRORS / CACHE_DISABLED / INVALID_BYPASS)
+#    are classified by scripts/lib/capture.sh, which bench.sh uses too. Scanning
+#    both is the point — one enum, one precedence, two callers.
+python3 - "$SWEEP" "$REND" "$LIB" <<'PY' || exit 1
 import re,sys
 sweep=open(sys.argv[1],encoding="utf-8").read()
 rend =open(sys.argv[2],encoding="utf-8").read()
-emitted=set(re.findall(r'status="([A-Z_]{3,})"',sweep)) | set(re.findall(r'emit_row ([A-Z_]{3,})',sweep))
+lib  =open(sys.argv[3],encoding="utf-8").read()
+def states(src):
+    return (set(re.findall(r'status="?([A-Z_]{3,})"?',src))
+            | set(re.findall(r'emit_row ([A-Z_]{3,})',src)))
+emitted=states(sweep) | states(lib)
 emitted.discard("OK")                      # OK is the default, never explained
 known=set(re.findall(r'"([A-Z_]{3,})":',rend))
 if emitted-known: sys.exit(f"FAIL: driver emits statuses the renderer cannot explain: {sorted(emitted-known)}")
 if known-emitted: sys.exit(f"FAIL: renderer explains statuses the driver never emits: {sorted(known-emitted)}")
-print(f"  ✓ status vocabulary agrees both ways ({len(emitted)} non-OK states)")
+print(f"  ✓ status vocabulary agrees both ways ({len(emitted)} non-OK states, sweep + lib)")
 PY
 
 # 6. every column the renderer reads must exist in the header. One view once
@@ -123,12 +135,13 @@ for must in ("shape","offload","ctx_slot","cache_mb","pcache"):
 print(f"  ✓ pairing key is shape-aware ({len(cols)} dimensions)")
 PY
 
-# 8. pool_slots must sum EVERY 'slots=' line with no tail/head. This looks like a
-#    bug and has been reported as one; it is NOT. 'slots=' appears only in the
-#    pool-init lines, never in the periodic stats emissions, so summing them all is
-#    correct — on a 4-pool run, 742+337+558+279 = 1916, the reported figure. Adding
-#    a `tail -N` would silently DROP two pools and roughly halve the number.
-#    Asserted so nobody "fixes" it back into a defect.
+# 8. pool_slots must sum EVERY pool with no tail/head. This looks like a bug and
+#    has been reported as one; it is NOT. Each pool contributes its own slots, so
+#    summing them all is correct — on a 4-pool run, 742+337+558+279 = 1916, the
+#    reported figure. Adding a `tail -N` would silently DROP two pools and roughly
+#    halve the number. Asserted so nobody "fixes" it back into a defect.
+#    (The slots now come off the shared lib's per-device census rather than a raw
+#    log grep; the invariant is unchanged and so is this guard.)
 pool_line=$(grep -nE 'pool=\$\(' "$SWEEP" | head -1 | cut -d: -f1)
 [[ -n "$pool_line" ]] || fail "could not find the pool_slots extraction"
 pool_expr=$(sed -n "${pool_line}p" "$SWEEP")
@@ -143,5 +156,33 @@ if [[ -n "$doc_n" ]]; then
   [[ "$doc_n" == "$NCOL" ]] || fail "renderer docstring says $doc_n columns, header has $NCOL"
   echo "  ✓ renderer docstring column count matches the header ($NCOL)"
 fi
+
+# 10. THE #824 DETECTOR, GENERALISED. The half-cached check must compare the count
+#     of DEVICES THAT HOLD A POOL against the device count — never the count of
+#     pool LINES. A device can hold several pools (`pool[0]`, `pool[1]`), so a
+#     line-count detector reads pool_lines >= NGPU and passes an arm where an
+#     entire device got no cache at all. That is exactly the state #824 was filed
+#     for, one level deeper, and the sweep carried the weaker form until it adopted
+#     the shared lib. Guarded here so it cannot regress to line-counting.
+grep -qE 'pool_devs *< *\$\{NGPU' "$SWEEP" \
+  || fail "the half-cached detector must compare DEVICES-with-a-pool against NGPU"
+if grep -qE 'pool_lines *< *\$\{?NGPU' "$SWEEP"; then
+  fail "the detector is comparing pool LINE count to device count — a multi-pool device defeats that (#824 generalised)"
+fi
+grep -q 'cap_moe_parse pooldev' "$SWEEP" \
+  || fail "the sweep should get its allocation census from the shared lib, not a private grep"
+echo "  ✓ half-cached detection counts DEVICES with a pool, not pool lines (#824 generalised)"
+
+# 11. the sweep must consume the shared capture layer, and must not have kept a
+#     private copy of a scrape the lib owns. Two copies is how a fixed defect
+#     comes back — it is the reason this adoption happened at all.
+grep -q 'source "\$_OM_LIB"' "$SWEEP" || fail "the sweep no longer sources scripts/lib/capture.sh"
+for fn in cap_moe_parse cap_status_classify cap_vram_used cap_dmon_start cap_cpu_snap cap_ram_rd_mbps; do
+  grep -q "$fn" "$SWEEP" || fail "the sweep stopped using $fn — did a private copy come back?"
+done
+# the private helpers the adoption deleted must stay deleted
+grep -qE '^cpu_snap\(\)' "$SWEEP" && fail "cpu_snap() came back — use cap_cpu_snap from the lib"
+grep -q 'adoption is DEFERRED' "$LIB" && fail "the deferral note outlived the adoption"
+echo "  ✓ sweep consumes the shared lib; the private copies stayed deleted"
 
 echo "test-offload-matrix-static: ok"
