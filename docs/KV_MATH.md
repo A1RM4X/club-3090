@@ -333,10 +333,12 @@ where γ = expansion factor, D = hidden dim, N = state dim, L = sequence length.
 For Qwen3.6-27B's GDN layers, `fla.ops.chunk.chunk_gated_delta_rule_fwd` allocates an intermediate `h` shaped `(B, NT, H, V, K)`:
 
 - `B` = batch
-- `NT = ceil(seq_len / chunk_size)` chunks (`chunk_size=256`)
-- `H` = number of heads (`linear_num_k_heads=16`, `linear_num_v_heads=48`)
+- `NT = ceil(batched_tokens / FLA_CHUNK_SIZE)` chunks (**`FLA_CHUNK_SIZE = 64`**)
+- `H` = number of value heads **per rank** (`linear_num_v_heads=48`, so 24 at TP=2)
 - `V`, `K` = head dim (`linear_v_head_dim = linear_k_head_dim = 128`)
-- Per-element 4 bytes (`mamba_ssm_dtype = fp32` on this stack)
+- Per-element **2 bytes** — `h = k.new_empty(...)` inherits `k.dtype`, and every GDN compose we ship runs `--dtype bfloat16`
+
+> ⚠️ **Corrected 2026-08-01 (#838).** This list previously said `chunk_size=256` and "per-element 4 bytes (`mamba_ssm_dtype = fp32`)". Both were wrong *for this buffer*, verified against `vllm/vllm-openai:v0.25.1`: `fla/ops/utils.py` sets `FLA_CHUNK_SIZE = 64`, and `chunk_delta_h.py:352` allocates `h` with `k.new_empty(...)` (bf16). The fp32 belongs to `final_state = k.new_empty(N, H, V, K, dtype=torch.float32)` on the next line — that is the **per-sequence recurrent state**, modelled separately in [§5 DeltaNet recurrent state](#5-deltanet-recurrent-state-per-stream-constant). The corrected 64 × 2 B reproduces a real failed allocation to the decimal (see the next subsection), which is what caught the error.
 
 Published O(γDNL) gives asymptotic scaling but not the absolute coefficient — that depends on `fla.ops.chunk` implementation details (tiling, streaming, register reuse). We use an **empirical coefficient** calibrated against measured BENCHMARKS rows:
 
@@ -348,6 +350,41 @@ Published O(γDNL) gives asymptotic scaling but not the absolute coefficient —
 | `turboquant_3bit_nc` | ~165 | TQ3 dequant during the materialized block adds ~20-25% activation pressure |
 
 The TQ3 → fp8 difference (~25%) is what causes the [20 GB Ampere Cliff 2 fire at 90K](HARDWARE.md#note-for-sub-24-gb-cards) — TQ3's larger activation peak exceeds the per-card budget after TP=2 split on smaller-VRAM cards. Cross-rig validated by [@efschu](https://github.com/noonghunna/club-3090/issues/47) on 2× 3080 modded.
+
+#### GDN chunked-prefill scratch — the term that scales with the BATCH, not the context
+
+The coefficients above scale with `max_ctx`. That is the Cliff-2 shape and it is calibrated, but on its own it hides a term that has already cost a user a crash: **with chunked prefill on (every compose we ship), the FLA prefill buffers are bounded by `--max-num-batched-tokens`, not by `max_ctx`.** A 262K prompt is processed in batches, so doubling the batch doubles these buffers while the `max_ctx` term does not move at all.
+
+Three buffers are live simultaneously inside `chunk_gated_delta_rule_fwd`:
+
+| Buffer | Where | Shape | Bytes (per card) |
+|---|---|---|---|
+| `h` | `chunk_delta_h.py` | `(B, NT, H, V, K)` | `(batched / 64) × (heads/TP) × V × K × 2` |
+| `v_new` | `chunk_delta_h.py` | `empty_like(u)` | `batched × (heads/TP) × V × 2` |
+| `o` | `chunk_o.py` | `empty_like(v)` | `batched × (heads/TP) × V × 2` |
+
+Unlike the coefficients above, these are **derived from the kernel source, not fitted** — there is nothing to calibrate, the allocation is exact. For **Qwen3.6-27B at TP=2** (48 value heads → 24/rank, 128 × 128, bf16):
+
+```
+h     = batched × 12 KiB
+v_new = o = batched × 6 KiB
+```
+
+| `--max-num-batched-tokens` | `h` | `v_new` / `o` each | total transient |
+|---|---:|---:|---:|
+| 16384 | 192 MiB | 96 MiB | 384 MiB |
+| **8192** (shipped default on most composes) | **96 MiB** | 48 MiB | 192 MiB |
+| 4096 | 48 MiB | 24 MiB | 96 MiB |
+| 2048 | 24 MiB | 12 MiB | 48 MiB |
+
+**The 8192 row is a measured anchor, not a projection.** In [club-3090 #838](https://github.com/noonghunna/club-3090/issues/838) a 2× RTX 5090 boot of `vllm/qwen-27b-dual-nvfp4` died with `torch.OutOfMemoryError: Tried to allocate 96.00 MiB` inside `chunk_gated_delta_rule_fwd_h` — exactly the `h` row above, to the decimal, at that user's `--max-num-batched-tokens 8192`. That slug's envelope was derated on the strength of this table.
+
+**Consequences worth internalising:**
+
+- **Lowering the batch is nearly free.** It costs TTFT on long prefills and **nothing** in context — unlike cutting `max_ctx`, which is what most people reach for first.
+- **Raising `max_model_len` does not shrink the KV pool.** vLLM sizes the pool from *free memory*, not from `max_model_len × max_num_seqs`. The same #838 boot was handed 968,145 tokens of pool while only 262,144 × 2 = 524,288 were addressable — 1.85× over-provisioned, ~7.7 GiB/card unreachable, while the 96 MiB it actually needed had nowhere to go. Pin it with `--kv-cache-memory-bytes` (see [`docs/UPSTREAM.md`](UPSTREAM.md) → vllm#44209).
+
+**In the calculator:** `gdn_prefill_scratch_per_card_bytes()` in `tools/kv-calc.py`, surfaced as `--max-num-batched-tokens`. It is applied as a **signed delta against 8192**, because every calibration anchor was booted at that value and the fitted `max_ctx` coefficients therefore already absorb the scratch there. Omitting the flag reproduces the pre-#838 prediction byte-for-byte; passing 16384 adds ~0.20 GB/card on the 27B at TP=2, passing 2048 returns ~0.15 GB.
 
 ### 4. Cudagraph + workspace overhead
 
