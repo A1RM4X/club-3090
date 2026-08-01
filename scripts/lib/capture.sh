@@ -15,12 +15,16 @@
 #   bench.sh          = canonical protocol (measures a server someone else booted)
 #   capture.sh        = the common measurement layer
 #
-#   ⚠ offload-matrix.sh adoption is DEFERRED until feat/offload-matrix-prefix-cache
-#   lands — a multi-commit feature branch is in flight on that file and rewiring it
-#   underneath would conflict for no measurement benefit. Until then the sweep keeps
-#   its own inline copies of these scrapes and the duplication is ACCEPTED. When it
-#   is adopted, the sweep's inline versions must be deleted, not left as a second
-#   implementation: two copies of a scrape is how a fixed defect comes back.
+#   BOTH scripts consume this lib. offload-matrix.sh adopted it once
+#   feat/offload-matrix-prefix-cache landed (#826); its inline copies were DELETED
+#   rather than left alongside, because two copies of a scrape is how a fixed
+#   defect comes back — the sweep had been carrying the weaker pool-LINE-count
+#   detector while this lib counted DEVICES-with-a-pool, and a multi-pool device
+#   made the two disagree on whether a run was half-cached.
+#
+#   Where the two callers genuinely need different statistics, the LIB carries both
+#   and each caller picks (e.g. acceptance exposes `last=` for the sweep's per-arm
+#   TSV column and `mean=` for bench.sh). Fork the statistic, never the scrape.
 #
 # CONTRACT FOR EVERY FUNCTION HERE
 #   1. GRACEFUL DEGRADATION IS MANDATORY. A missing source (no GPU, no server log,
@@ -461,8 +465,12 @@ elif mode == "acceptance":
             drafted += int(m2.group(2))
     if not acc:
         sys.exit(1)
-    print(f"fired={len(acc)} mean={sum(acc)/len(acc):.3f} min={min(acc):.3f} "
-          f"max={max(acc):.3f} accepted={accepted} drafted={drafted}")
+    # `last` is the final acceptance the log carries. It exists because the sweep's
+    # TSV `accept` column has always meant exactly that — a per-arm boot ends with
+    # its own last value — and swapping in the mean would silently redefine every
+    # historical row. bench.sh quotes the mean; the sweep quotes last. Same scrape.
+    print(f"fired={len(acc)} last={acc[-1]:.3f} mean={sum(acc)/len(acc):.3f} "
+          f"min={min(acc):.3f} max={max(acc):.3f} accepted={accepted} drafted={drafted}")
 
 elif mode == "timings":
     # llama.cpp per-request print_timing. `prompt eval time` is PREFILL; the bare
@@ -1004,16 +1012,22 @@ PY
 #   REQ_ERRORS      one or more requests errored
 #   CACHE_DISABLED  a cache was REQUESTED but never allocated (incl. per-device)
 #   INVALID_BYPASS  the cache exists but a decode declined it (bypass counter > 0)
-# Precedence is deliberate: NO_TOKENS and REQ_ERRORS outrank the cache states —
-# a run with no tokens has nothing to say about a cache.
+# Precedence is deliberate, strongest last:
+#   INVALID_BYPASS < CACHE_DISABLED < NO_TOKENS < REQ_ERRORS
+# NO_TOKENS outranks the cache states — a run with no tokens has nothing to say
+# about a cache. REQ_ERRORS outranks NO_TOKENS in turn, because a run that errored
+# EXPLAINS why it produced no tokens; reporting NO_TOKENS there would send the
+# reader hunting for a scrape bug that is not the cause. This ordering is the
+# sweep's original one, adopted verbatim so per-arm rows keep their meaning.
 cap_status_classify() {   # $1=tokens $2=tps $3=req_errors $4=cache_requested $5=cache_ok $6=bypass
   local toks="${1:-0}" tps="${2:-0}" errs="${3:-0}" want="${4:-0}" got="${5:-1}" byp="${6:-0}"
   local status=OK
   if (( byp > 0 )); then status=INVALID_BYPASS; fi
   if [[ "$want" == "1" && "$got" != "1" ]]; then status=CACHE_DISABLED; fi
-  if [[ "${errs:-0}" != "0" && -n "${errs:-}" ]]; then status=REQ_ERRORS; fi
   case "${toks:-0}" in ''|'-'|0|0.0|0.00) status=NO_TOKENS ;; esac
   case "${tps:-0}" in ''|'-'|0|0.0|0.00) status=NO_TOKENS ;; esac
+  # LAST, so it outranks NO_TOKENS: a run that errored explains its own zero.
+  if [[ "${errs:-0}" != "0" && -n "${errs:-}" ]]; then status=REQ_ERRORS; fi
   echo "$status"
 }
 
