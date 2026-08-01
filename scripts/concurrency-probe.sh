@@ -60,6 +60,14 @@ SLUG="${SLUG:-}"                      # required for SWEEP (reboot target)
 SWEEP_DRY="${SWEEP_DRY:-0}"
 BOOT_TIMEOUT="${BOOT_TIMEOUT:-360}"
 
+# Argument validation BEFORE any environment probing: slot detection (#818) is
+# also a FATAL exit 2, so probing first masks this message on rigs where no
+# server answers — the test suite caught exactly that on a serverless box.
+if [[ -n "$SWEEP" && -z "$SLUG" ]]; then
+  echo "SWEEP needs SLUG=<compose slug> — vLLM can't hot-change max-num-seqs, so each N is a reboot." >&2
+  exit 2
+fi
+
 # Remember whether the caller pinned MODEL — SWEEP re-resolves after each boot
 # and must not clobber an explicit pin.
 MODEL_PINNED="${MODEL:+1}"
@@ -80,7 +88,12 @@ _props_slots()   { curl -s -m 3 "${URL}/props" 2>/dev/null \
 # Detection order: vLLM container flag -> llama.cpp container flag -> /props.
 # A failed detection is FATAL (#818): the old silent CONCURRENCY=2 fallback
 # measured queue-wait as concurrency against 1-slot servers and mislabeled arms.
-if [[ -z "${CONCURRENCY:-}" ]]; then
+# SWEEP mode skips detection entirely: each arm passes CONCURRENCY=$N into
+# run_probe after its own boot, and probing the PRE-sweep server (or a
+# serverless box, in SWEEP_DRY) would FATAL on a value nothing consumes.
+if [[ -n "$SWEEP" ]]; then
+  : # per-arm CONCURRENCY comes from the sweep loop
+elif [[ -z "${CONCURRENCY:-}" ]]; then
   _conc_src="container max-num-seqs"; CONCURRENCY="$(_served_seqs || true)"
   if [[ -z "$CONCURRENCY" ]]; then _conc_src="container -np";          CONCURRENCY="$(_served_np || true)"; fi
   if [[ -z "$CONCURRENCY" ]]; then _conc_src="server /props total_slots"; CONCURRENCY="$(_props_slots || true)"; fi
@@ -257,10 +270,7 @@ PY
 
 # --- SWEEP: reboot per N, probe, find the throughput knee ----------------------
 if [[ -n "$SWEEP" ]]; then
-  if [[ -z "$SLUG" ]]; then
-    echo "SWEEP needs SLUG=<compose slug> — vLLM can't hot-change max-num-seqs, so each N is a reboot." >&2
-    exit 2
-  fi
+  # SLUG presence already validated up top, before environment probing.
   echo "[sweep] slug=$SLUG N in { $SWEEP } · floor=${TPS_FLOOR} tok/s/stream · reboots the server per N"
   knee=""; knee_tps=""; knee_agg=""; sweep_rows=""
   for N in $SWEEP; do
