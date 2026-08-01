@@ -22,7 +22,7 @@
 #              budget, comfortable; ~11 GB/card weights vs dual-max's 14.5)
 #   Genesis:   none — intentionally Genesis-free
 #   Status:    🧪 Experimental
-#   Caveats:   • ⚠️ MTP × hybrid-GDN wild write — vllm#50021, OPEN and LIVE IN THIS PIN.
+#   Upstream-risk:  • ⚠️ MTP × hybrid-GDN wild write — vllm#50021, OPEN and LIVE IN THIS PIN.
 #                The GDN spec-decode path builds a state-block index from an UNBOUNDED
 #                accepted-token count; a zero/stale count dereferences a wild address →
 #                `CUDA error: unspecified launch failure` + Xid 13/31 and a dead worker,
@@ -34,6 +34,13 @@
 #                frequency, NOT exposure (#758 called n=3 stable; #838 crashed AT n=3). Clears when
 #                #50021 merges and a pin bump inherits it — v0.26.0 PREDATES it.
 #                Detail + re-test trigger: docs/UPSTREAM.md.
+#              ⤷ NOT a Status downgrade. This is an OPEN UPSTREAM defect, not a
+#                property of this config, so Status is left as-is; whether it
+#                warrants moving to ⚠️ is a maintainer call (flagged here,
+#                deliberately not taken). Recorded under `Upstream-risk:` rather
+#                than `Caveats:` because AGENTS.md reserves `Caveats:` for the
+#                ⚠️/🐣/👁️/⏸️/🗑️ statuses — keeping the Status↔Caveats contract
+#                intact instead of silently widening it.
 #   Best for:  max-ctx Qwen on Blackwell/Hopper pairs at 2.5× less weight
 #              memory than bf16 — pending first community validation
 # ---------------------------------------------------------------------------
