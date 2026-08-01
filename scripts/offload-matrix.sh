@@ -338,7 +338,43 @@ emit_row() {   # $1=status, $2.. = leading values in header order starting at `a
   local IFS=$'\t'; printf '%s\t%s\n' "${f[*]}" "$status" >> "$TSV"
 }
 
-cpu_snap() { awk '/^cpu /{i=$5;t=0;for(j=2;j<=NF;j++)t+=$j;print t,i}' /proc/stat; }
+# kv_fields <key> [<key> ...] — pull named `key=value` fields out of one line of
+# the capture layer's structured output, in order, space-separated for `read`.
+# Missing keys come back empty rather than shifting the rest — a positional read
+# that silently slides one column left is exactly the class of defect this
+# harness exists to prevent.
+kv_fields() {
+  awk -v keys="$*" '{
+    n = split(keys, want, " ")
+    delete got
+    for (i = 1; i <= NF; i++) {
+      p = index($i, "=")
+      if (p > 1) got[substr($i, 1, p - 1)] = substr($i, p + 1)
+    }
+    out = ""
+    for (i = 1; i <= n; i++) out = out (i > 1 ? " " : "") (want[i] in got ? got[want[i]] : "")
+    print out
+  }'
+}
+
+# ---- shared capture layer --------------------------------------------------
+# The scrapes below (pool census, hits/evictions, acceptance, VRAM, dmon, status
+# classification, derived RAM read) live in scripts/lib/capture.sh and are shared
+# with bench.sh. This sweep used to carry its own copies; they DRIFTED — the
+# sweep's #824 detector compared pool-LINE count to device count, which a device
+# holding two pools defeats (pool_lines >= NGPU while another device has none).
+# The lib counts DEVICES-with-a-pool. One scrape, one fix, both callers.
+_OM_LIB="$(dirname "${BASH_SOURCE[0]}")/lib/capture.sh"
+if [[ -r "$_OM_LIB" ]]; then
+  # shellcheck source=lib/capture.sh
+  source "$_OM_LIB"
+else
+  die "missing $_OM_LIB — the sweep consumes the shared capture layer"
+fi
+# These window the lib's log scrapes for bench.sh's single-server protocol. The
+# sweep boots one server PER ARM and scrapes that arm's own log whole, so a value
+# inherited from the environment would silently truncate every scrape.
+unset CAP_LINE_OFFSET CAP_LINE_LIMIT
 
 # depth flag is PER DRAFTER TYPE. Note --draft-max does NOT clamp the ngram family
 # in forks that expose size-m/n-max (their defaults can be 48-64 tokens, which will
@@ -467,32 +503,33 @@ run_arm() {
   (( ok )) || { echo "  BOOT TIMEOUT"; kill "$pid" 2>/dev/null; emit_row TIMEOUT "${idcols[@]}"; return 1; }
 
   local ctx_slot; ctx_slot=$(command grep -oE 'n_ctx_seq *= *[0-9]+|n_ctx_per_seq *= *[0-9]+' "$log" | head -1 | command grep -oE '[0-9]+')
-  # PHASE 1 (before): idle baseline — VRAM after load but before any request, and
-  # a short idle dmon sample so live figures can be read against a floor.
-  local vram_idle="-" dmon_idle="$OUT_DIR/.idle-$arm-r$rep"
-  if (( NGPU > 0 )); then
-    vram_idle=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits 2>/dev/null | paste -sd+ | bc)
-    timeout 4 nvidia-smi dmon -s ut -d 1 -c 3 > "$dmon_idle" 2>/dev/null || true
-  fi
+  # PHASE 1 (before): idle baseline — VRAM after load but before any request.
+  #
+  # There used to be a 3-sample idle `dmon` here too, described as "so live figures
+  # can be read against a floor". Nothing ever read it: it cost 4 s of every arm and
+  # left a `.idle-*` file in OUT_DIR that no cleanup removed. Deleted rather than
+  # wired up, because the floor it was meant to establish is not actually used by
+  # any column — if a future arm wants one, take it through cap_dmon_phase so it
+  # gets the same treatment as the live sample.
+  local vram_idle="-"
+  (( NGPU > 0 )) && vram_idle="$(cap_vram_used || echo '-')"
   # cache counters BEFORE the measured window, so hits/evictions can be reported as
   # a DELTA (steady state) rather than lifetime-cumulative (which includes the cold
-  # fill storm and understates the hit rate).
-  local h0 m0 e0
-  read -r h0 m0 < <(command grep -oE 'hits=[0-9]+/[0-9]+' "$log" | tail -"${NGPU:-2}" \
-    | command grep -oE '[0-9]+/[0-9]+' | awk -F/ '{h+=$1; t+=$2} END{print h+0, (t-h)+0}')
-  e0=$(command grep -oE 'evictions=[0-9]+' "$log" | tail -"${NGPU:-2}" | command grep -oE '[0-9]+' | paste -sd+ | bc 2>/dev/null)
-  h0="${h0:-0}"; m0="${m0:-0}"; e0="${e0:-0}"
+  # fill storm and understates the hit rate). The lib reads the LAST cumulative
+  # emission PER DEVICE, which is what the old `tail -NGPU` was approximating —
+  # and it stays correct when a device emits at a different cadence.
+  local counters0="$OUT_DIR/.c0-$arm-r$rep"
+  cap_moe_parse counters "$log" > "$counters0" 2>/dev/null || : > "$counters0"
 
   # PHASE 2 (during): telemetry windowed to the MEASURED requests only
   local dmon="$OUT_DIR/.dmon-$arm-r$rep" dpid="" vpid=""
+  local phases="$OUT_DIR/.ph-$arm-r$rep"
   if (( NGPU > 0 )); then
-    nvidia-smi dmon -s ut -d 1 > "$dmon" 2>/dev/null & dpid=$!
-    ( vp=0; while kill -0 "$pid" 2>/dev/null; do
-        v=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits 2>/dev/null | paste -sd+ | bc 2>/dev/null)
-        [[ -n "$v" && "$v" -gt "$vp" ]] && { vp=$v; echo "$vp" > "$OUT_DIR/.vp-$arm-r$rep"; }; sleep 2
-      done ) & vpid=$!
+    dpid="$(cap_dmon_start "$dmon" || true)"
+    vpid="$(cap_vram_peak_start "$OUT_DIR/.vp-$arm-r$rep" || true)"
   fi
-  read -r c_tot0 c_idle0 < <(cpu_snap); local t0; t0=$(date +%s.%N)
+  local c_snap0; c_snap0="$(cap_cpu_snap)"
+  local t0 t0_epoch; t0=$(date +%s.%N); t0_epoch=$(date +%s)
 
   N="$n" ROUNDS="$ROUNDS" GEN="$GEN" PORT="$PORT" HOST="$HOST" PROMPT_FILE="$PROMPT_FILE" \
   SHAPE="$shape" HETERO="$HETERO" \
@@ -564,8 +601,13 @@ print(len(errs))                                   # line 3: request error count
 print(errs[0] if errs else "-")                    # line 4: first error, for triage
 print(f"shape={SHAPE} hetero={HETERO} prompt[0:120]={mk(0)[:120]!r}")   # line 5: what was actually sent
 PY
-  local t1; t1=$(date +%s.%N); read -r c_tot1 c_idle1 < <(cpu_snap)
-  [[ -n "$dpid" ]] && kill "$dpid" 2>/dev/null; [[ -n "$vpid" ]] && kill "$vpid" 2>/dev/null
+  local t1 t1_epoch; t1=$(date +%s.%N); t1_epoch=$(date +%s)
+  local c_snap1; c_snap1="$(cap_cpu_snap)"
+  cap_stop_pid "$dpid"; cap_stop_pid "$vpid"
+  # One window covering the measured requests. The lib slices its epoch-stamped
+  # dmon stream by window; the sweep has exactly one per arm (bench.sh has several,
+  # split decode vs prefill), so the arm IS the window.
+  printf 'arm %s %s\n' "$t0_epoch" "$t1_epoch" > "$phases"
   local agg ttft elapsed cpu_pct rx tx smp memc
   agg=$(sed -n 1p "$OUT_DIR/.drv-$arm-r$rep"); ttft=$(sed -n 2p "$OUT_DIR/.drv-$arm-r$rep")
   local req_err req_err_msg prompt_dbg
@@ -573,74 +615,115 @@ PY
   prompt_dbg=$(sed -n 5p "$OUT_DIR/.drv-$arm-r$rep")
   { echo "# driver: $prompt_dbg"; echo "# driver: request_errors=${req_err:-?} first=${req_err_msg:--}"; } >> "$log"
   elapsed=$(python3 -c "print(max(0.001,$t1-$t0))")
-  cpu_pct=$(python3 -c "dt=$c_tot1-$c_tot0; di=$c_idle1-$c_idle0; print(f'{(1-di/dt)*100:.1f}' if dt>0 else '-')")
+  cpu_pct="$(cap_cpu_pct "$c_snap0" "$c_snap1" || echo '-')"
+  # MEANS, exactly as before (the TSV columns are means). The lib also carries the
+  # PEAKS, which the console line now shows: 1 Hz sampling under-reads bursts, so a
+  # mean alone hides a transfer spike an offload arm cares about.
+  local rx_peak="-" tx_peak="-"
+  rx=-; tx=-; smp=-; memc=-
   if [[ -s "$dmon" ]]; then
-    read -r rx tx smp memc < <(awk '!/^#/ && NF>=9 {s+=$2;m+=$3;r+=$8;t+=$9;k++} END{if(k)printf "%.0f %.0f %.1f %.1f",r/k,t/k,s/k,m/k; else print "- - - -"}' "$dmon")
-  else rx=-; tx=-; smp=-; memc=-; fi
-  rm -f "$dmon" "$OUT_DIR/.drv-$arm-r$rep"
+    read -r rx rx_peak tx tx_peak smp memc < <(
+      cap_dmon_phase "$dmon" "$phases" arm 2>/dev/null | command grep -m1 ' all ' \
+        | kv_fields rx_mean rx_peak tx_mean tx_peak sm_mean memctl_mean)
+    rx="${rx:--}"; tx="${tx:--}"; smp="${smp:--}"; memc="${memc:--}"
+    rx_peak="${rx_peak:--}"; tx_peak="${tx_peak:--}"
+  fi
+  rm -f "$dmon" "$phases" "$OUT_DIR/.drv-$arm-r$rep"
 
   # PHASE 3 (after): post-run VRAM for a leak check against the idle floor
   local vram_post="-" leak="-"
   if (( NGPU > 0 )); then
-    vram_post=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits 2>/dev/null | paste -sd+ | bc)
+    vram_post="$(cap_vram_used || echo '')"
     [[ "$vram_idle" != "-" && -n "$vram_post" ]] && leak=$(( vram_post - vram_idle ))
   fi
   local strm acc pool hits ev miss byp vpeak ramrd aexp
   strm=$(command grep -E 'eval time' "$log" | command grep -v 'prompt eval' \
     | command grep -oE '[0-9.]+ tokens per second' | command grep -oE '^[0-9.]+' | tail -$(( n*2 )) \
     | sort -n | awk '{a[NR]=$1} END{if(NR)printf "%.2f",(NR%2)?a[int((NR+1)/2)]:(a[NR/2]+a[NR/2+1])/2; else print "-"}')
-  acc=$(command grep -oE 'draft acceptance = [0-9.]+' "$log" | tail -1 | command grep -oE '[0-9.]+')
-  pool=$(command grep -oE 'slots=[0-9]+' "$log" | command grep -oE '[0-9]+' | paste -sd+ | bc 2>/dev/null)
-  # DELTAS across the measured window (not lifetime): excludes the cold fill storm
-  local h1 m1 e1
-  read -r h1 m1 < <(command grep -oE 'hits=[0-9]+/[0-9]+' "$log" | tail -"${NGPU:-2}" \
-    | command grep -oE '[0-9]+/[0-9]+' | awk -F/ '{h+=$1; t+=$2} END{print h+0, (t-h)+0}')
-  e1=$(command grep -oE 'evictions=[0-9]+' "$log" | tail -"${NGPU:-2}" | command grep -oE '[0-9]+' | paste -sd+ | bc 2>/dev/null)
-  h1="${h1:-0}"; m1="${m1:-0}"; e1="${e1:-0}"
-  miss=$(( m1 - m0 )); (( miss < 0 )) && miss=0
-  ev=$(( ${e1:-0} - ${e0:-0} )); (( ev < 0 )) && ev=0
-  local dh=$(( h1 - h0 )); (( dh < 0 )) && dh=0
+  # `last`, not `mean`: the TSV `accept` column has always meant the arm's final
+  # logged acceptance. The lib carries both; the sweep picks last, bench.sh picks
+  # mean. The FIRE RATE goes to the console line only — acceptance without it is a
+  # deception (a drafter can post 0.99 while firing on a quarter of requests), but
+  # adding a TSV column would change the schema every historical row is read with.
+  local acc_fired="-"
+  read -r acc acc_fired < <(cap_moe_parse acceptance "$log" 2>/dev/null | kv_fields last fired)
+  acc_fired="${acc_fired:--}"
+  # Pool slots: SUM of every pool on every device. Unchanged semantics — the lib's
+  # census aggregates per device and this sums the devices, so a multi-pool device
+  # still contributes all of its pools (the reason a `tail` here would be a defect).
+  local census; census="$(cap_moe_parse census "$log" 2>/dev/null || true)"
+  if [[ -n "$census" ]]; then
+    pool=$(printf '%s\n' "$census" | command grep -oE 'slots=[0-9]+' | cut -d= -f2 \
+           | awk '{s+=$1} END{if(NR) print s}')
+  fi
+  # DELTAS across the measured window (not lifetime): excludes the cold fill storm.
+  local counters1="$OUT_DIR/.c1-$arm-r$rep"
+  cap_moe_parse counters "$log" > "$counters1" 2>/dev/null || : > "$counters1"
+  local dh=0
+  miss=0; ev=0
+  if [[ -s "$counters1" ]]; then
+    read -r dh miss ev < <(cap_marginal_rates "$counters0" "$counters1" 2>/dev/null | awk '{
+      for (i = 1; i <= NF; i++) {
+        if ($i ~ /^dhits=/)      { split($i, a, "="); h += a[2] }
+        if ($i ~ /^dlookups=/)   { split($i, b, "="); t += b[2] }
+        if ($i ~ /^devictions=/) { split($i, c, "="); e += c[2] }
+      }
+    } END { m = t - h; print h+0, (m > 0 ? m : 0), e+0 }')
+  fi
+  dh="${dh:-0}"; miss="${miss:-0}"; ev="${ev:-0}"
   if (( dh + miss > 0 )); then hits=$(python3 -c "print(f'{$dh*100.0/($dh+$miss):.1f}%')"); else hits="-"; fi
-  # derived RAM read on the miss path; expert size read from the pool lines when present
+  # derived RAM read on the miss path; expert size from the census when present
   aexp="$AVG_EXPERT_KIB"
-  [[ -z "$aexp" ]] && aexp=$(command grep -oE 'expert=[0-9]+ KiB' "$log" | command grep -oE '[0-9]+' | awk '{s+=$1;n++} END{if(n)printf "%.0f",s/n}')
-  if [[ -n "$aexp" && -n "$miss" && "$miss" != 0 ]]; then
-    ramrd=$(python3 -c "print(f'{$miss*$aexp/1024/$elapsed:.0f}')" 2>/dev/null)
-  else ramrd="-"; fi
-  byp=$(command grep -c 'bypassing cache' "$log")
+  [[ -z "$aexp" && -n "$census" ]] && aexp=$(printf '%s\n' "$census" \
+    | command grep -oE 'expert_kib=[0-9]+' | cut -d= -f2 | awk '{s+=$1;n++} END{if(n)printf "%.0f",s/n}')
+  ramrd="$(cap_ram_rd_mbps "${miss:-0}" "${aexp:-0}" "$elapsed" 2>/dev/null || echo '-')"
+  byp="$(cap_moe_parse bypass "$log" 2>/dev/null || echo 0)"
   # CACHE-NOT-ALLOCATED detection. Distinct from bypass: bypass means the cache exists
   # but a decode declined it; THIS means the pool was never created at all, so the arm
   # silently measures the no-cache path while every other column looks healthy.
   # Found live 2026-07-30: the engine's DEFAULT reserve (3072 MiB) left no budget at
   # 262K ctx, logging "CUDA0 has no cache budget after 3072 MiB reserve" -- a string the
   # bypass grep does not match. Both arms reported OK and ran ~12-22% slow.
-  local cache_enabled=0 reserve_seen="" pool_lines=0 cache_partial=0
-  command grep -q '\[moe-cache\] enabled:' "$log" && cache_enabled=1
-  # PER-DEVICE budget failure. '[moe-cache] enabled:' still prints when only SOME devices
-  # got a pool, so a presence check scores the arm healthy while it measures a half-cached
-  # path -- measured live 2026-07-30 (CUDA0 no budget, CUDA1 a 69-slot pool, status OK).
-  # The pool-init lines are ground truth: one 'slots=' line per device when fully
-  # allocated. Fewer than NGPU of them means the cache is NOT what was requested.
-  pool_lines=$(command grep -c 'slots=' "$log")
-  if (( cache_enabled == 1 && pool_lines < ${NGPU:-2} )); then
+  # PER-DEVICE budget failure. '[moe-cache] enabled:' still prints when only SOME
+  # devices got a pool, so a presence check scores the arm healthy while it measures
+  # a half-cached path -- measured live 2026-07-30 (CUDA0 no budget, CUDA1 a 69-slot
+  # pool, status OK).
+  #
+  # ⚠ Ground truth is the count of DEVICES THAT HOLD A POOL, never the count of
+  #   pool LINES. A device can hold several pools (`pool[0]`, `pool[1]`), so a
+  #   line-count detector reads pool_lines >= NGPU and passes an arm where an entire
+  #   device got nothing. That is the generalised #824 hole, and it is why this now
+  #   defers to the shared lib instead of re-deriving it here.
+  local cache_enabled=0 reserve_seen="" pool_devs=0 pool_lines=0 cache_partial=0 nobudget=0
+  local pd; pd="$(cap_moe_parse pooldev "$log" 2>/dev/null || true)"
+  read -r cache_enabled pool_devs pool_lines nobudget < <(
+    printf '%s\n' "$pd" | kv_fields enabled devices pool_lines nobudget)
+  cache_enabled="${cache_enabled:-0}"; pool_devs="${pool_devs:-0}"
+  pool_lines="${pool_lines:-0}"; nobudget="${nobudget:-0}"
+  if (( cache_enabled == 1 && pool_devs < ${NGPU:-2} )); then
     cache_enabled=0
     cache_partial=1
   fi
   reserve_seen=$(command grep -oE 'reserve=[0-9]+ MiB|after [0-9]+ MiB reserve' "$log" \
                  | command grep -oE '[0-9]+' | tail -1)
-  local nobudget; nobudget=$(command grep -c 'no cache budget' "$log")
   kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
   vpeak=$(cat "$OUT_DIR/.vp-$arm-r$rep" 2>/dev/null); rm -f "$OUT_DIR/.vp-$arm-r$rep"
 
-  local status=OK
-  (( byp > 0 )) && status="INVALID_BYPASS"
-  # A requested cache that never allocated invalidates the arm for any cache-dimension
-  # conclusion, so it must never read OK.
-  if (( HAS_MOE_CACHE )) && [[ "$cache" != 0 ]] && (( cache_enabled == 0 )); then
-    status="CACHE_DISABLED"
+  # Classification is the lib's: one enum, one precedence order, both callers.
+  # (INVALID_BYPASS < CACHE_DISABLED < NO_TOKENS < REQ_ERRORS — a run that errored
+  # explains its own zero, so REQ_ERRORS outranks NO_TOKENS.)
+  local cache_wanted=0 cache_ok=1
+  if (( HAS_MOE_CACHE )) && [[ "$cache" != 0 ]]; then
+    cache_wanted=1
+    (( cache_enabled == 1 )) || cache_ok=0
+  fi
+  local status
+  status="$(cap_status_classify "${agg:-0}" "${agg:-0}" "${req_err:-0}" \
+                                "$cache_wanted" "$cache_ok" "${byp:-0}")"
+  if (( cache_wanted )) && (( cache_ok == 0 )); then
     echo "  !! expert cache was REQUESTED (--moe-cache $cache) but NEVER ALLOCATED."
     if (( cache_partial )); then
-      echo "     reason: PARTIAL allocation -- only $pool_lines of ${NGPU:-2} devices got a"
+      echo "     reason: PARTIAL allocation -- only $pool_devs of ${NGPU:-2} devices got a"
       echo "     pool (the 'enabled:' line still prints in this state). One GPU ran with no"
       echo "     cache at all, so this arm measured a half-cached path. Lower the reserve"
       echo "     (RESERVE_MB=1536) so every device fits a pool."
@@ -651,11 +734,10 @@ PY
       echo "     no '[moe-cache] enabled:' line in $log -- check the build and flags."
     fi
   fi
-  # zero throughput means every request failed — never let that land as OK (the
-  # first live run reported agg=0.00 with status OK because the prompt builder
-  # rejected an empty SHAPE and the driver exited)
-  case "${agg:-}" in ''|'-'|0|0.0|0.00) status="NO_TOKENS" ;; esac
-  [[ -n "${req_err:-}" && "${req_err:-0}" != 0 ]] && status="REQ_ERRORS"
+  # (zero throughput -> NO_TOKENS and request errors -> REQ_ERRORS are both applied
+  # inside cap_status_classify above; the first live run reported agg=0.00 with
+  # status OK because the prompt builder rejected an empty SHAPE and the driver
+  # exited, which is the case that enum exists for.)
   # Routed through emit_row so the column count comes from $HDR alone. This used to be
   # a hand-written printf with 32 specifiers for 33 arguments -- bash then RE-RAN the
   # format string for the surplus arg, so every arm wrote a short row PLUS a junk row
@@ -665,8 +747,9 @@ PY
     "${admit:--}" "${throttle:--}" "${agg:--}" "${strm:--}" "${ttft:--}" "${acc:--}" "${pool:--}" \
     "${hits:--}" "${miss:--}" "${ev:--}" "${rx:--}" "${tx:--}" "${smp:--}" "${memc:--}" "${cpu_pct:--}" \
     "${ramrd:--}" "${vpeak:--}" "${vram_idle:--}" "${vram_post:--}" "${leak:--}" "$byp" "${req_err:--}"
-  echo "  agg=$agg strm=$strm ttft=${ttft}ms acc=${acc:--} | pcie rx=$rx tx=$tx MB/s sm=${smp}% memctl=${memc}% cpu=${cpu_pct}% ram_rd=${ramrd}MB/s | pool=${pool:--} hits=${hits:--} bypass=$byp req_err=${req_err:-?} [$status]"
+  echo "  agg=$agg strm=$strm ttft=${ttft}ms acc=${acc:--}(fired ${acc_fired}) | pcie rx=$rx/${rx_peak} tx=$tx/${tx_peak} MB/s mean/peak sm=${smp}% memctl=${memc}% cpu=${cpu_pct}% ram_rd=${ramrd}MB/s | pool=${pool:--} hits=${hits:--} bypass=$byp req_err=${req_err:-?} [$status]"
   [[ "${req_err:-0}" != 0 ]] && echo "    first request error: ${req_err_msg:--}   (full context: $log)"
+  rm -f "$counters0" "$counters1"
   sleep 5; echo
 }
 
