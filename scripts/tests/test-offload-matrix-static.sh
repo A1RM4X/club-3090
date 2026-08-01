@@ -118,7 +118,7 @@ rend=open(sys.argv[1],encoding="utf-8").read()
 key=re.search(r"^KEY\s*=\s*\((.*?)\)",rend,re.S|re.M)
 if not key: sys.exit("FAIL: no KEY tuple in renderer")
 cols=set(re.findall(r'"([a-z_]+)"',key.group(1)))
-for must in ("shape","offload","ctx_slot","cache_mb"):
+for must in ("shape","offload","ctx_slot","cache_mb","pcache"):
     if must not in cols: sys.exit(f"FAIL: pairing KEY missing '{must}' — spec arms would mispair")
 print(f"  ✓ pairing key is shape-aware ({len(cols)} dimensions)")
 PY

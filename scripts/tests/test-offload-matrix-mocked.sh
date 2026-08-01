@@ -164,4 +164,46 @@ echo "  ✓ renderer handles every view (+ --md) over mixed-status rows"
 grep -qE "NOT OK|⚠" "$TMP/render--perf.txt" || fail "renderer must flag non-OK arms in its summary"
 echo "  ✓ renderer flags non-OK arms"
 
+# PIDs of fixture servers still alive. Three guards, each one a real footgun:
+#   * bracketed pattern, so the pgrep cannot match its own command line;
+#   * comm filter, because the bracket trick does NOT save a CALLER whose command
+#     line merely quotes the pattern (a wrapper shell running this suite matched);
+#   * `|| true`, because pgrep exits 1 on no-match and under `set -e` a bare
+#     assignment from a failing substitution aborts the suite instead of asserting.
+strays() {
+  local p out=""
+  for p in $(pgrep -f "[f]ake-llama-server" 2>/dev/null || true); do
+    [[ -r "/proc/$p/comm" ]] || continue
+    if [[ "$(</proc/$p/comm)" == python3* ]]; then out+="$p "; fi
+  done
+  printf '%s' "$out"
+}
+
+# PROBE LEAK — the layer probe boots a REAL server, so a probe that gives up
+# without reaping it leaves that server holding the model's VRAM, and every
+# arm launched afterwards measures a starved machine while reporting OK
+# (observed live 2026-07-30, ~22 GiB held on both cards). The fixture never
+# prints n_layer in this scenario, so the probe must time out, AND it ignores
+# SIGTERM the way a server still inside model load does — so `kill; wait` alone
+# both hangs and leaks. Only an escalating reap on every exit path passes this.
+[[ -z "$(strays)" ]] || fail "a fixture from an earlier case is still running: $(strays)"
+LOG="$TMP/probefail.log"
+set +e
+timeout 60 env FAKE_SCENARIO=probefail MODEL="$TMP/model.gguf" \
+  LLAMA_SERVER="$TMP/bin/fake-llama-server" \
+  INHERIT=0 ALLOW_CONCURRENT_SERVER=1 OUT_DIR="$TMP/probefail" PORT="$PORT" \
+  LAYERS_TOTAL= PROBE_TIMEOUT=3 PRESET=smoke SWEEP_OFFLOAD=4 \
+  bash "$SWEEP" > "$LOG" 2>&1
+rc=$?
+set -e
+(( rc != 124 )) || fail "probe never returned: it waits on a child that ignores SIGTERM"
+[[ "$rc" == "2" ]] || fail "a probe that cannot read n_layer should exit 2, got $rc"
+command grep -q "LAYERS_TOTAL" "$LOG" || fail "probe failure should tell the operator to set LAYERS_TOTAL"
+left="$(strays)"
+if [[ -n "$left" ]]; then
+  for p in $left; do kill -9 "$p" 2>/dev/null || true; done
+  fail "failed probe LEAKED its server (pid(s): $left) — it would hold VRAM for the whole run"
+fi
+echo "  ✓ failed probe reaps its server and exits actionably (no leaked VRAM holder)"
+
 echo "test-offload-matrix-mocked: ok"
