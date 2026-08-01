@@ -106,11 +106,16 @@ command grep -q 'capture: ${thing} unavailable (${why})' "$LIB" \
   || fail "capture.sh's degradation notice no longer matches the documented shape"
 echo "  ✓ degradation notice keeps the 'capture: <thing> unavailable (<why>)' shape"
 
-# The deferral is a deliberate decision with an expiry, not an oversight. If the
-# note goes, the reason the duplication is tolerated goes with it.
-command grep -q 'offload-matrix.sh adoption is DEFERRED' "$LIB" \
-  || fail "capture.sh must record WHY offload-matrix.sh still carries its own copies"
-echo "  ✓ offload-matrix adoption deferral is recorded in the lib"
+# The deferral EXPIRED — offload-matrix.sh adopted the lib. Assert the adoption is
+# recorded and that the old deferral note is gone, so nobody re-reads a stale
+# "duplication is accepted" note as licence to fork a scrape again.
+command grep -q 'adoption is DEFERRED' "$LIB" \
+  && fail "the deferral note outlived the adoption — offload-matrix.sh now consumes the lib"
+command grep -q 'BOTH scripts consume this lib' "$LIB" \
+  || fail "capture.sh must record that both callers consume it (and that copies were DELETED)"
+command grep -q 'Fork the statistic, never the scrape' "$LIB" \
+  || fail "the lib must record the rule that keeps the two callers from re-forking"
+echo "  ✓ lib records the completed adoption (both callers, copies deleted)"
 
 # Sourcing the lib must have no side effects — no output, no exit, and safe to
 # source twice (bench.sh and a future sweep may both pull it in).
@@ -238,7 +243,18 @@ command grep -q 'fired=1' <<<"$acc" || fail "acceptance fire count wrong: $acc"
 command grep -q 'mean=0.992' <<<"$acc" || fail "acceptance value wrong: $acc"
 command grep -q 'accepted=248 drafted=250' <<<"$acc" \
   || fail "drafts-attempted must be captured alongside acceptance: $acc"
-echo "  ✓ acceptance scrape carries fire count AND drafts-attempted"
+# BOTH statistics, because the two callers need different ones: bench.sh quotes the
+# MEAN over its run, while offload-matrix's TSV `accept` column has always meant the
+# arm's LAST logged value. Forking the statistic in the lib is what stops the two
+# from re-forking the whole scrape.
+command grep -q 'last=0.992' <<<"$acc" || fail "acceptance must expose last= for the sweep: $acc"
+cat >> "$TMP/end.log" <<'EOF'
+draft acceptance = 0.500 (  100 accepted /   200 generated)
+EOF
+acc2=$(cap_moe_parse acceptance "$TMP/end.log")
+command grep -q 'last=0.500' <<<"$acc2" || fail "last= must track the FINAL value: $acc2"
+command grep -q 'mean=0.746' <<<"$acc2" || fail "mean= must average both values: $acc2"
+echo "  ✓ acceptance exposes last= (sweep) and mean= (bench) from one scrape"
 
 # --- timings: prefill and decode must not be confused; short runs filtered ----
 tim=$(cap_moe_parse timings "$TMP/end.log") || fail "timings scrape returned nothing"
@@ -293,6 +309,12 @@ cap_ram_rd_mbps 0 4352 60 >/dev/null 2>&1 && fail "ram_rd must refuse to invent 
 [[ "$(cap_status_classify 500 30 0 0 1 0)"  == OK ]]             || fail "a clean run must read OK"
 # NO_TOKENS outranks the cache states: a run with no tokens says nothing about a cache.
 [[ "$(cap_status_classify 0 0 0 1 0 5)"     == NO_TOKENS ]]      || fail "NO_TOKENS must outrank the cache states"
+# ...and REQ_ERRORS outranks NO_TOKENS in turn: a run that errored EXPLAINS its own
+# zero, and reporting NO_TOKENS there sends the reader hunting a scrape bug that is
+# not the cause. This is offload-matrix's original precedence, adopted verbatim so
+# per-arm rows keep their meaning.
+[[ "$(cap_status_classify 0 0 3 0 1 0)"     == REQ_ERRORS ]]     || fail "REQ_ERRORS must outrank NO_TOKENS"
+[[ "$(cap_status_classify 0 0 3 1 0 5)"     == REQ_ERRORS ]]     || fail "REQ_ERRORS must outrank everything"
 [[ "$(cap_divergence_pct 30 32)" == "6.2" ]] || fail "divergence arithmetic changed"
 echo "  ✓ status enum precedence, derived-demand arithmetic, divergence"
 

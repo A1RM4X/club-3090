@@ -382,6 +382,31 @@ command grep -q '\*\*Cache (if the engine has one):\*\*' <<<"$noff" \
 command grep -q 'CUDA0 hits 19.3% → 29.6%' <<<"$noff" || fail "generic cache line lost its per-device values"
 echo "  ✓ no-offload run: generic cache line, offload block absent"
 
+# (b2) PCIe capture is UNCONDITIONAL (item 10), so a non-offload run must still
+#      show it — on a multi-card TP run the all-reduce traffic IS the interesting
+#      part, and that is precisely the run with no offload block to carry it.
+{
+  sed -e 's/^fp.offload=.*/fp.offload=not detected (moe-cache captures skipped)/' "$REC"
+  printf '%s\n' \
+    'pcie.link=GPU0 gen=4/4 width=16/16' \
+    'pcie.link_pct=31.4' \
+    'pcie.decode.all.rx_mean=812' \
+    'pcie.decode.all.rx_peak=8410' \
+    'pcie.prefill.all.rx_mean=1904' \
+    'pcie.prefill.all.rx_peak=15220'
+} > "$TMP/nooff-pcie.kv"
+np="$(card_render snapshot "$TMP/nooff-pcie.kv")" || fail "no-offload+PCIe snapshot render failed"
+command grep -q '### CPU offload + expert cache' <<<"$np" && fail "still no offload block expected here"
+command grep -qF '**PCIe:** GPU0 gen=4/4 width=16/16' <<<"$np" \
+  || fail "a non-offload card must still render PCIe (capture is unconditional): $np"
+command grep -q 'decode rx 812 / 8410 MB/s mean/peak' <<<"$np" || fail "PCIe means/peaks missing"
+command grep -q '31.4% of practical link' <<<"$np" || fail "link utilisation missing from the slim line"
+command grep -q 'all-reduce path' <<<"$np" \
+  || fail "the non-offload PCIe note should say what the traffic IS on a TP run"
+# a run with no PCIe data at all must not render an empty stub
+command grep -q '\*\*PCIe:\*\*' <<<"$noff" && fail "no PCIe data must render NO PCIe line, not an empty one"
+echo "  ✓ non-offload card keeps PCIe (unconditional capture), and omits it entirely when absent"
+
 # (c) A moe-cache config mismatch is a CONFOUND, exactly like a model mismatch.
 sed -e 's/moe_cache_cap=8192/moe_cache_cap=4096/' "$CFIX/baseline.log" > "$TMP/moediff.log"
 mc="$(card_render ab "$REC" "$TMP/moediff.log")" || fail "moe-mismatch A/B failed to render"

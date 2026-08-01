@@ -110,6 +110,21 @@ st=$(status_of "$tsv")
   "partial_budget must be CACHE_DISABLED, got '$st' — the detector is keying on the presence of '[moe-cache] enabled:' instead of comparing pool-line count to device count (issue #824)"
 echo "  ✓ partial_budget -> CACHE_DISABLED (per-device budget failure is caught)"
 
+# 4b. ⚠️ THE HOLE, ONE LEVEL DEEPER. A device can hold SEVERAL pools, so a run
+#     where CUDA0 got nothing and CUDA1 got two pools has pool_lines(2) >= NGPU(2)
+#     — a line-counting detector scores it healthy while half the model runs
+#     uncached. Only counting DEVICES-with-a-pool catches it. The sweep carried the
+#     line-count form until it adopted scripts/lib/capture.sh; this arm is the
+#     regression guard for that adoption.
+tsv=$(run_scenario multipool); assert_shape "$tsv" multipool
+st=$(status_of "$tsv")
+[[ "$st" == "CACHE_DISABLED" ]] || fail \
+  "multipool must be CACHE_DISABLED, got '$st' — the detector is comparing pool-LINE count to device count, which a device holding two pools defeats (#824 generalised)"
+# ...and the operator must be told WHICH reading failed, in devices not lines.
+grep -q 'only 1 of 2 devices got a' "$TMP/multipool/sweep.log" \
+  || fail "the half-cached message must report DEVICES with a pool, not pool lines"
+echo "  ✓ multipool -> CACHE_DISABLED (two pools on one device no longer masks an uncached device)"
+
 # 5. zero tokens must never read OK — this shipped as agg=0.00/OK once
 tsv=$(run_scenario no_tokens); assert_shape "$tsv" no_tokens
 [[ "$(status_of "$tsv")" == "NO_TOKENS" ]] || fail "no_tokens should be NO_TOKENS, got '$(status_of "$tsv")'"
@@ -148,7 +163,7 @@ PY
 # 9. the renderer must survive every view on real produced rows — one view once died
 #    with KeyError and another rendered '-' forever.
 cat "$TMP"/healthy/r.tsv > "$TMP/all.tsv"
-for s in bypass no_budget_all partial_budget no_tokens boot_fail; do
+for s in bypass no_budget_all partial_budget multipool no_tokens boot_fail; do
   tail -n +2 "$TMP/$s/r.tsv" >> "$TMP/all.tsv"
 done
 for view in --perf --bw --cache --all; do

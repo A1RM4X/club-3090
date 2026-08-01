@@ -386,6 +386,41 @@ def cache_judgement(marg, cum):
     return "warming" if m > c else "thrashing"
 
 
+def pcie_slim(rec):
+    """PCIe for a run that did NOT offload.
+
+    Item 10 makes PCIe capture UNCONDITIONAL — TP all-reduce traffic is the
+    interesting part on a GPU-resident multi-card run, and that is exactly the
+    case with no offload block to carry it. Without this the bench output captures
+    PCIe and the card silently drops it, which is the one place a card can be less
+    honest than the run it describes."""
+    link = rec.get("pcie.link", "")
+    warn = rec.get("pcie.link_warn", "")
+    dec_mean, dec_peak = rec.get("pcie.decode.all.rx_mean"), rec.get("pcie.decode.all.rx_peak")
+    pre_mean, pre_peak = rec.get("pcie.prefill.all.rx_mean"), rec.get("pcie.prefill.all.rx_peak")
+    if not (link or dec_mean or pre_mean):
+        return []
+    parts = []
+    if dec_mean:
+        parts.append(f"decode rx {dec_mean} / {dec_peak} MB/s mean/peak")
+    if pre_mean:
+        parts.append(f"prefill rx {pre_mean} / {pre_peak} MB/s mean/peak")
+    pct = rec.get("pcie.link_pct")
+    if pct:
+        parts.append(f"{pct}% of practical link")
+    head = f"**PCIe:** {link or FILL.format('link')}"
+    if warn:
+        head += f" ⚠️ {warn}"
+    out = [head + (" · " + " · ".join(parts) if parts else "")]
+    out.append("")
+    out.append("> No CPU offload on this run, so this is interconnect traffic — on a multi-card "
+               "tensor-parallel run that is the all-reduce path, and it is the number a topology "
+               "change (link width, P2P state) moves. 1 Hz sampling under-reads bursts, so the "
+               "peak sits next to the mean.")
+    out.append("")
+    return out
+
+
 def offload_block(rec, devs):
     """The CPU-offload + expert-cache section. Rendered ONLY when offload is
     detected — on a GPU-resident run every row here would be a dash pretending to
@@ -614,7 +649,9 @@ def render_snapshot(rec):
     devs = cache_devices(rec)
     if is_offload(rec):
         L.extend(offload_block(rec, devs))
-    elif devs:
+    else:
+        L.extend(pcie_slim(rec))
+    if not is_offload(rec) and devs:
         # Non-offload engines with a cache of their own keep the generic line.
         parts = []
         for d in devs:
