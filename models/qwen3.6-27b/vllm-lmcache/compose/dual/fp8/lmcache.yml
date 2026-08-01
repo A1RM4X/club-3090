@@ -22,6 +22,19 @@
 #                LMCACHE_L1_GB=10 → ~38 GB. Hard-fail is `--force`-proof (host-choke prevention is
 #                not optional — the l1=100→reboot lesson). Hidden from `switch.sh --list`
 #                (see --list --all); `--force` to launch.
+#              • ⚠️ MTP × hybrid-GDN wild write — vllm#50021, OPEN and LIVE IN THIS PIN.
+#                The GDN spec-decode path builds a state-block index from an UNBOUNDED
+#                accepted-token count; a zero/stale count dereferences a wild address →
+#                `CUDA error: unspecified launch failure` + Xid 13/31 and a dead worker,
+#                typically after minutes of agent-shaped traffic rather than at boot. Not
+#                quant-, topology- or depth-specific: hit on Ampere+Ada (#758) and on
+#                2× 5090 across NVFP4 AND W4A8 alike (#838). The vendored pr48375 fixes
+#                vllm#43559 (corruption) and does NOT cover this fault.
+#                MITIGATION: run the drafter off — delete the --speculative-config
+#                line below. Lower n cuts frequency, NOT exposure (#758 called
+#                n=3 stable; #838 crashed AT n=3). Clears when
+#                #50021 merges and a pin bump inherits it — v0.26.0 PREDATES it.
+#                Detail + re-test trigger: docs/UPSTREAM.md.
 #   Quality:   inherits dual-max fidelity (FP8 + int8-PTH + MTP); 8-pack not re-run (KV-cache
 #                layer, not a quant change). Decode 74 narr / 94 code TPS — ZERO penalty vs
 #                non-LMCache (controlled A/B 2026-06-17).

@@ -27,6 +27,13 @@
 #                both changed nothing). n=5 dies within 1-2 sessions, n=4
 #                eventually; n=3 and n=0 are stable. Hit on 3 rigs incl. 2x 5090.
 #                DEFAULT IS NOW n=3 — set SPEC_N=5 only if you accept the crash.
+#                ⚠️ 2026-08-01: this is very likely the SAME defect now root-caused
+#                upstream as vllm#50021 (next bullet) — that fix's unbounded
+#                `i_t = num_accepted_tokens - 1` yields exactly the `-1` seen here
+#                at a zero accepted count. If so, n=3 is only lower-probability,
+#                not safe: #838 crashed AT n=3 on the same family. Identity is a
+#                HYPOTHESIS — confirm by re-running this workload once #50021 is
+#                in the pin, before relaxing the n=3 default.
 #              • THIN VRAM margin at the 262K ceiling: 69 MB free with MTP n=5
 #                (MTP eats ~1.2 GB headroom; no-MTP ladder had 1245 MB). NIAH
 #                recall is CLEAN to 240K — but sustained agents at MAX ctx should
@@ -45,6 +52,18 @@
 #                on held-prefix agent lanes (#736). Narrative-heavy non-agent
 #                serving: PREFIX_CACHE_ARG=--no-enable-prefix-caching restores
 #                the 73/106 profile.
+#              • ⚠️ MTP × hybrid-GDN wild write — vllm#50021, OPEN and LIVE IN THIS PIN.
+#                The GDN spec-decode path builds a state-block index from an UNBOUNDED
+#                accepted-token count; a zero/stale count dereferences a wild address →
+#                `CUDA error: unspecified launch failure` + Xid 13/31 and a dead worker,
+#                typically after minutes of agent-shaped traffic rather than at boot. Not
+#                quant-, topology- or depth-specific: hit on Ampere+Ada (#758) and on
+#                2× 5090 across NVFP4 AND W4A8 alike (#838). The vendored pr48375 fixes
+#                vllm#43559 (corruption) and does NOT cover this fault.
+#                MITIGATION: run the drafter off — SPEC_N=0. Lower n cuts
+#                frequency, NOT exposure (#758 called n=3 stable; #838 crashed AT n=3). Clears when
+#                #50021 merges and a pin bump inherits it — v0.26.0 PREDATES it.
+#                Detail + re-test trigger: docs/UPSTREAM.md.
 #   Quality:   8-pack 113/150 (75%) think-off · 120/150 (80%) think-on
 #              (benchlocal --full, rebench thinkingcap-27b-20260721-0758) — TOPS the
 #              Tess W4A16 (108/115) and Qwen fast-tier (109) on BOTH legs.

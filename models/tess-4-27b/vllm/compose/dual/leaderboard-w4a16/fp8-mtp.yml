@@ -28,6 +28,18 @@
 #              116/150, cli-40-concentrated 19/40 vs 25/40); think-ON ties
 #              (115 vs 117, within ±5-7 noise, cli-40 25/40 = parity). Same
 #              precision-not-serving-path gap as the NVFP4 A0 arms.
+#              • ⚠️ MTP × hybrid-GDN wild write — vllm#50021, OPEN and LIVE IN THIS PIN.
+#                The GDN spec-decode path builds a state-block index from an UNBOUNDED
+#                accepted-token count; a zero/stale count dereferences a wild address →
+#                `CUDA error: unspecified launch failure` + Xid 13/31 and a dead worker,
+#                typically after minutes of agent-shaped traffic rather than at boot. Not
+#                quant-, topology- or depth-specific: hit on Ampere+Ada (#758) and on
+#                2× 5090 across NVFP4 AND W4A8 alike (#838). The vendored pr48375 fixes
+#                vllm#43559 (corruption) and does NOT cover this fault.
+#                MITIGATION: run the drafter off — SPEC_N=0. Lower n cuts
+#                frequency, NOT exposure (#758 called n=3 stable; #838 crashed AT n=3). Clears when
+#                #50021 merges and a pin bump inherits it — v0.26.0 PREDATES it.
+#                Detail + re-test trigger: docs/UPSTREAM.md.
 #   Quality:   core 8-pack 108/150 (72%) think-off · 115/150 (77%) think-on
 #              (benchlocal --full, rebench tess-4-27b-20260717-0529) — BEATS
 #              the NVFP4 A0 baseline (106/113) on both legs.
