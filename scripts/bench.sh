@@ -92,6 +92,32 @@
 #                      Chat-tuned models EOS early and silently degenerate a 5-run
 #                      shape to n=1. Default: 0.25.
 #
+# Card rendering (docs/BENCH_CARD.md — default OFF; unset CARD leaves output
+# byte-identical to a run without it):
+#   CARD=snapshot      Render Template 1 (SNAPSHOT) as a fenced markdown block at
+#                      the end of the run, filled from this run's own captures.
+#                      Human judgement (verdict, "quiet box", config slug) stays an
+#                      explicit <fill: …> placeholder — the renderer never guesses.
+#   CARD=ab            Render Template 2 (A/B) against a previously saved run.
+#     BASELINE=<path>    REQUIRED for CARD=ab: a saved bench.sh log (arm A). Parsing
+#                        is strict — a log missing its fingerprint or summary blocks
+#                        fails with "baseline unparseable: <why>" instead of half a
+#                        delta. The run's own numbers are printed either way.
+#     KNOB="<text>"      Names the thing under test. Fingerprint differences matching
+#                        it are ATTRIBUTED to the knob; anything else marks the card
+#                        CONFOUNDED at the top.
+#     NOISE_BAND=<pct>   Override the band. Default: 2x the worst decode CV across
+#                        both arms — and the card states which was used.
+#     EXPECTATION="<t>"  Fills the pre-registered-expectation line (default "none").
+#     BOOT_POLICY="<t>"  Fills the boot-policy line.
+#   CARD_RECORD_OUT=<path>
+#                      Debug seam: also write the in-process card record, so it can
+#                      be diffed against the one parsed back out of the run's log.
+#
+#   Usage:
+#     CARD=snapshot bash scripts/bench.sh | tee run-A.log
+#     CARD=ab BASELINE=run-A.log KNOB=moe-cache bash scripts/bench.sh
+#
 # Usage:
 #   bash scripts/bench.sh
 #   ONLY=code bash scripts/bench.sh
@@ -275,6 +301,7 @@ CAP_T0=""; CAP_T1=""
 CAP_DMON_PID=""; CAP_VRAM_PID=""; CAP_LINK_PID=""
 CAP_VRAM_IDLE=""; CAP_CPU0=""
 CAP_ARGV=""; CAP_OFFLOAD=""; CAP_CACHE_WANTED=0
+CAP_PCIE_PCT=""; CAP_RAM_DEMAND=""; CAP_RAM_WINDOW=""; CAP_RAM_SUMMARY=""
 CAP_WORK=""
 if [[ "$CAPTURE" == "1" && -f "${ROOT_DIR}/scripts/lib/capture.sh" ]]; then
   # shellcheck source=lib/capture.sh
@@ -304,8 +331,15 @@ if [[ "$CAPTURE" == "1" && -f "${ROOT_DIR}/scripts/lib/capture.sh" ]]; then
   _v="$(cap_props_get "default_generation_settings.params.speculative.types" || true)"
   [[ -n "$_v" ]] && echo "  drafter        : ${_v}"
   # ALWAYS-ON: KV cache type. Offload or not, a bench without its KV type is a rumor.
-  _v="$(cap_kv_type "$CAP_ARGV" || true)"
-  [[ -n "$_v" ]] && echo "  KV cache type  : ${_v}"
+  # The notice is emitted HERE, not inside cap_kv_type: that function returns its
+  # value on stdout, so a notice printed there gets captured by this $(...) and
+  # rendered inside the label — seen live as
+  #   "KV cache type  : capture: KV cache type unavailable (…)".
+  if _v="$(cap_kv_type "$CAP_ARGV")"; then
+    echo "  KV cache type  : ${_v}"
+  else
+    cap_note_unavailable "KV cache type" "not in argv, /props or the boot log"
+  fi
   # ALWAYS-ON: argv fingerprint — solves the fingerprint problem without operator input.
   if [[ -n "$CAP_ARGV" ]]; then
     _v="$(cap_argv_fingerprint "$CAP_ARGV" || true)"
@@ -318,26 +352,43 @@ if [[ "$CAPTURE" == "1" && -f "${ROOT_DIR}/scripts/lib/capture.sh" ]]; then
   case "$_v" in *"moe_cache_cap=<unset>"*) : ;; *) CAP_CACHE_WANTED=1 ;; esac
   # The GATE for every moe-cache capture below.
   CAP_OFFLOAD="$(cap_offload_detected "$CAP_ARGV" || true)"
+  # One rendering, used for BOTH the printed line and the card record — the card
+  # parser reads the printed line back, so a second phrasing here would make the
+  # in-process record and the parsed one disagree (caught by the round-trip test).
   if [[ -n "$CAP_OFFLOAD" ]]; then
-    echo "  CPU offload    : DETECTED via ${CAP_OFFLOAD}"
+    CAP_OFFLOAD_DESC="DETECTED via ${CAP_OFFLOAD}"
   else
-    echo "  CPU offload    : not detected (moe-cache captures skipped)"
+    CAP_OFFLOAD_DESC="not detected (moe-cache captures skipped)"
   fi
+  echo "  CPU offload    : ${CAP_OFFLOAD_DESC}"
 
   # ALWAYS-ON (item 8): host RAM is the requirement launchers cannot detect, and
   # it is two lines from /proc. The swap leg is the free integrity item — pages of
   # the SERVING PROCESS in swap make every number in the run suspect.
   echo ""
   echo "========== SYSTEM RAM =========="
-  _v="$(cap_ram_status || true)"
-  [[ -n "$_v" ]] && echo "  ${_v}"
+  if _v="$(cap_ram_status)"; then
+    CAP_RAM_SUMMARY="$_v"
+    echo "  ${_v}"
+  else
+    cap_note_unavailable "system RAM" "/proc/meminfo not readable"
+  fi
   _v="$(cap_swap_verdict || true)"
   [[ -n "$_v" ]] && echo "  swap check     : ${_v}"
 
   if [[ "$STREAM_CALIB" == "1" ]]; then
     echo ""
     echo "========== RAM BANDWIDTH CEILING (STREAM triad, idle box) =========="
-    _sc="$(cap_stream_triad_gbps 3 || true)"
+    _screc=0
+    _sc="$(cap_stream_triad_gbps 3)" || _screc=$?
+    if (( _screc == 3 )); then
+      cap_note_unavailable "STREAM triad ceiling" \
+        "numpy not installed — a pure-python loop would measure the interpreter, not RAM"
+      _sc=""
+    elif (( _screc != 0 )); then
+      cap_note_unavailable "STREAM triad ceiling" "calibration failed (rc=${_screc})"
+      _sc=""
+    fi
     CAP_STREAM="${_sc%% *}"
     _scw="${_sc##* }"
     if [[ -n "$CAP_STREAM" ]]; then
@@ -349,7 +400,8 @@ if [[ "$CAPTURE" == "1" && -f "${ROOT_DIR}/scripts/lib/capture.sh" ]]; then
   fi
 
   # --- start the windowed samplers ----------------------------------------
-  CAP_DMON_PID="$(cap_dmon_start "$CAP_WORK/dmon" || true)"
+  CAP_DMON_PID="$(cap_dmon_start "$CAP_WORK/dmon")" \
+    || { cap_note_unavailable "PCIe dmon" "nvidia-smi not in PATH"; CAP_DMON_PID=""; }
   CAP_LINK_PID="$(cap_pcie_link_sampler_start "$CAP_WORK/link" || true)"
   CAP_VRAM_PID="$(cap_vram_peak_start "$CAP_WORK/vpeak" || true)"
   CAP_VRAM_IDLE="$(cap_vram_used || true)"
@@ -418,16 +470,39 @@ def progress(msg):
     sys.stderr.flush()
 
 
-def mark_phase(label, t0, t1):
-    """Record a measured window so PCIe/dmon samples can be sliced by PHASE.
+def _log_lines():
+    """Current line count of the server log, or 0 when there isn't one.
 
-    Decode and prefill PCIe traffic differ by ~100x on an offloaded MoE, so a
-    whole-run mean describes neither phase."""
+    This is the seam that makes PHASE-ATTRIBUTED counters possible: the engine's
+    cumulative moe-cache counters carry no timestamps, but reading them truncated
+    at two different line positions gives the delta across exactly that span."""
+    path = os.environ.get("SERVER_LOG", "")
+    if not path:
+        return 0
+    try:
+        with open(path, "rb") as fh:
+            return sum(1 for _ in fh)
+    except OSError:
+        return 0
+
+
+def phase_start():
+    return time.time(), _log_lines()
+
+
+def mark_phase(label, start):
+    """Record a measured window so PCIe samples and cache counters can be sliced
+    by PHASE.
+
+    Decode and prefill differ by ~13x in mean PCIe traffic on an offloaded MoE
+    (measured), so a whole-run mean describes neither — and a miss count averaged
+    over a run that was ~40% prefill understates decode-window RAM demand."""
     if not PHASE_FILE:
         return
+    t0, l0 = start
     try:
         with open(PHASE_FILE, "a", encoding="utf-8") as fh:
-            fh.write(f"{label} {t0:.0f} {t1:.0f}\n")
+            fh.write(f"{label} {t0:.0f} {time.time():.0f} {l0} {_log_lines()}\n")
     except OSError:
         pass
 
@@ -621,7 +696,7 @@ def run_set(label, prompt, max_tokens):
     walls, decodes, ttfts, toks_seen = [], [], [], []
     errors = 0
     mt = FORCE if FORCE > 0 else max_tokens
-    phase_t0 = time.time()
+    phase_t0 = phase_start()
     for i in range(RUNS):
         try:
             w, t, k, _ = run_once(prompt, max_tokens)
@@ -636,20 +711,29 @@ def run_set(label, prompt, max_tokens):
             errors += 1
             print(f"  run-{i+1}  FAIL: {e}")
             progress(f"[bench] {label} run {i+1}/{RUNS}: FAIL: {e}")
-    mark_phase("decode", phase_t0, time.time())
+    mark_phase("decode", phase_t0)
     # Item 2: a chat-tuned model answers briefly and EOSes. The per-shape stats
     # then silently describe whichever one or two runs happened to run long — a
     # 5-run shape degenerates to n=1 while still printing "n=5". Count the runs
     # that are long enough to be worth a decode rate and say so.
     floor = max(1, int(mt * SHORT_EOS_FRAC))
     usable = [k for k in toks_seen if k >= floor]
+    def _cv(xs):
+        if len(xs) < 2:
+            return 0.0
+        m = s.mean(xs)
+        return (s.stdev(xs) / m * 100) if m > 0 else 0.0
+
     SUMMARY["shapes"][label] = {
         "n": len(walls), "n_usable": len(usable), "errors": errors,
         "max_tokens": mt, "short_eos_floor": floor,
         "tokens": toks_seen,
         "wall_tps_mean": (s.mean(walls) if walls else 0.0),
+        "wall_tps_cv": _cv(walls),
         "decode_tps_mean": (s.mean(decodes) if decodes else 0.0),
+        "decode_tps_cv": _cv(decodes),
         "ttft_mean_ms": (s.mean(ttfts) * 1000 if ttfts else 0.0),
+        "ttft_std_ms": (s.stdev(ttfts) * 1000 if len(ttfts) > 1 else 0.0),
     }
     if walls:
         print(f"\n=== summary [{label}] (n={len(walls)}) ===")
@@ -699,7 +783,7 @@ def run_pp_fallback():
     )
     print("=== measured (1) ===")
     pp_vals, ttfts = [], []
-    phase_t0 = time.time()
+    phase_t0 = phase_start()
     try:
         w, t, _k, prompt_tokens = run_once(prompt, PP_MAX_TOKENS)
         pp, ttft, line = fmt_pp("run-1", w, t, prompt_tokens)
@@ -710,7 +794,7 @@ def run_pp_fallback():
     except Exception as e:
         print(f"  run-1      FAIL: {e}")
         progress(f"[bench] prompt-processing run 1/1: FAIL: {e}")
-    mark_phase("prefill", phase_t0, time.time())
+    mark_phase("prefill", phase_t0)
     if pp_vals:
         print("\n=== summary [prompt-processing] (n=1) ===")
         print(stats("PP tok/s", pp_vals))
@@ -779,7 +863,7 @@ def run_prefill_probe():
             print(f"  warm-1     FAIL: {e}")
         print(f"\n=== measured ({n}) ===")
         pps, ttfts = [], []
-        phase_t0 = time.time()
+        phase_t0 = phase_start()
         for i in range(n):
             try:
                 w, t, _k, ptoks = run_once(prefill_prompt(request_tokens, salt()), PP_MAX_TOKENS)
@@ -793,7 +877,7 @@ def run_prefill_probe():
             except Exception as e:
                 print(f"  run-{i+1}    FAIL: {e}")
                 progress(f"[bench] {label} run {i+1}/{n}: FAIL: {e}")
-        mark_phase("prefill", phase_t0, time.time())
+        mark_phase("prefill", phase_t0)
         if pps:
             print(f"\n=== summary [{label}] (n={len(pps)}) ===")
             # prompt_tokens/TTFT = the CLIENT-OBSERVED rate (includes
@@ -813,9 +897,12 @@ def run_prefill_probe():
                 vals = [v for v in vals if v > 0][-len(pps):]
                 if vals:
                     print(stats("PP tok/s (engine log, windowed)", vals))
+            _pm = s.mean(pps)
             SUMMARY["shapes"][label] = {
                 "n": len(pps), "n_usable": len(pps), "errors": 0,
-                "prefill_tps_mean": s.mean(pps), "ttft_mean_ms": s.mean(ttfts) * 1000,
+                "prefill_tps_mean": _pm,
+                "prefill_tps_cv": ((s.stdev(pps) / _pm * 100) if len(pps) > 1 and _pm > 0 else 0.0),
+                "ttft_mean_ms": s.mean(ttfts) * 1000,
             }
 
 if ONLY in ("both", "narr"):
@@ -865,6 +952,7 @@ if (( CAP_ENABLED )); then
     for _ph in decode prefill; do
       command grep -q "^${_ph} " "$CAP_WORK/phases" 2>/dev/null || continue
       if _out="$(cap_dmon_phase "$CAP_WORK/dmon" "$CAP_WORK/phases" "$_ph" 2>/dev/null)"; then
+        printf '%s\n' "$_out" >> "$CAP_WORK/pcie.txt"
         while IFS= read -r _l; do [[ -n "$_l" ]] && echo "  ${_l}"; done <<< "$_out"
       else
         # Reported, never silently omitted: a phase shorter than the 1 Hz sample
@@ -879,6 +967,7 @@ if (( CAP_ENABLED )); then
   # Link capability, sampled UNDER LOAD: an idle link downshifts to Gen1 by
   # design, so an idle reading manufactures false alarms.
   if _out="$(cap_pcie_link_under_load "$CAP_WORK/link" 2>/dev/null)"; then
+    printf '%s\n' "$_out" > "$CAP_WORK/link.txt"
     echo "  link (sampled under load, best observed):"
     while IFS= read -r _l; do [[ -n "$_l" ]] && echo "    ${_l}"; done <<< "$_out"
     # Utilisation% against a STATED denominator — a bandwidth percentage with an
@@ -891,8 +980,11 @@ if (( CAP_ENABLED )); then
              | command grep -m1 ' all ' | command grep -oE 'rx_peak=[0-9]+' | cut -d= -f2 || true)"
       echo "    denominator: ~${_prac} MB/s practical for a negotiated gen${_g} x${_w} link"
       echo "                 (per-lane raw x width x 0.85; NOT a theoretical peak)"
-      [[ -n "$_rx" ]] && awk -v a="$_rx" -v b="$_prac" 'BEGIN{
-        if (b > 0) printf "    decode rx peak = %s MB/s = %.1f%% of that denominator\n", a, a*100/b }'
+      if [[ -n "$_rx" ]]; then
+        CAP_PCIE_PCT="$(awk -v a="$_rx" -v b="$_prac" 'BEGIN{ if (b > 0) printf "%.1f", a*100/b }')"
+        awk -v a="$_rx" -v b="$_prac" 'BEGIN{
+          if (b > 0) printf "    decode rx peak = %s MB/s = %.1f%% of that denominator\n", a, a*100/b }'
+      fi
     fi
   else
     cap_note_unavailable "PCIe link state" "nvidia-smi could not report pcie.link.* under load"
@@ -906,9 +998,21 @@ if (( CAP_ENABLED )); then
   if [[ -n "$CAP_VRAM_IDLE" ]]; then
     echo "  idle=${CAP_VRAM_IDLE} MiB  peak=${CAP_VRAM_PEAK:-n/a} MiB  post=${CAP_VRAM_POST:-n/a} MiB"
     if [[ -n "$CAP_VRAM_POST" ]]; then
-      # A free soak-lite leak check: VRAM that did not come back is the cheapest
-      # early warning there is for a memory-policy regression.
-      echo "  leak delta (post - idle) = $(( CAP_VRAM_POST - CAP_VRAM_IDLE )) MiB"
+      # A free soak-lite check on VRAM that did not come back. But the LABEL has to
+      # match what the config can legitimately do: an expert cache allocates its
+      # pool and graphs lazily, on first inference, so a single run with a cache
+      # active grows VRAM BY DESIGN. Calling that a leak cries wolf on a healthy
+      # run (measured: +1036 MiB with moe-cache active). Only a monotonic rise
+      # across REPEATED runs is evidence of a leak there.
+      _vd=$(( CAP_VRAM_POST - CAP_VRAM_IDLE ))
+      if [[ -n "$CAP_OFFLOAD" ]] && (( CAP_CACHE_WANTED )); then
+        echo "  growth delta (post - idle) = ${_vd} MiB"
+        echo "    includes lazy expert-cache pool/graph allocation on first inference —"
+        echo "    expected with a cache active. Only a MONOTONIC rise across REPEATED"
+        echo "    runs indicates a leak."
+      else
+        echo "  leak delta (post - idle) = ${_vd} MiB"
+      fi
     fi
     while IFS= read -r _l; do [[ -n "$_l" ]] && echo "  ${_l} MiB (post-run)"; done \
       < <(cap_vram_per_device 2>/dev/null || true)
@@ -1049,21 +1153,63 @@ print(f"{sum(xs)/len(xs):.2f}" if xs else "")
             if ($i ~ /^dlookups=/) { split($i, b, "="); t += b[2] }
           }
         } END { m = t - h; print (m > 0 ? m : 0) }' || true)"
-        if [[ -n "$_exp" && -n "$_miss" && "${_miss:-0}" -gt 0 ]]; then
+
+        # DECODE-WINDOW attribution. Dividing the whole-run miss count by the whole
+        # run wall dilutes the figure with the prefill phases, during which the
+        # cache is not on the hot path — a live run spent ~40% of its wall in
+        # prefill and reported ~14 GB/s where the decode-window figure is roughly
+        # double. The engine's counters carry no timestamps, so the decode windows
+        # are recovered by reading the cumulative counters truncated at the log
+        # line positions python recorded at each phase boundary.
+        _win_secs=0; _win_miss=0; _win_ok=0
+        if [[ -s "$CAP_WORK/phases" ]]; then
+          while read -r _lab _pt0 _pt1 _pl0 _pl1 _junk; do
+            [[ "$_lab" == "decode" ]] || continue
+            _win_secs=$(( _win_secs + _pt1 - _pt0 ))
+            [[ -n "${_pl1:-}" && -n "${_pl0:-}" && "${_pl1:-0}" -gt "${_pl0:-0}" ]] || continue
+            CAP_LINE_LIMIT="$_pl0" cap_moe_parse counters > "$CAP_WORK/pc0" 2>/dev/null || continue
+            CAP_LINE_LIMIT="$_pl1" cap_moe_parse counters > "$CAP_WORK/pc1" 2>/dev/null || continue
+            _wm="$(cap_marginal_rates "$CAP_WORK/pc0" "$CAP_WORK/pc1" 2>/dev/null | awk '{
+              for (i = 1; i <= NF; i++) {
+                if ($i ~ /^dhits=/)    { split($i, a, "="); h += a[2] }
+                if ($i ~ /^dlookups=/) { split($i, b, "="); t += b[2] }
+              }
+            } END { m = t - h; print (m > 0 ? m : 0) }' || true)"
+            [[ -n "$_wm" && "$_wm" -gt 0 ]] && { _win_miss=$(( _win_miss + _wm )); _win_ok=1; }
+          done < "$CAP_WORK/phases"
+        fi
+        unset CAP_LINE_LIMIT
+
+        _ram=""; _ram_scope=""; _ram_arith=""; _ram_caveat=""
+        if [[ -n "$_exp" ]] && (( _win_ok )) && (( _win_secs > 0 )) && (( _win_miss > 0 )); then
+          _ram="$(cap_ram_rd_mbps "$_win_miss" "$_exp" "$_win_secs" || true)"
+          _ram_scope="(DECODE WINDOW)"
+          _ram_arith="= ${_win_miss} misses x ${_exp} KiB / ${_win_secs}s of decode"
+        elif [[ -n "$_exp" && -n "$_miss" && "${_miss:-0}" -gt 0 ]]; then
           _ram="$(cap_ram_rd_mbps "$_miss" "$_exp" "$CAP_ELAPSED" || true)"
-          if [[ -n "$_ram" ]]; then
-            echo "  derived host-RAM read demand on the miss path: ~${_ram} MB/s"
-            echo "    = ${_miss} misses x ${_exp} KiB / ${CAP_ELAPSED}s"
-            echo "    ⚠ DERIVED, NOT A PERF COUNTER. A lower bound on the miss path only"
-            echo "      (ignores KV traffic, activations and prefetch). IMC/uncore counters"
-            echo "      are root-gated on bare metal and absent in VM guests, so this is the"
-            echo "      portable substitute — never quote it as measured bandwidth."
-            if [[ -n "${CAP_STREAM:-}" ]]; then
-              awk -v d="$_ram" -v c="${CAP_STREAM}" 'BEGIN{
-                if (c > 0) printf "    ~%.0f of ~%.0f GB/s STREAM-triad ceiling (%.0f%%)\n", d/1000, c, d/10/c }'
-            else
-              echo "    (STREAM_CALIB=1 adds a ~3 s triad ceiling so this can be stated as a fraction)"
-            fi
+          _ram_scope="(WHOLE RUN — diluted)"
+          _ram_arith="= ${_miss} misses x ${_exp} KiB / ${CAP_ELAPSED}s"
+          _ram_caveat="dilution"
+        fi
+        if [[ -n "$_ram" ]]; then
+          CAP_RAM_DEMAND="$_ram"
+          CAP_RAM_WINDOW="$([[ "$_ram_caveat" == "dilution" ]] && echo "whole-run (diluted)" || echo "decode window")"
+          echo "  derived host-RAM read demand on the miss path: ~${_ram} MB/s  ${_ram_scope}"
+          echo "    ${_ram_arith}"
+          echo "    ⚠ DERIVED, NOT A PERF COUNTER. A lower bound on the miss path only"
+          echo "      (ignores KV traffic, activations and prefetch). IMC/uncore counters"
+          echo "      are root-gated on bare metal and absent in VM guests, so this is the"
+          echo "      portable substitute — never quote it as measured bandwidth."
+          if [[ "$_ram_caveat" == "dilution" ]]; then
+            echo "    ⚠ Averaged over the FULL RUN INCLUDING non-decode phases (prefill, warm-up),"
+            echo "      during which the cache is not on the hot path — the decode-window demand"
+            echo "      is HIGHER than this. Set SERVER_LOG=<path> to get the decode-window figure."
+          fi
+          if [[ -n "${CAP_STREAM:-}" ]]; then
+            awk -v d="$_ram" -v c="${CAP_STREAM}" 'BEGIN{
+              if (c > 0) printf "    ~%.0f of ~%.0f GB/s STREAM-triad ceiling (%.0f%%)\n", d/1000, c, d/10/c }'
+          else
+            echo "    (STREAM_CALIB=1 adds a ~3 s triad ceiling so this can be stated as a fraction)"
           fi
         fi
       fi
@@ -1133,6 +1279,135 @@ for name, v in d.get("shapes", {}).items():
         print(f"  ⚠ n-usable   : {name} {u}/{n} runs above the short-EOS floor "
               f"({floor} tok) - the CV for this shape is not trustworthy")
 ' "$CAP_WORK/summary.json" || true
+
+  # ---- BENCH CARD (opt-in: CARD=snapshot | ab) ----------------------------
+  # docs/BENCH_CARD.md's templates are correct and nobody fills them in by hand
+  # under time pressure — which is when the awkward facts get left off. Everything
+  # above is already captured; this pours it into the template.
+  if [[ -n "${CARD:-}" && -f "${ROOT_DIR}/scripts/lib/card.sh" ]]; then
+    # shellcheck source=lib/card.sh
+    source "${ROOT_DIR}/scripts/lib/card.sh"
+    CARD_REC="$CAP_WORK/card.kv"
+    : > "$CARD_REC"
+    card_kv "$CARD_REC" meta.date        "$(date +%F)"
+    card_kv "$CARD_REC" meta.endpoint    "$URL"
+    card_kv "$CARD_REC" meta.mode        "$ENDPOINT"
+    card_kv "$CARD_REC" fp.model         "$MODEL"
+    card_kv "$CARD_REC" fp.ctx           "$(cap_props_get 'default_generation_settings.n_ctx' || true)"
+    card_kv "$CARD_REC" fp.slots         "$(cap_props_get 'total_slots' || true)"
+    card_kv "$CARD_REC" fp.ftype         "$(cap_props_get 'model_ftype' || true)"
+    card_kv "$CARD_REC" fp.drafter       "$(cap_props_get 'default_generation_settings.params.speculative.types' || true)"
+    card_kv "$CARD_REC" fp.kv            "$(cap_kv_type "$CAP_ARGV" || true)"
+    card_kv "$CARD_REC" fp.argv          "$(cap_argv_fingerprint "$CAP_ARGV" 2>/dev/null || true)"
+    card_kv "$CARD_REC" fp.moe           "$(cap_moe_cache_config "$CAP_ARGV" || true)"
+    card_kv "$CARD_REC" fp.offload       "${CAP_OFFLOAD_DESC:-}"
+    card_kv "$CARD_REC" proto.warmups    "$WARMUPS"
+    card_kv "$CARD_REC" proto.runs       "$RUNS"
+    card_kv "$CARD_REC" proto.force_tokens "$FORCE_TOKENS"
+    card_kv "$CARD_REC" proto.thinking   "$ENABLE_THINKING"
+    # The Env line should name what was NOT default — that is what makes a run
+    # reproducible, and it is the line most often reconstructed wrongly by hand.
+    _envnote=""
+    [[ "$RUNS" != "5" ]]            && _envnote+="RUNS=${RUNS} "
+    [[ "$WARMUPS" != "3" ]]         && _envnote+="WARMUPS=${WARMUPS} "
+    [[ "$FORCE_TOKENS" != "0" ]]    && _envnote+="FORCE_TOKENS=${FORCE_TOKENS} "
+    [[ "$ENABLE_THINKING" == "1" ]] && _envnote+="ENABLE_THINKING=1 "
+    [[ "$ENDPOINT" != "chat" ]]     && _envnote+="ENDPOINT=${ENDPOINT} "
+    [[ "$ONLY" != "both" ]]         && _envnote+="ONLY=${ONLY} "
+    [[ "$PREFILL_DEPTHS" != "10000,90000" ]] && _envnote+="PREFILL_DEPTHS=${PREFILL_DEPTHS} "
+    [[ -n "${SERVER_LOG:-}" ]]      && _envnote+="SERVER_LOG=<set> "
+    card_kv "$CARD_REC" proto.env "${_envnote:-}"
+    card_kv "$CARD_REC" gpu.vram_idle    "${CAP_VRAM_IDLE:-}"
+    card_kv "$CARD_REC" gpu.vram_peak    "${CAP_VRAM_PEAK:-}"
+    card_kv "$CARD_REC" gpu.vram_post    "${CAP_VRAM_POST:-}"
+    [[ -n "${CAP_VRAM_IDLE:-}" && -n "${CAP_VRAM_POST:-}" ]] \
+      && card_kv "$CARD_REC" gpu.leak "$(( CAP_VRAM_POST - CAP_VRAM_IDLE ))"
+    card_kv "$CARD_REC" integrity.status "${CAP_STATUS:-}"
+    card_kv "$CARD_REC" integrity.divergence "${_div:-}"
+    card_kv "$CARD_REC" integrity.stream_ceiling "${CAP_STREAM:-}"
+    [[ -s "$CAP_WORK/counters1" ]] \
+      && card_kv "$CARD_REC" integrity.health "$(cap_health_verdict "$CAP_WORK/counters1" || true)"
+    card_kv "$CARD_REC" integrity.swap "$(cap_swap_verdict 2>/dev/null || true)"
+    # --- offload / PCIe / RAM telemetry for the card's offload block ---------
+    card_kv "$CARD_REC" sys.ram "${CAP_RAM_SUMMARY:-}"
+    card_kv "$CARD_REC" ram.demand_mbps "${CAP_RAM_DEMAND:-}"
+    card_kv "$CARD_REC" ram.window      "${CAP_RAM_WINDOW:-}"
+    card_kv "$CARD_REC" ram.ceiling_gbps "${CAP_STREAM:-}"
+    card_kv "$CARD_REC" pcie.link_pct   "${CAP_PCIE_PCT:-}"
+    card_kv "$CARD_REC" pcie.practical_mbps "${_prac:-}"
+    if [[ -s "$CAP_WORK/link.txt" ]]; then
+      card_kv "$CARD_REC" pcie.link "$(command grep -m1 -oE 'GPU[0-9]+ gen=[0-9]+/[0-9]+ width=[0-9]+/[0-9]+' "$CAP_WORK/link.txt" || true)"
+      command grep -q 'WARN: never reached' "$CAP_WORK/link.txt" \
+        && card_kv "$CARD_REC" pcie.link_warn "link trained below its own maximum under load"
+    fi
+    if [[ -s "$CAP_WORK/pcie.txt" ]]; then
+      while read -r _ph _dev _rest; do
+        [[ "$_dev" == "all" || "$_dev" == GPU* ]] || continue
+        _k="pcie.${_ph}.${_dev}"
+        card_kv "$CARD_REC" "${_k}.rx_mean" "$(printf '%s' "$_rest" | command grep -oE 'rx_mean=[0-9]+' | cut -d= -f2 || true)"
+        card_kv "$CARD_REC" "${_k}.rx_peak" "$(printf '%s' "$_rest" | command grep -oE 'rx_peak=[0-9]+' | cut -d= -f2 || true)"
+      done < "$CAP_WORK/pcie.txt"
+    fi
+    # Per-device cache detail the offload table needs beyond hit rates.
+    if [[ -s "$CAP_WORK/counters1" ]]; then
+      while read -r _d _rest; do
+        [[ -n "$_d" ]] || continue
+        card_kv "$CARD_REC" "cache.${_d}.evictions" \
+          "$(printf '%s' "$_rest" | command grep -oE 'devictions=[0-9]+' | cut -d= -f2 || true)"
+      done < <(cap_marginal_rates "$CAP_WORK/counters0" "$CAP_WORK/counters1" 2>/dev/null || true)
+      while read -r _d _rest; do
+        [[ -n "$_d" ]] || continue
+        card_kv "$CARD_REC" "cache.${_d}.skips" \
+          "$(printf '%s' "$_rest" | command grep -oE 'skips=[0-9]+' | cut -d= -f2 || true)"
+      done < "$CAP_WORK/counters1"
+    fi
+    while read -r _d _rest; do
+      [[ -n "$_d" ]] || continue
+      card_kv "$CARD_REC" "cache.${_d}.type" \
+        "$(printf '%s' "$_rest" | command grep -oE 'type=[^ ]+' | cut -d= -f2 || true)"
+    done < <(cap_moe_parse census 2>/dev/null || true)
+    # Per-device cache rows stay PER DEVICE on the card (item 3d).
+    if [[ -s "$CAP_WORK/counters1" ]]; then
+      while read -r _d _rest; do
+        [[ -n "$_d" ]] || continue
+        card_kv "$CARD_REC" "cache.${_d}.marginal" \
+          "$(printf '%s' "$_rest" | command grep -oE 'marginal=[0-9.]+' | cut -d= -f2 || true)"
+        card_kv "$CARD_REC" "cache.${_d}.cumulative" \
+          "$(printf '%s' "$_rest" | command grep -oE 'cumulative=[0-9.]+' | cut -d= -f2 || true)"
+      done < <(cap_marginal_rates "$CAP_WORK/counters0" "$CAP_WORK/counters1" 2>/dev/null || true)
+      while read -r _d _rest; do
+        [[ -n "$_d" ]] || continue
+        card_kv "$CARD_REC" "cache.${_d}.cum_start" \
+          "$(printf '%s' "$_rest" | command grep -oE 'cumulative=[0-9.]+' | cut -d= -f2 || true)"
+      done < <(cap_cumulative_rates "$CAP_WORK/counters0" 2>/dev/null || true)
+    fi
+    while read -r _d _rest; do
+      [[ -n "$_d" ]] || continue
+      card_kv "$CARD_REC" "cache.${_d}.slots" \
+        "$(printf '%s' "$_rest" | command grep -oE 'slots=[0-9]+' | cut -d= -f2 || true)"
+      card_kv "$CARD_REC" "cache.${_d}.total_mib" \
+        "$(printf '%s' "$_rest" | command grep -oE 'total_mib=[0-9]+' | cut -d= -f2 || true)"
+    done < <(cap_moe_parse census 2>/dev/null || true)
+    card_kv_from_summary "$CARD_REC" "$CAP_WORK/summary.json" || true
+    # Debug seam: lets the suite diff this in-process record against the one
+    # card.sh parses back out of this run's own log. If those disagree, every
+    # A/B silently compares two different measurements.
+    [[ -n "${CARD_RECORD_OUT:-}" ]] && cp "$CARD_REC" "$CARD_RECORD_OUT"
+
+    echo ""
+    echo "========== BENCH CARD (CARD=${CARD}) =========="
+    echo "Paste the block below into the issue / discussion. Placeholders marked"
+    echo "<fill: …> are human judgement — the run cannot know them, so it will not guess."
+    echo ""
+    echo '```markdown'
+    case "$CARD" in
+      snapshot) card_render snapshot "$CARD_REC" || echo "(card render failed)" ;;
+      ab)       card_render ab "$CARD_REC" "${BASELINE:-}" \
+                  || echo "(A/B card not rendered — see the error above; the run's own numbers are intact)" ;;
+      *)        echo "(unknown CARD=${CARD}; expected 'snapshot' or 'ab')" ;;
+    esac
+    echo '```'
+  fi
 fi
 
 # GPU state
