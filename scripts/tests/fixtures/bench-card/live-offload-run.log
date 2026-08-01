@@ -1,0 +1,172 @@
+# Fixture: a REAL bench.sh run, redacted (rig paths replaced).
+# Source: a bare-metal, CPU-offloaded, chat-tuned MoE on 2x consumer GPUs —
+# the combination the capture layer was built for. Used to prove the card
+# renderer fills its offload block from an ACTUAL run rather than only from
+# hand-written records, which is where a renderer quietly diverges from what
+# bench.sh really prints.
+#
+# NOTE: produced BEFORE the health-verdict correction, so its cache-health line
+# still uses the old over-strict wording ('FAIL' on non-zero skips). Kept as-is
+# on purpose: the parser must stay able to read logs written by older versions.
+
+========== CONFIG FINGERPRINT ==========
+  endpoint       : http://127.0.0.1:8030  (mode=chat)
+  model          : deepseek-v4-flash
+  serving pid    : 823013
+  log source     : server-log (/var/log/llama-server.log)
+  served ctx     : 65536  (slots=1)
+  weights ftype  : MXFP4 MoE
+  KV cache type  : capture: KV cache type unavailable (not in argv, /props or the boot log)
+  serving argv   : model=/models/deepseek-v4-flash/DeepSeek-V4-Flash-UD-Q8_K_XL-00001-of-00005.gguf offload=blk\.[0-9]+\.ffn_(gate|up|down)_exps\.weight=CPU threads=24 ubatch=2048 ngl=99 split=1,1
+  moe-cache cfg  : moe_cache_cap=20480 RESERVE_MB=2048 ADMIT_AFTER=1 THROTTLE=64 MAX_BATCH=8 STATS=1000
+  CPU offload    : DETECTED via argv -ot
+
+========== SYSTEM RAM ==========
+  mem_total_gib=235.9 mem_available_gib=89.9 server_rss_gib=139.2 swap_total_gib=8.0 swap_used_gib=2.4 server_swap_mib=0
+  swap check     : PASS (no serving-process pages in swap)
+
+========== RAM BANDWIDTH CEILING (STREAM triad, idle box) ==========
+  triad ceiling  : 36.0 GB/s  (16 concurrent workers, ~3 s, measured on THIS host)
+                   Sustained STREAM-triad, not a spec sheet figure. A box that is
+                   already serving reports a LOWER ceiling than an idle one — which
+                   is the honest denominator for a run measured under that load.
+[bench] narrative run 1/5: 1000 tok in 54.4s (18.54 decode TPS, ttft 479ms)
+[bench] narrative run 2/5: 1000 tok in 55.1s (18.31 decode TPS, ttft 467ms)
+[bench] narrative run 3/5: 1000 tok in 54.9s (18.41 decode TPS, ttft 529ms)
+[bench] narrative run 4/5: 1000 tok in 54.5s (18.54 decode TPS, ttft 527ms)
+[bench] narrative run 5/5: 1000 tok in 55.0s (18.36 decode TPS, ttft 534ms)
+[bench] code run 1/5: 800 tok in 43.4s (18.67 decode TPS, ttft 548ms)
+[bench] code run 2/5: 800 tok in 44.0s (18.43 decode TPS, ttft 541ms)
+[bench] code run 3/5: 800 tok in 43.7s (18.53 decode TPS, ttft 546ms)
+[bench] code run 4/5: 800 tok in 43.7s (18.53 decode TPS, ttft 541ms)
+[bench] code run 5/5: 800 tok in 44.1s (18.36 decode TPS, ttft 538ms)
+[bench] capture: tokenizer ratio 1.27 tok/word (haystacks sized by measured tokens, not words)
+[bench] prefill-10k run 1/3: 10353 prompt tok, 126.3 prefill tok/s, ttft 81947ms
+[bench] prefill-10k run 2/3: 9996 prompt tok, 129.9 prefill tok/s, ttft 76925ms
+[bench] prefill-10k run 3/3: 10353 prompt tok, 126.2 prefill tok/s, ttft 82024ms
+
+========== NARRATIVE (prompt=65 chars, max_tokens=1000) ==========
+=== warmups (3) ===
+  warm-1     wall= 55.15s  ttft=   552ms  toks=1000  wall_TPS= 18.13  decode_TPS= 18.32
+  warm-2     wall= 54.81s  ttft=   487ms  toks=1000  wall_TPS= 18.24  decode_TPS= 18.41
+  warm-3     wall= 54.47s  ttft=   467ms  toks=1000  wall_TPS= 18.36  decode_TPS= 18.52
+
+=== measured (5) ===
+  run-1      wall= 54.42s  ttft=   479ms  toks=1000  wall_TPS= 18.37  decode_TPS= 18.54
+  run-2      wall= 55.08s  ttft=   467ms  toks=1000  wall_TPS= 18.15  decode_TPS= 18.31
+  run-3      wall= 54.86s  ttft=   529ms  toks=1000  wall_TPS= 18.23  decode_TPS= 18.41
+  run-4      wall= 54.46s  ttft=   527ms  toks=1000  wall_TPS= 18.36  decode_TPS= 18.54
+  run-5      wall= 55.01s  ttft=   534ms  toks=1000  wall_TPS= 18.18  decode_TPS= 18.36
+
+=== summary [narrative] (n=5) ===
+  wall_TPS       mean=  18.26   std=  0.10   CV= 0.6%   min=18.15   max=18.37
+  decode_TPS     mean=  18.43   std=  0.11   CV= 0.6%   min=18.31   max=18.54
+  TTFT          mean=   507ms  std=   32ms  min=467ms  max=534ms
+  n-usable      5/5  (runs with >= 250 tokens, 25% of max_tokens=1000)
+  PP tok/s       mean=  31.51   std=  2.16   CV= 6.9%   min=29.75   max=34.25
+
+========== CODE (prompt=78 chars, max_tokens=800) ==========
+=== warmups (3) ===
+  warm-1     wall= 46.76s  ttft=   557ms  toks= 800  wall_TPS= 17.11  decode_TPS= 17.32
+  warm-2     wall= 44.18s  ttft=   536ms  toks= 800  wall_TPS= 18.11  decode_TPS= 18.33
+  warm-3     wall= 44.26s  ttft=   536ms  toks= 800  wall_TPS= 18.08  decode_TPS= 18.30
+
+=== measured (5) ===
+  run-1      wall= 43.39s  ttft=   548ms  toks= 800  wall_TPS= 18.44  decode_TPS= 18.67
+  run-2      wall= 43.95s  ttft=   541ms  toks= 800  wall_TPS= 18.20  decode_TPS= 18.43
+  run-3      wall= 43.71s  ttft=   546ms  toks= 800  wall_TPS= 18.30  decode_TPS= 18.53
+  run-4      wall= 43.71s  ttft=   541ms  toks= 800  wall_TPS= 18.30  decode_TPS= 18.53
+  run-5      wall= 44.11s  ttft=   538ms  toks= 800  wall_TPS= 18.14  decode_TPS= 18.36
+
+=== summary [code] (n=5) ===
+  wall_TPS       mean=  18.28   std=  0.11   CV= 0.6%   min=18.14   max=18.44
+  decode_TPS     mean=  18.51   std=  0.12   CV= 0.6%   min=18.36   max=18.67
+  TTFT          mean=   543ms  std=    4ms  min=538ms  max=548ms
+  n-usable      5/5  (runs with >= 200 tokens, 25% of max_tokens=800)
+  PP tok/s       mean=  34.96   std=  0.24   CV= 0.7%   min=34.69   max=35.26
+
+========== PREFILL-10K (target=10000 prompt tokens, max_tokens=16, cache-busted: fresh haystack per run) ==========
+=== warmups (1) ===
+  warm-1     wall= 83.05s  ttft= 82883ms  prompt_toks= 10556  PP_tok/s= 127.36
+  [calibrated: 10556 tok at request=10000 → measured runs request 9473]
+
+=== measured (3) ===
+  run-1      wall= 82.11s  ttft= 81947ms  prompt_toks= 10353  PP_tok/s= 126.34
+  run-2      wall= 77.09s  ttft= 76925ms  prompt_toks=  9996  PP_tok/s= 129.94
+  run-3      wall= 82.23s  ttft= 82024ms  prompt_toks= 10353  PP_tok/s= 126.22
+
+=== summary [prefill-10k] (n=3) ===
+  prefill tok/s  mean= 127.50   std=  2.12   CV= 1.7%   min=126.22   max=129.94
+  TTFT          mean= 80298ms  std= 2922ms  min=76925ms  max=82024ms
+  PP tok/s (engine log, windowed) mean= 127.70   std=  2.13   CV= 1.7%   min=126.41   max=130.16
+
+========== PREFILL-90K (target=90000 prompt tokens, max_tokens=16, cache-busted: fresh haystack per run) ==========
+=== warmups (1) ===
+  SKIP: 90000 tokens exceeds the served context (HTTP Error 400: Bad Request)
+
+========== CAPTURE: PCIe ==========
+  decode all rx_mean=231 rx_peak=1941 tx_mean=98 tx_peak=659 sm_mean=29.6 memctl_mean=20.6 samples=904
+  decode GPU0 rx_mean=346 rx_peak=1941 tx_mean=119 tx_peak=659 sm_mean=30.3 memctl_mean=20.2 samples=452
+  decode GPU1 rx_mean=115 rx_peak=1507 tx_mean=77 tx_peak=178 sm_mean=28.9 memctl_mean=21.0 samples=452
+  prefill all rx_mean=3031 rx_peak=28182 tx_mean=447 tx_peak=12154 sm_mean=50.9 memctl_mean=20.1 samples=444
+  prefill GPU0 rx_mean=5978 rx_peak=28182 tx_mean=831 tx_peak=12154 sm_mean=67.3 memctl_mean=21.4 samples=222
+  prefill GPU1 rx_mean=85 rx_peak=1778 tx_mean=64 tx_peak=1914 sm_mean=34.5 memctl_mean=18.8 samples=222
+  note: decode and prefill PCIe traffic differ by ~100x on an offloaded MoE —
+        a whole-run mean describes neither. 1 Hz under-reads bursts, so the
+        PEAK is reported next to the mean, not instead of it.
+  link (sampled under load, best observed):
+    GPU0 gen=4/4 width=16/16
+    GPU1 gen=4/4 width=16/16
+    denominator: ~26778 MB/s practical for a negotiated gen4 x16 link
+                 (per-lane raw x width x 0.85; NOT a theoretical peak)
+    decode rx peak = 1941 MB/s = 7.2% of that denominator
+
+========== CAPTURE: VRAM ==========
+  idle=44324 MiB  peak=45360 MiB  post=45360 MiB
+  leak delta (post - idle) = 1036 MiB
+  GPU0 22662 MiB (post-run)
+  GPU1 22698 MiB (post-run)
+  host CPU busy across the run: 37.9%
+
+========== CAPTURE: DRAFT ACCEPTANCE ==========
+  no drafter output in the log (spec-dec off, or the engine does not log acceptance)
+
+========== CAPTURE: ENGINE-SIDE TIMINGS ==========
+  decode n=16 mean=18.37 median=18.41 min=17.32 max=18.67  (tok/s, from the server's own print_timing)
+  prefill n=20 mean=52.36 median=34.72 min=29.75 max=130.16  (tok/s, from the server's own print_timing)
+  dropped_short_decode n=4 floor=32  (short probe completions excluded from the decode cross-check)
+  cross-check: client-observed 18.47 vs engine-side 18.41 tok/s -> 0.3% divergence
+
+========== CAPTURE: EXPERT CACHE (moe-cache) ==========
+  pool census (per device — a device can hold MULTIPLE pools; slots/bytes are summed):
+    CUDA0 pools=1 slots=3038 total_mib=12911 expert_kib=4352 type=mxfp4
+    CUDA1 pools=1 slots=3126 total_mib=13285 expert_kib=4352 type=mxfp4
+  allocation: devices=2 pool_lines=2 enabled=1 nobudget=0 devlist=CUDA0,CUDA1  (GPUs on this host: 2)
+  hit rate, per device (MARGINAL = across the measured window only):
+    CUDA0 marginal=60.3% cumulative=59.3% dhits=4552130 dlookups=7551498 devictions=42171
+    CUDA1 marginal=80.4% cumulative=79.4% dhits=2933098 dlookups=3647988 devictions=9158
+    note: the CUMULATIVE column embeds the cold-fill phase and is NOT
+          boot-comparable — a BIGGER pool shows a LOWER cumulative rate on
+          the same traffic. Compare boots on the MARGINAL column only.
+    note: the per-device split is signal, not noise — a CUDA0/CUDA1 hit
+          asymmetry is routing entropy, and averaging it away hides it.
+  health counters: FAIL — CUDA0: skips=13955; CUDA1: skips=2330
+  derived host-RAM read demand on the miss path: ~14119 MB/s
+    = 3714258 misses x 4352 KiB / 1118s
+    ⚠ DERIVED, NOT A PERF COUNTER. A lower bound on the miss path only
+      (ignores KV traffic, activations and prefetch). IMC/uncore counters
+      are root-gated on bare metal and absent in VM guests, so this is the
+      portable substitute — never quote it as measured bandwidth.
+    ~14 of ~36 GB/s STREAM-triad ceiling (39%)
+  bypass counter: 0
+
+========== CAPTURE: INTEGRITY ==========
+  status: OK
+  (no capture-level defect detected — this is NOT a statement about the numbers'
+   quality, only that the measurement machinery did its job)
+  swap check   : PASS (no serving-process pages in swap)
+  cache health : FAIL — CUDA0: skips=13955; CUDA1: skips=2330
+
+=== GPU state ===
+0, 0 %, 22662 MiB, 24576 MiB, 147.12 W, 64
+1, 0 %, 22698 MiB, 24576 MiB, 135.52 W, 60

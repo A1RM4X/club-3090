@@ -1,0 +1,44 @@
+# Fixture: a SAVED bench.sh log, standing in for a previous run's arm A.
+# Hand-written on purpose: it pins the exact output shapes card.sh's parser
+# depends on (CONFIG FINGERPRINT block, '=== summary [shape] (n=N) ===' blocks,
+# the capture sections). If bench.sh's output shape changes, this fixture must
+# change with it -- which is the point: a silent change would break every A/B
+# a user runs against an older saved log.
+
+========== CONFIG FINGERPRINT ==========
+  endpoint       : http://127.0.0.1:8030  (mode=chat)
+  model          : deepseek-v4-flash
+  serving pid    : 111111
+  log source     : server-log (/x/y.log)
+  served ctx     : 65536  (slots=1)
+  weights ftype  : MXFP4 MoE
+  drafter        : none
+  KV cache type  : q8_0 (source: argv)
+  serving argv   : model=/m/x.gguf offload=blk.*=CPU threads=24 ubatch=2048 ngl=99 split=1,1
+  moe-cache cfg  : moe_cache_cap=8192 RESERVE_MB=2048 ADMIT_AFTER=1 THROTTLE=64 MAX_BATCH=8 STATS=1000
+  CPU offload    : DETECTED via argv -ot
+
+=== summary [narrative] (n=5) ===
+  wall_TPS       mean=  17.10   std=  0.12   CV= 0.7%   min= 17.00   max= 17.30
+  decode_TPS     mean=  17.30   std=  0.10   CV= 0.6%   min= 17.20   max= 17.44
+  TTFT          mean=   612ms  std=   25ms  min=590ms  max=640ms
+  n-usable      5/5  (runs with >= 250 tokens, 25% of max_tokens=1000)
+
+=== summary [prefill-10k] (n=3) ===
+  prefill tok/s  mean= 119.40   std=  0.20   CV= 0.2%   min=119.10   max=119.60
+  TTFT          mean= 83700ms  std=  120ms  min=83500ms  max=83900ms
+
+========== CAPTURE: VRAM ==========
+  idle=23000 MiB  peak=23400 MiB  post=23000 MiB
+  leak delta (post - idle) = 0 MiB
+
+========== CAPTURE: EXPERT CACHE (moe-cache) ==========
+    CUDA0 pools=1 slots=2000 total_mib=8500 expert_kib=4352 type=mxfp4
+    CUDA1 pools=1 slots=1600 total_mib=6800 expert_kib=4352 type=mxfp4
+    CUDA0 marginal=41.0% cumulative=30.1% dhits=1 dlookups=2 devictions=0
+    CUDA1 marginal=50.0% cumulative=36.0% dhits=1 dlookups=2 devictions=0
+  health counters: PASS (all health counters zero)
+
+========== CAPTURE: INTEGRITY ==========
+  status: OK
+  swap check   : PASS (no serving-process pages in swap)

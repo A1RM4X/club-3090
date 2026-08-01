@@ -209,7 +209,28 @@ echo "  ✓ marginal rate derived per device, and disagrees with cumulative (48/
 v=$(cap_health_verdict "$TMP/c1")
 [[ "$v" == FAIL* ]] || fail "a non-zero fill-fail must FAIL the health panel, got: $v"
 command grep -q 'CUDA1' <<<"$v" || fail "health verdict must name the offending device: $v"
-echo "  ✓ health counters: all-zero passes, non-zero fails and names the device"
+# ⚠ `skips` is NOT a hard failure. It counts admission throttling (insert queue
+#   exhausted under the configured THROTTLE), so under a low ADMIT_AFTER a non-zero
+#   value is normal steady-state pressure. A live run on a HEALTHY server showed
+#   skips at 0.5% of misses — the original "all counters zero" spec would have
+#   failed it. Report it as load, never as a defect.
+cat > "$TMP/skips.kv" <<'EOF'
+CUDA0 hits=100 total=200 evictions=5 skips=13955 admission=4000 fill_fail=0 dispatch_fail=0 collect_fail=0
+CUDA1 hits=120 total=200 evictions=6 skips=2330 admission=900 fill_fail=0 dispatch_fail=0 collect_fail=0
+EOF
+v=$(cap_health_verdict "$TMP/skips.kv")
+[[ "$v" == PASS* ]] || fail "non-zero skips with zero hard failures must PASS, got: $v"
+command grep -q 'informational' <<<"$v" || fail "skips must still be REPORTED as a load metric: $v"
+command grep -q 'skips=13955' <<<"$v" || fail "the informational tail must carry the value: $v"
+command grep -q 'THROTTLE tuning signal, not a defect' <<<"$v" \
+  || fail "the verdict must say why skips is not a defect: $v"
+# ...and each hard-failure counter on its own must still fail.
+for hard in fill_fail dispatch_fail collect_fail; do
+  printf 'CUDA0 hits=1 total=2 skips=99 %s=1\n' "$hard" > "$TMP/hard.kv"
+  [[ "$(cap_health_verdict "$TMP/hard.kv")" == FAIL* ]] \
+    || fail "a non-zero $hard must FAIL the health panel"
+done
+echo "  ✓ health: hard failures FAIL, skips/admission report as load (the corrected pass condition)"
 
 # --- acceptance WITH fire rate ----------------------------------------------
 acc=$(cap_moe_parse acceptance "$TMP/end.log") || fail "acceptance scrape returned nothing"
@@ -221,7 +242,12 @@ echo "  ✓ acceptance scrape carries fire count AND drafts-attempted"
 
 # --- timings: prefill and decode must not be confused; short runs filtered ----
 tim=$(cap_moe_parse timings "$TMP/end.log") || fail "timings scrape returned nothing"
-command grep -q '^prefill n=1 mean=2000.00' <<<"$tim" || fail "prefill timing mis-parsed: $tim"
+# The two prefill populations (short canonical prompts vs deep haystacks) differ by
+# ~4x, so they are reported separately rather than averaged into one meaningless mean.
+command grep -q '^prefill_deep(>=2000tok) n=1 mean=2000.00' <<<"$tim" \
+  || fail "deep-prefill timing mis-parsed: $tim"
+command grep -q '^prefill_short(<2000tok) n=0' <<<"$tim" \
+  || fail "the short-prefill population must be reported even when empty: $tim"
 command grep -q '^decode n=2' <<<"$tim" || fail "decode timing mis-parsed: $tim"
 tim2=$(CAP_MIN_DECODE_TOKENS=32 cap_moe_parse timings "$TMP/end.log")
 command grep -q '^decode n=1 ' <<<"$tim2" \
@@ -237,6 +263,13 @@ for want in "kv=q8_0" "threads=24" "ngl=99" "split=1,1" "ubatch=2048"; do
   command grep -q -- "$want" <<<"$fp" || fail "argv fingerprint missing $want: $fp"
 done
 [[ "$(cap_kv_type "$ARGV")" == "q8_0 (source: argv)" ]] || fail "KV type not read from argv"
+# With no -ctk/-ctv the llama.cpp default is f16 — a fact the reader can act on,
+# where "unavailable" is not. Only inferred once the engine family is identified.
+CAP_LOG="$TMP/end.log" v="$(cap_kv_type 'llama-server -m /m/x.gguf -ngl 99' || true)"
+[[ "$v" == "f16 (engine default; no -ctk/-ctv in argv)" ]] \
+  || fail "a llama.cpp run with no KV flag should report the engine default, got: '$v'"
+CAP_LOG="" CAP_PROPS_TRIED=1 CAP_PROPS="" v="$(cap_kv_type '' 2>/dev/null || echo UNAVAILABLE)"
+[[ "$v" == "UNAVAILABLE" ]] || fail "with no argv and no identifiable engine, KV must stay unavailable, got: '$v'"
 command grep -q 'argv -ot' <<<"$(cap_offload_detected "$ARGV")" || fail "-ot must trigger offload detection"
 command grep -q 'moe_cache_cap=8192' <<<"$(cap_moe_cache_config "$ARGV")" \
   || fail "--moe-cache cap must be captured (the census self-limits below it)"
