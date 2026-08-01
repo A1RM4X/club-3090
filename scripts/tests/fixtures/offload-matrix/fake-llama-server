@@ -35,6 +35,26 @@ FAKE_SCENARIO:
   req_errors      completions return HTTP 500                 -> REQ_ERRORS
   boot_fail       exit non-zero before listening              -> BOOT_FAIL
   hang            never answers /health                       -> TIMEOUT
+  short_eos       healthy, but every completion EOSes at a handful of tokens
+                  regardless of max_tokens -> bench.sh's n-usable warning
+  low_fire        healthy + a drafter with HIGH acceptance that fires on only a
+                  MINORITY of requests -> acceptance-without-fire-rate warning
+  multipool       healthy, but each device holds TWO pools with the current
+                  census line shape (type=/expert=/slots=/total=) -> per-device
+                  aggregation, and the #824 detector must key on DEVICES-with-a
+                  -pool, not on the raw pool-line count
+
+--- bench.sh surface (additive; the sweep's driver never calls these) ---------
+  GET  /v1/models          bench.sh's reachability check
+  GET  /props              served ctx / slots / ftype / drafter fingerprint
+  POST /tokenize           the token-ratio probe (item 7)
+  POST /v1/completions     ENDPOINT=completion (choices[0].text, not a delta)
+  usage chunk              emitted ONLY when the request asks for it via
+                           stream_options.include_usage — bench.sh does, the
+                           sweep's driver does NOT, and that driver would raise
+                           IndexError on a choices-less chunk. Gating on the
+                           request is both realistic and what keeps the sweep's
+                           own suite green.
 """
 import json, os, sys, time, threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -43,6 +63,22 @@ SC    = os.environ.get("FAKE_SCENARIO", "healthy")
 NGPU  = int(os.environ.get("FAKE_NGPU", "2"))
 TOKS  = int(os.environ.get("FAKE_TOKENS", "24"))
 SLOTS = [int(s) for s in os.environ.get("FAKE_SLOTS", "742,337").split(",")]
+# tokens-per-word this fake "tokenizer" produces. >1 on purpose: the word-count
+# heuristic bench.sh used to size haystacks with is a per-tokenizer guess, and a
+# ratio of 1.0 would hide the very overshoot item 7 exists to fix.
+TOK_PER_WORD = float(os.environ.get("FAKE_TOK_PER_WORD", "1.375"))
+SHORT_EOS    = int(os.environ.get("FAKE_SHORT_EOS", "6"))
+FIRE_EVERY   = int(os.environ.get("FAKE_FIRE_EVERY", "4"))   # low_fire: 1 in N
+EXPERT_KIB   = int(os.environ.get("FAKE_EXPERT_KIB", "1536"))
+# Seconds per emitted token. The default keeps the sweep's suite fast; a test that
+# needs a measured phase LONGER than the 1 Hz dmon sample period raises it, since
+# a phase shorter than the sample period genuinely contains no samples.
+TOK_DELAY    = float(os.environ.get("FAKE_TOKEN_DELAY", "0.002"))
+_req_n       = [0]
+
+
+def fake_tokens(text):
+    return max(1, int(len(text.split()) * TOK_PER_WORD))
 
 def log(s):
     sys.stdout.write(s + "\n"); sys.stdout.flush()
@@ -69,6 +105,18 @@ host = opt("--host", "127.0.0.1")
 port = int(opt("--port", "8080"))
 ctx  = int(opt("-c", "4096"))
 
+# FAKE_PID_FILE: write our OWN pid where the caller can read it.
+# `$!` from the launching shell is NOT reliable here — the shebang plus an `env`
+# prefix re-execs, and the pid the shell recorded can end up belonging to a
+# process that is already gone while the server runs under another. A test that
+# then passes SERVER_PID=<stale> makes capture.sh fall back to `pgrep -x
+# llama-server` and adopt the RIG'S REAL SERVER. Real servers offer --pid-file
+# for the same reason.
+_pidfile = os.environ.get("FAKE_PID_FILE", "")
+if _pidfile:
+    with open(_pidfile, "w", encoding="utf-8") as _fh:
+        _fh.write(str(os.getpid()))
+
 # --- boot log ---------------------------------------------------------------
 log("build: fake (tier-1 fixture)")
 log(f"llama_context: n_ctx = {ctx}")
@@ -88,6 +136,15 @@ elif SC == "partial_budget":
     log("[moe-cache] enabled: reserve=3072 MiB admit=1/64")
     log("[moe-cache] CUDA0 has no cache budget after 3072 MiB reserve")
     log(f"[moe-cache] CUDA1 pool[0]: slots={SLOTS[0]} expert=1536 KiB")
+elif SC == "multipool":
+    # Current census line shape, TWO pools on the device that has any. The raw
+    # pool-line count is then >= NGPU while a whole device holds nothing — so a
+    # count-of-lines detector passes this and a count-of-DEVICES detector fails
+    # it. Only the second reading is correct (#824, generalised).
+    log("[moe-cache] enabled: reserve=1536 MiB admit=1/64")
+    log("[moe-cache] CUDA0 has no cache budget after 1536 MiB reserve")
+    log("[moe-cache] CUDA1 pool[0]: type=mxfp4 expert=4352 KiB slots=3038 total=12911 MiB")
+    log("[moe-cache] CUDA1 pool[1]: type=mxfp4 expert=4352 KiB slots=1000 total=4250 MiB")
 else:
     log("[moe-cache] enabled: reserve=1536 MiB admit=1/64")
     for g in range(NGPU):
@@ -98,13 +155,24 @@ log("llama_server: listening on " + f"{host}:{port}")
 
 # --- periodic stats, so hits/misses/evictions have something to scrape ------
 def stats_loop():
-    h = 0
+    tot = [0] * NGPU
+    hit = [0] * NGPU
+    n = 0
     while True:
         time.sleep(1.0)
-        h += 1000
+        n += 1
         for g in range(NGPU):
-            log(f"[moe-cache] CUDA{g} hits={h}/{int(h*1.35)} evictions={h//8} "
-                f"expert=1536 KiB skips=0 fill-fail=0")
+            # Two properties are deliberate, and both are measured behaviour:
+            #  * a COLD-FILL phase (first emissions hit almost nothing), so the
+            #    cumulative rate and the marginal rate across a later window
+            #    genuinely DISAGREE — the whole reason item 3b exists;
+            #  * a per-device ASYMMETRY (~48% vs ~58% on a layer-split MoE),
+            #    which is routing-entropy signal that averaging destroys.
+            rate = 0.05 if n <= 3 else (0.48 if g % 2 == 0 else 0.58)
+            tot[g] += 100000
+            hit[g] += int(100000 * rate)
+            log(f"[moe-cache] CUDA{g} hits={hit[g]}/{tot[g]} evictions={n * 8 + g} "
+                f"expert={EXPERT_KIB} KiB skips=0 fill-fail=0 dispatch-fail=0 collect-fail=0")
         if SC == "bypass":
             log("[moe-cache] MAX_BATCH=8 exceeded, bypassing cache for this batch")
 
@@ -116,24 +184,73 @@ class H(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     def log_message(self, *a): pass          # keep the arm log clean
 
+    def _json(self, obj, code=200):
+        b = json.dumps(obj).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(b)))
+        self.end_headers()
+        self.wfile.write(b)
+
     def do_GET(self):
         if self.path.startswith("/health"):
             self.send_response(200); self.send_header("Content-Length", "2")
             self.end_headers(); self.wfile.write(b"ok")
+        elif self.path.startswith("/v1/models"):
+            self._json({"object": "list", "data": [{"id": "fake-model", "object": "model"}]})
+        elif self.path.startswith("/props"):
+            # Shaped like llama-server's real /props: the fields bench.sh's config
+            # fingerprint reads (served ctx, slots, ftype, drafter) and nothing else.
+            self._json({
+                "default_generation_settings": {
+                    "n_ctx": ctx,
+                    "params": {"speculative": {"types": "none"}},
+                },
+                "total_slots": 1,
+                "model_alias": "fake-model",
+                "model_ftype": "MXFP4 MoE",
+            })
         else:
             self.send_response(404); self.send_header("Content-Length", "0"); self.end_headers()
 
     def do_POST(self):
         n = int(self.headers.get("Content-Length", 0) or 0)
         body = self.rfile.read(n)
+        try:
+            req = json.loads(body)
+        except Exception:
+            req = {}
+
+        if self.path.startswith("/tokenize"):
+            # The item-7 token-ratio probe. Returning MORE tokens than words is
+            # the point: a 1.0 ratio would hide the overshoot being fixed.
+            self._json({"tokens": list(range(fake_tokens(str(req.get("content", "")))))})
+            return
+
         if SC == "req_errors":
             self.send_response(500); self.send_header("Content-Length", "0"); self.end_headers()
             return
+
+        _req_n[0] += 1
+        # Which endpoint was actually driven — bench.sh's ENDPOINT knob is only
+        # meaningful if it changes the request, so a test must be able to see it.
+        log(f"[fake] request endpoint={self.path}")
+        raw_completion = self.path.startswith("/v1/completions")
+        prompt_text = req.get("prompt") if raw_completion else "".join(
+            str(m.get("content", "")) for m in (req.get("messages") or []))
+        want_usage = bool((req.get("stream_options") or {}).get("include_usage"))
         try:
-            gen = int(json.loads(body).get("max_tokens", TOKS))
+            gen = int(req.get("max_tokens", TOKS))
         except Exception:
             gen = TOKS
-        emit = 0 if SC == "no_tokens" else min(gen, TOKS)
+        if SC == "no_tokens":
+            emit = 0
+        elif SC == "short_eos":
+            # EOSes far below max_tokens no matter what was asked for — a chat-tuned
+            # model answering briefly. Degenerates a 5-run shape to n=1 in silence.
+            emit = min(gen, SHORT_EOS)
+        else:
+            emit = min(gen, TOKS)
 
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
@@ -144,17 +261,41 @@ class H(BaseHTTPRequestHandler):
             self.wfile.write(f"{len(b):X}\r\n".encode() + b + b"\r\n"); self.wfile.flush()
         try:
             for i in range(emit):
-                d = {"choices": [{"delta": {"content": f"tok{i} "}}]}
+                if raw_completion:
+                    d = {"choices": [{"text": f"tok{i} "}]}
+                else:
+                    d = {"choices": [{"delta": {"content": f"tok{i} "}}]}
                 chunk("data: " + json.dumps(d) + "\n\n")
-                time.sleep(0.002)
+                time.sleep(TOK_DELAY)
+            if want_usage:
+                # ONLY when asked. The sweep's driver indexes choices[0]
+                # unconditionally and would raise IndexError on a choices-less
+                # chunk — gating on the request is what a real server does and
+                # what keeps the sweep's own suite green.
+                chunk("data: " + json.dumps({
+                    "choices": [],
+                    "usage": {"completion_tokens": emit,
+                              "prompt_tokens": fake_tokens(str(prompt_text or "")),
+                              "total_tokens": emit + fake_tokens(str(prompt_text or ""))},
+                }) + "\n\n")
             chunk("data: [DONE]\n\n")
             chunk("")                              # terminating 0-length chunk
         except (BrokenPipeError, ConnectionResetError):
             pass
         # per-request timings the sweep scrapes for server-side decode TPS
+        ptoks = fake_tokens(str(prompt_text or ""))
+        log(f"print_timing: prompt eval time = 1000.00 ms / {ptoks} tokens "
+            f"( 1.00 ms per token, {ptoks * 1.0:.2f} tokens per second)")
         log(f"print_timing: eval time = 1000.00 ms / {max(emit,1)} tokens "
             f"( 1.00 ms per token, {max(emit,1)*2.5:.2f} tokens per second)")
-        log("draft acceptance = 0.951")
+        # low_fire: HIGH acceptance, but the drafter only fires on a minority of
+        # requests. Acceptance without that base rate is a deception (measured:
+        # 0.992 acceptance on 5 of ~20 requests, zero on novel content).
+        if SC == "low_fire":
+            if _req_n[0] % FIRE_EVERY == 0:
+                log("draft acceptance = 0.992")
+        else:
+            log("draft acceptance = 0.951")
 
 if SC == "hang":
     while True:

@@ -1,0 +1,486 @@
+#!/usr/bin/env bash
+# test-bench-capture — guards for scripts/lib/capture.sh and bench.sh's capture layer.
+#
+# Extends the #835 mocked-scrape pattern: TIER 0 checks that can be made from the
+# source text alone, TIER 1 unit tests of every scrape against fixture logs with
+# the REAL line shapes, and TIER 1 end-to-end runs of the actual bench against the
+# fake llama-server.
+#
+# WHAT THIS SUITE IS FOR
+#   The capture layer exists because a bench harness fails by printing a PLAUSIBLE
+#   WRONG NUMBER, not by crashing. Every assertion below corresponds to a defect
+#   that has actually shipped: a 0.00 TPS printed next to a healthy TTFT; a
+#   cumulative hit rate that says a bigger pool is worse; an '[moe-cache] enabled:'
+#   banner that hides a device with no pool (#824); a drafter reporting 0.992
+#   acceptance while firing on a quarter of the requests.
+#
+# So: assert STRUCTURE, STATUS and WARNINGS — never a throughput value. Numbers
+# from a fake server mean nothing.
+#
+# HERMETIC BY CONSTRUCTION — both are load-bearing:
+#   SERVER_PID=<pid>           capture.sh otherwise runs `pgrep -x llama-server`
+#                              and would adopt a production server's argv/env.
+#   PREFLIGHT_NO_AUTODETECT=1  bench.sh otherwise adopts whatever container is up.
+set -euo pipefail
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+BENCH="$ROOT_DIR/scripts/bench.sh"
+LIB="$ROOT_DIR/scripts/lib/capture.sh"
+FIX="$ROOT_DIR/scripts/tests/fixtures/offload-matrix"
+PORT_BASE="${TEST_PORT:-8147}"
+fail() { echo "FAIL: $1" >&2; exit 1; }
+
+for f in "$BENCH" "$LIB" "$FIX/fake-llama-server" "$FIX/fake-nvidia-smi"; do
+  [[ -f "$f" ]] || fail "missing fixture or script: $f"
+done
+
+TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"; [[ -n "${SRV_PID:-}" ]] && kill "$SRV_PID" 2>/dev/null; true' EXIT
+mkdir -p "$TMP/bin"
+install -m 0755 "$FIX/fake-nvidia-smi"   "$TMP/bin/nvidia-smi"
+install -m 0755 "$FIX/fake-llama-server" "$TMP/bin/fake-llama-server"
+: > "$TMP/model.gguf"
+
+# ===========================================================================
+# TIER 0 — source-text guards
+# ===========================================================================
+echo "  tier 0: source guards"
+
+bash -n "$BENCH" || fail "bash -n: syntax error in bench.sh"
+bash -n "$LIB"   || fail "bash -n: syntax error in capture.sh"
+python3 -m py_compile "$FIX/fake-llama-server" || fail "py_compile: fake-llama-server"
+# bench.sh's measurement core is a python heredoc; a syntax error in it would only
+# surface at run time, against a real model.
+python3 - "$BENCH" <<'PY' || fail "python heredoc in bench.sh does not parse"
+import ast, re, sys
+src = open(sys.argv[1], encoding="utf-8").read()
+m = re.search(r"<< 'PYEOF'\n(.*?)\nPYEOF\n", src, re.S)
+assert m, "no PYEOF heredoc found in bench.sh"
+ast.parse(m.group(1))
+PY
+# Inline `python3 -c '...'` snippets are the sneakiest syntax hazard in this
+# codebase: a single quote INSIDE the single-quoted shell string silently ends
+# it, python then gets a truncated program, and a `2>/dev/null || true` swallows
+# the error completely — the capture just never prints. Parse every one of them.
+python3 - "$BENCH" "$LIB" <<'PY' || fail "an inline python3 -c snippet does not parse"
+import ast, re, sys
+total = 0
+for path in sys.argv[1:]:
+    src = open(path, encoding="utf-8").read()
+    for m in re.finditer(r"python3 -c '((?:[^']|\n)*?)'\s*[\"$\n]", src):
+        body = m.group(1)
+        if not body.strip():
+            continue
+        total += 1
+        try:
+            ast.parse(body)
+        except SyntaxError as e:
+            sys.exit(f"{path}: inline python3 -c does not parse ({e}):\n{body[:400]}")
+        if "'" in body:
+            sys.exit(f"{path}: inline python3 -c contains a single quote — it would "
+                     f"terminate the shell string early:\n{body[:400]}")
+assert total >= 3, f"only found {total} inline snippets — did the extraction regex rot?"
+print(f"  ✓ {total} inline python3 -c snippets parse and are quote-safe")
+PY
+echo "  ✓ syntax (bash -n x2, py_compile, embedded-python ast)"
+
+# `pgrep -f` / `pkill -f` match against the FULL command line, which includes the
+# harness running the script — they have killed the calling shell (exit 144).
+for f in "$LIB" "$BENCH"; do
+  # `^[^#]*` keeps this to CODE — the rule itself is documented in comments in
+  # both files, and matching those would make the guard unwritable.
+  if command grep -nE '^[^#]*\b(pgrep|pkill) +-[a-zA-Z]*f' "$f"; then
+    fail "$(basename "$f") uses pgrep/pkill -f — self-match footgun; use pgrep -x and kill by pid"
+  fi
+done
+echo "  ✓ no pgrep/pkill -f (self-match footgun)"
+
+# grep is shimmed to ugrep in interactive shells on some rigs, which breaks exact
+# output matching. Every scrape in the lib must use `command grep`.
+bare=$(command grep -nE '(^|[|;&(]|\$\()\s*grep ' "$LIB" || true)
+[[ -z "$bare" ]] || fail "capture.sh uses bare grep (ugrep shim breaks exact matching):
+$bare"
+echo "  ✓ capture.sh uses 'command grep' throughout"
+
+# The degradation contract: ONE line, in a fixed shape, whenever a source is
+# missing. A capture that cannot run must be visibly absent, never silently zero.
+command grep -q 'capture: ${thing} unavailable (${why})' "$LIB" \
+  || fail "capture.sh's degradation notice no longer matches the documented shape"
+echo "  ✓ degradation notice keeps the 'capture: <thing> unavailable (<why>)' shape"
+
+# The deferral is a deliberate decision with an expiry, not an oversight. If the
+# note goes, the reason the duplication is tolerated goes with it.
+command grep -q 'offload-matrix.sh adoption is DEFERRED' "$LIB" \
+  || fail "capture.sh must record WHY offload-matrix.sh still carries its own copies"
+echo "  ✓ offload-matrix adoption deferral is recorded in the lib"
+
+# Sourcing the lib must have no side effects — no output, no exit, and safe to
+# source twice (bench.sh and a future sweep may both pull it in).
+out=$(bash -c "set -euo pipefail; source '$LIB'; source '$LIB'; echo READY" 2>&1)
+[[ "$out" == "READY" ]] || fail "sourcing capture.sh is not side-effect-free / idempotent: $out"
+echo "  ✓ capture.sh sources cleanly and idempotently"
+
+command grep -q 'source "${ROOT_DIR}/scripts/lib/capture.sh"' "$BENCH" \
+  || fail "bench.sh does not source the shared capture lib"
+echo "  ✓ bench.sh consumes the shared lib"
+
+# ===========================================================================
+# TIER 1a — unit tests of every scrape, against the REAL line shapes
+# ===========================================================================
+echo "  tier 1a: scrape units"
+
+# Two snapshots of a log whose hit rate CHANGES: a cold-fill phase followed by a
+# steady state. Constructed so cumulative and marginal DISAGREE — the whole reason
+# the marginal rate exists (item 3b). Also carries the measured per-device
+# asymmetry (~48% / ~58% on a layer-split MoE), which averaging would destroy.
+cat > "$TMP/start.log" <<'EOF'
+llama_context: n_ctx_seq = 262144
+CUDA_Host model buffer size = 98304.00 MiB
+[moe-cache] enabled: reserve=1536 MiB admit=1/64
+[moe-cache] CUDA0 pool[0]: type=mxfp4 expert=4352 KiB slots=3038 total=12911 MiB
+[moe-cache] CUDA0 pool[1]: type=mxfp4 expert=4352 KiB slots=1000 total=4250 MiB
+[moe-cache] CUDA1 pool[0]: type=mxfp4 expert=4352 KiB slots=2500 total=10625 MiB
+[moe-cache] CUDA0 hits=10000/200000 evictions=5 skips=0 fill-fail=0 dispatch-fail=0 collect-fail=0
+[moe-cache] CUDA1 hits=12000/200000 evictions=6 skips=0 fill-fail=0 dispatch-fail=0 collect-fail=0
+EOF
+cp "$TMP/start.log" "$TMP/end.log"
+cat >> "$TMP/end.log" <<'EOF'
+prompt eval time =  5000.00 ms /  10000 tokens (    0.50 ms per token,  2000.00 tokens per second)
+       eval time = 10000.00 ms /    300 tokens (   33.33 ms per token,    30.00 tokens per second)
+       eval time =   500.00 ms /     16 tokens (   31.25 ms per token,    32.00 tokens per second)
+draft acceptance = 0.992 (  248 accepted /   250 generated)
+[moe-cache] CUDA0 hits=58000/300000 evictions=25 skips=0 fill-fail=0 dispatch-fail=0 collect-fail=0
+[moe-cache] CUDA1 hits=70000/300000 evictions=26 skips=0 fill-fail=3 dispatch-fail=0 collect-fail=0
+EOF
+
+# shellcheck source=../lib/capture.sh
+source "$LIB"
+
+# --- census: a device can hold MULTIPLE pools; slots and bytes AGGREGATE ------
+cen=$(cap_moe_parse census "$TMP/end.log") || fail "census scrape returned nothing"
+command grep -q 'CUDA0 pools=2 slots=4038 total_mib=17161' <<<"$cen" \
+  || fail "census must SUM every pool on a device (3038+1000=4038 slots), got:
+$cen"
+command grep -q 'CUDA1 pools=1 slots=2500' <<<"$cen" || fail "census lost CUDA1: $cen"
+command grep -q 'expert_kib=4352' <<<"$cen" || fail "census did not read expert size: $cen"
+echo "  ✓ pool census aggregates multiple pools per device, keeps devices separate"
+
+# --- #824: detection must count DEVICES WITH A POOL, not pool lines ----------
+pd=$(cap_moe_parse pooldev "$TMP/end.log") || fail "pooldev scrape returned nothing"
+command grep -q 'devices=2' <<<"$pd" || fail "pooldev device count wrong: $pd"
+# The generalised trap: two pools on ONE device makes pool_lines >= NGPU while a
+# whole device holds nothing. A count-of-lines detector passes that; only a
+# count-of-devices detector catches it.
+cat > "$TMP/halfcached.log" <<'EOF'
+[moe-cache] enabled: reserve=1536 MiB admit=1/64
+[moe-cache] CUDA0 has no cache budget after 1536 MiB reserve
+[moe-cache] CUDA1 pool[0]: type=mxfp4 expert=4352 KiB slots=3038 total=12911 MiB
+[moe-cache] CUDA1 pool[1]: type=mxfp4 expert=4352 KiB slots=1000 total=4250 MiB
+EOF
+pd2=$(cap_moe_parse pooldev "$TMP/halfcached.log") || fail "pooldev failed on half-cached log"
+command grep -q 'devices=1' <<<"$pd2" \
+  || fail "half-cached log must report devices=1 (only CUDA1 has a pool), got: $pd2"
+command grep -q 'pool_lines=2' <<<"$pd2" || fail "expected pool_lines=2 in: $pd2"
+command grep -q 'enabled=1' <<<"$pd2" \
+  || fail "the 'enabled:' banner must still be reported — that it prints in this state IS the #824 hole"
+echo "  ✓ #824: half-cached run reports devices=1 while pool_lines=2 and enabled=1"
+
+# --- marginal vs cumulative MUST disagree ------------------------------------
+cap_moe_parse counters "$TMP/start.log" > "$TMP/c0" || fail "counters scrape (start) failed"
+cap_moe_parse counters "$TMP/end.log"   > "$TMP/c1" || fail "counters scrape (end) failed"
+mar=$(cap_marginal_rates "$TMP/c0" "$TMP/c1") || fail "marginal-rate derivation failed"
+command grep -q 'CUDA0 marginal=48.0% cumulative=19.3%' <<<"$mar" \
+  || fail "CUDA0 marginal rate wrong (expect 48.0% marginal vs 19.3% cumulative), got:
+$mar"
+command grep -q 'CUDA1 marginal=58.0% cumulative=23.3%' <<<"$mar" \
+  || fail "CUDA1 marginal rate wrong (expect 58.0% vs 23.3%), got:
+$mar"
+# If these ever agree the fixture stopped exercising the defect this exists for.
+python3 - <<PY || fail "marginal and cumulative agree — the fixture no longer covers item 3b"
+import re, sys
+t = """$mar"""
+for ln in t.splitlines():
+    m = re.search(r"marginal=([\d.]+)% cumulative=([\d.]+)%", ln)
+    if m and abs(float(m.group(1)) - float(m.group(2))) < 5:
+        sys.exit(1)
+PY
+echo "  ✓ marginal rate derived per device, and disagrees with cumulative (48/58 vs 19/23)"
+
+# --- health counters: all-zero is the pass condition (item 3c) ---------------
+[[ "$(cap_health_verdict "$TMP/c0")" == PASS* ]] || fail "clean counters should PASS"
+v=$(cap_health_verdict "$TMP/c1")
+[[ "$v" == FAIL* ]] || fail "a non-zero fill-fail must FAIL the health panel, got: $v"
+command grep -q 'CUDA1' <<<"$v" || fail "health verdict must name the offending device: $v"
+echo "  ✓ health counters: all-zero passes, non-zero fails and names the device"
+
+# --- acceptance WITH fire rate ----------------------------------------------
+acc=$(cap_moe_parse acceptance "$TMP/end.log") || fail "acceptance scrape returned nothing"
+command grep -q 'fired=1' <<<"$acc" || fail "acceptance fire count wrong: $acc"
+command grep -q 'mean=0.992' <<<"$acc" || fail "acceptance value wrong: $acc"
+command grep -q 'accepted=248 drafted=250' <<<"$acc" \
+  || fail "drafts-attempted must be captured alongside acceptance: $acc"
+echo "  ✓ acceptance scrape carries fire count AND drafts-attempted"
+
+# --- timings: prefill and decode must not be confused; short runs filtered ----
+tim=$(cap_moe_parse timings "$TMP/end.log") || fail "timings scrape returned nothing"
+command grep -q '^prefill n=1 mean=2000.00' <<<"$tim" || fail "prefill timing mis-parsed: $tim"
+command grep -q '^decode n=2' <<<"$tim" || fail "decode timing mis-parsed: $tim"
+tim2=$(CAP_MIN_DECODE_TOKENS=32 cap_moe_parse timings "$TMP/end.log")
+command grep -q '^decode n=1 ' <<<"$tim2" \
+  || fail "the 16-token completion should be excluded at floor=32: $tim2"
+command grep -q 'dropped_short_decode n=1 floor=32' <<<"$tim2" \
+  || fail "dropping a short completion must be REPORTED, not silent: $tim2"
+echo "  ✓ timings split prefill/decode and report (not hide) short-completion filtering"
+
+# --- always-on fingerprint pieces -------------------------------------------
+ARGV="python3 /x/llama-server -m /models/m.gguf -ot blk.(1|2).ffn_up_exps.weight=CPU -t 24 -ub 2048 -ct q8_0 -ngl 99 -ts 1,1 --moe-cache 8192"
+fp=$(cap_argv_fingerprint "$ARGV") || fail "argv fingerprint returned nothing"
+for want in "kv=q8_0" "threads=24" "ngl=99" "split=1,1" "ubatch=2048"; do
+  command grep -q -- "$want" <<<"$fp" || fail "argv fingerprint missing $want: $fp"
+done
+[[ "$(cap_kv_type "$ARGV")" == "q8_0 (source: argv)" ]] || fail "KV type not read from argv"
+command grep -q 'argv -ot' <<<"$(cap_offload_detected "$ARGV")" || fail "-ot must trigger offload detection"
+command grep -q 'moe_cache_cap=8192' <<<"$(cap_moe_cache_config "$ARGV")" \
+  || fail "--moe-cache cap must be captured (the census self-limits below it)"
+# --n-cpu-moe is the other offload spelling, and a CUDA_Host buffer line is the
+# third signal for a server whose argv we cannot read.
+command grep -q 'n-cpu-moe' <<<"$(cap_offload_detected 'llama-server --n-cpu-moe 20')" \
+  || fail "--n-cpu-moe must trigger offload detection"
+CAP_LOG="$TMP/end.log" && command grep -q 'CUDA_Host' <<<"$(cap_offload_detected '')" \
+  || fail "a CUDA_Host model buffer line must trigger offload detection"
+echo "  ✓ argv/env fingerprint: KV type, offload signals (x3), moe-cache cap"
+
+# --- derived RAM demand + status enum + divergence ---------------------------
+# 94001 misses x 4352 KiB / 1024 / 60 s = 6658 MB/s
+[[ "$(cap_ram_rd_mbps 94001 4352 60)" == "6658" ]] || fail "derived ram_rd arithmetic changed"
+cap_ram_rd_mbps 0 4352 60 >/dev/null 2>&1 && fail "ram_rd must refuse to invent a value from zero misses"
+[[ "$(cap_status_classify 0 0 0 0 1 0)"     == NO_TOKENS ]]      || fail "zero tokens must be NO_TOKENS"
+[[ "$(cap_status_classify 500 0 0 0 1 0)"   == NO_TOKENS ]]      || fail "zero TPS must be NO_TOKENS"
+[[ "$(cap_status_classify 500 30 2 0 1 0)"  == REQ_ERRORS ]]     || fail "request errors must outrank OK"
+[[ "$(cap_status_classify 500 30 0 1 0 0)"  == CACHE_DISABLED ]] || fail "unallocated requested cache must not read OK"
+[[ "$(cap_status_classify 500 30 0 0 1 3)"  == INVALID_BYPASS ]] || fail "bypass>0 must not read OK"
+[[ "$(cap_status_classify 500 30 0 0 1 0)"  == OK ]]             || fail "a clean run must read OK"
+# NO_TOKENS outranks the cache states: a run with no tokens says nothing about a cache.
+[[ "$(cap_status_classify 0 0 0 1 0 5)"     == NO_TOKENS ]]      || fail "NO_TOKENS must outrank the cache states"
+[[ "$(cap_divergence_pct 30 32)" == "6.2" ]] || fail "divergence arithmetic changed"
+echo "  ✓ status enum precedence, derived-demand arithmetic, divergence"
+
+# ===========================================================================
+# TIER 1b — end-to-end bench.sh against the fake server
+# ===========================================================================
+echo "  tier 1b: end-to-end bench runs (no GPU, no model)"
+
+SRV_PID=""
+SRV_LOG=""
+# ⚠ TWO hermeticity traps here, both of which produced a run that measured the
+# RIG'S REAL SERVER instead of the fake:
+#   1. NEVER call this through a command substitution — `$( )` is a subshell, so
+#      SRV_PID would not propagate out.
+#   2. NEVER trust `$!` for the server pid. The shebang plus the `env` prefix
+#      re-execs, and the pid bash recorded can already be gone while the server
+#      runs under another. The fixture writes its OWN pid to FAKE_PID_FILE.
+# Either way, capture.sh with an empty/stale SERVER_PID falls back to
+# `pgrep -x llama-server` and adopts a production server's argv and env.
+start_server() {   # $1=scenario $2=port [extra env as VAR=VAL ...]
+  local scen="$1" port="$2"; shift 2
+  SRV_LOG="$TMP/server-$scen-$port.log"
+  local pidfile="$TMP/server-$scen-$port.pid"
+  rm -f "$pidfile"
+  env FAKE_SCENARIO="$scen" FAKE_NGPU=2 FAKE_TOKENS=40 FAKE_PID_FILE="$pidfile" "$@" \
+      GGML_CUDA_MOE_CACHE_RESERVE_MB=1536 GGML_CUDA_MOE_CACHE_ADMIT_AFTER=1/64 \
+      GGML_CUDA_MOE_CACHE_MAX_BATCH=8 GGML_CUDA_MOE_CACHE_STATS=1000 \
+      "$TMP/bin/fake-llama-server" -m "$TMP/model.gguf" \
+        -ot 'blk.(1|3|5).ffn_.*_exps.weight=CPU' -t 24 -ub 2048 -ct q8_0 -ngl 99 -ts 1,1 \
+        --moe-cache 8192 --host 127.0.0.1 --port "$port" > "$SRV_LOG" 2>&1 &
+  local i
+  for i in $(seq 1 40); do
+    curl -sf -m 1 "http://127.0.0.1:$port/health" >/dev/null 2>&1 && break
+    sleep 0.25
+  done
+  curl -sf -m 1 "http://127.0.0.1:$port/health" >/dev/null 2>&1 \
+    || { sed -n '1,15p' "$SRV_LOG" >&2; fail "$scen: fake server never became ready on $port"; }
+  SRV_PID="$(cat "$pidfile" 2>/dev/null || true)"
+  [[ -n "$SRV_PID" && -r "/proc/$SRV_PID/cmdline" ]] \
+    || fail "$scen: fake server did not report a readable pid — the run would not be hermetic"
+  # let the periodic cache stats emit at least one cumulative sample first, so the
+  # marginal derivation has a genuine "before" to difference against
+  sleep 2
+}
+
+run_bench() {   # $1=scenario $2=port $3=outfile [extra bench env ...]
+  local scen="$1" port="$2" out="$3"; shift 3
+  start_server "$scen" "$port"
+  PATH="$TMP/bin:$PATH" PREFLIGHT_NO_AUTODETECT=1 CONTAINER=none \
+    SERVER_LOG="$SRV_LOG" SERVER_PID="$SRV_PID" URL="http://127.0.0.1:$port" \
+    MODEL=fake-model RUNS=2 WARMUPS=1 PREFILL_PROBE=0 \
+    env "$@" timeout 300 bash "$BENCH" > "$out" 2>"${out}.err" || true
+  kill "$SRV_PID" 2>/dev/null || true; wait "$SRV_PID" 2>/dev/null || true; SRV_PID=""
+  # The fingerprint must describe the server this run actually drove. If the pid
+  # ever fails to reach capture.sh again, this catches it on the next run instead
+  # of silently reporting a production config.
+  # Skipped when the run deliberately disabled /proc inspection (SERVER_PID=none):
+  # there is no pid to adopt, so there is nothing to get wrong.
+  if ! command grep -q 'serving pid    : unknown' "$out" \
+     && command grep -q 'moe-cache cfg' "$out" \
+     && ! command grep -q 'moe_cache_cap=8192' "$out"; then
+    command grep -m1 'moe-cache cfg' "$out" >&2
+    fail "$scen: fingerprint did not describe the FAKE server — the run was not hermetic"
+  fi
+}
+
+# --- 1. healthy: the always-on captures all fire ----------------------------
+run_bench healthy "$((PORT_BASE))" "$TMP/healthy.out"
+H="$TMP/healthy.out"
+for want in \
+  "CONFIG FINGERPRINT" "KV cache type  : q8_0" "CPU offload    : DETECTED" \
+  "moe-cache cfg  : moe_cache_cap=8192" "RESERVE_MB=1536" "ADMIT_AFTER=1/64" \
+  "SYSTEM RAM" "mem_total_gib=" "swap check" \
+  "CAPTURE: PCIe" "CAPTURE: VRAM" "CAPTURE: EXPERT CACHE" "CAPTURE: INTEGRITY" \
+  "serving argv   :" "served ctx     :"; do
+  command grep -q "$want" "$H" || { sed -n '1,40p' "$H" >&2; fail "healthy run missing: $want"; }
+done
+command grep -q 'status: OK' "$H" || fail "healthy run should classify OK: $(command grep -A2 'CAPTURE: INTEGRITY' "$H")"
+# per-device values must survive into the OUTPUT, not just detection (item 3d)
+command grep -q 'CUDA0 marginal=' "$H" || fail "per-device marginal rate missing from output"
+command grep -q 'CUDA1 marginal=' "$H" || fail "the CUDA0/CUDA1 split was averaged away — item 3d"
+command grep -q 'CUDA0 pools=' "$H" || fail "per-device pool census missing from output"
+command grep -q 'DERIVED, NOT A PERF COUNTER' "$H" \
+  || fail "the derived RAM figure must carry its 'not a counter' caveat"
+command grep -q 'MARGINAL' "$H" || fail "the marginal-vs-cumulative caveat is missing"
+echo "  ✓ healthy: fingerprint + RAM + PCIe + VRAM + per-device cache + OK status"
+
+# --- 2. NO_TOKENS: the loud warn, and the engine-side cross-check ------------
+run_bench no_tokens "$((PORT_BASE+1))" "$TMP/notok.out"
+N="$TMP/notok.out"
+command grep -q 'status: NO_TOKENS' "$N" \
+  || { sed -n '/INTEGRITY/,$p' "$N" >&2; fail "a run that produced no tokens must classify NO_TOKENS"; }
+command grep -q 'NO_TOKENS: the run measured' "$N" || fail "NO_TOKENS must warn LOUDLY, not just set a status"
+command grep -q 'SCRAPE failure, not a' "$N" \
+  || fail "the NO_TOKENS warning must name the failure class (scrape, not a slow model)"
+command grep -q 'Do NOT quote any throughput number' "$N" || fail "NO_TOKENS must tell the reader not to quote the run"
+echo "  ✓ no_tokens: NO_TOKENS status + loud warning naming the failure class"
+
+# --- 3. engine-side cross-check divergence (item 1b) ------------------------
+command grep -q 'CAPTURE: ENGINE-SIDE TIMINGS' "$H" || fail "engine-side timing section missing"
+command grep -q 'cross-check: client-observed' "$H" \
+  || fail "SERVER_LOG was set — the engine-side cross-check must run (item 4 + item 1b)"
+command grep -qE 'divergence' "$H" || fail "divergence must be reported"
+# the fake's engine-side rate is deliberately far from the client-observed one
+command grep -q '⚠ WARN: >5% divergence' "$H" \
+  || fail "a >5% client-vs-engine divergence must WARN: $(command grep -A2 'cross-check' "$H")"
+echo "  ✓ engine-side scrape from SERVER_LOG + >5% divergence warning"
+
+# --- 4. short EOS: n-usable per shape (item 2) ------------------------------
+run_bench short_eos "$((PORT_BASE+2))" "$TMP/short.out"
+S="$TMP/short.out"
+command grep -q 'n-usable' "$S" || fail "n-usable must be reported per shape"
+command grep -q 'EOSed well below max_tokens' "$S" \
+  || fail "runs EOSing far below max_tokens must WARN — a 5-run shape silently becomes n=1"
+command grep -q 'treat the CV as unreliable' "$S" || fail "the short-EOS warning must discredit the CV"
+command grep -q '⚠ n-usable' "$S" || fail "n-usable belongs on the integrity panel too"
+echo "  ✓ short_eos: n-usable per shape + warning that the CV is untrustworthy"
+
+# --- 5. acceptance WITH fire rate (item 11a) --------------------------------
+run_bench low_fire "$((PORT_BASE+3))" "$TMP/fire.out"
+F="$TMP/fire.out"
+command grep -q 'CAPTURE: DRAFT ACCEPTANCE' "$F" || fail "acceptance section missing"
+command grep -qE 'mean=0\.99' "$F" || fail "high acceptance value not reported: $(command grep -A3 'DRAFT ACCEPT' "$F")"
+command grep -q 'fire rate: fired on' "$F" \
+  || fail "acceptance without a fire rate is a deception — both must be reported"
+command grep -q 'acceptance WITHOUT a fire rate is a deception' "$F" \
+  || fail "a drafter idle on most requests must WARN: $(command grep -A6 'DRAFT ACCEPT' "$F")"
+# The fire rate is a fraction of requests, so it can never exceed 100%.
+python3 - "$F" <<'PY' || fail "fire rate exceeded 100% — numerator and denominator come from different windows"
+import re, sys
+for ln in open(sys.argv[1], encoding="utf-8"):
+    m = re.search(r"fire rate: fired on (\d+) of (\d+) requests .*?\(([\d.]+)%\)", ln)
+    if m:
+        assert float(m.group(3)) <= 100.0, ln
+        assert int(m.group(1)) <= int(m.group(2)), ln
+PY
+echo "  ✓ low_fire: high acceptance + low fire rate BOTH reported, and warned about"
+
+# --- 6. graceful degradation: none of the sources present -------------------
+# docker-less, GPU-less, no server log, no readable pid. bench.sh must still run
+# end to end and say exactly what it could not capture.
+run_bench healthy "$((PORT_BASE+4))" "$TMP/degraded.out" \
+  SERVER_LOG= SERVER_PID=none PATH="/usr/bin:/bin"
+D="$TMP/degraded.out"
+command grep -q 'CONFIG FINGERPRINT' "$D" || fail "degraded run did not complete its fingerprint section"
+command grep -q 'CAPTURE: INTEGRITY' "$D" \
+  || { tail -25 "$D" "$D.err" >&2; fail "degraded run did not reach the end — degradation is not graceful"; }
+command grep -qE '^capture: .* unavailable \(.*\)$' "$D" \
+  || fail "a missing source must produce a 'capture: <thing> unavailable (<why>)' line"
+# ...and each missing thing exactly once, never in a loop.
+python3 - "$D" <<'PY' || fail "a degradation notice was printed more than once"
+import collections, re, sys
+c = collections.Counter(
+    re.match(r"capture: (.*?) unavailable", ln).group(1)
+    for ln in open(sys.argv[1], encoding="utf-8") if ln.startswith("capture: "))
+dupes = {k: v for k, v in c.items() if v > 1}
+assert not dupes, dupes
+PY
+command grep -q 'no CPU offload detected' "$D" \
+  || fail "with no argv and no log, the moe-cache capture must be SKIPPED with a reason"
+echo "  ✓ degradation: run completes, one notice per missing source, cache capture skipped with a reason"
+
+# --- 7. the historical output shape is untouched ----------------------------
+# Two shipped tests parse bench.sh's BENCH_MOCK output. The capture layer is
+# additive by contract; if the mock branch ever grows a capture line, they break.
+for kind in vllm llamacpp; do
+  out=$(PREFLIGHT_NO_AUTODETECT=1 CONTAINER=none ENGINE_KIND="$kind" BENCH_MOCK=1 bash "$BENCH" 2>/dev/null)
+  command grep -q '^capture:' <<<"$out" && fail "BENCH_MOCK output ($kind) grew a capture line"
+  command grep -q 'CAPTURE:' <<<"$out" && fail "BENCH_MOCK output ($kind) grew a capture section"
+  command grep -qE '(NARRATIVE|PROMPT-PROCESSING)' <<<"$out" || fail "BENCH_MOCK output ($kind) lost its canonical block"
+done
+echo "  ✓ BENCH_MOCK output shape unchanged (test-submit-bench / test-measurement-record)"
+
+# --- 8. CAPTURE=0 disables the whole layer ----------------------------------
+run_bench healthy "$((PORT_BASE+5))" "$TMP/off.out" CAPTURE=0
+command grep -q 'CAPTURE:' "$TMP/off.out" && fail "CAPTURE=0 must suppress the capture sections"
+command grep -q 'summary \[narrative\]' "$TMP/off.out" || fail "CAPTURE=0 broke the normal bench output"
+echo "  ✓ CAPTURE=0 leaves the pre-capture output shape exactly as it was"
+
+# --- 9. ENDPOINT: chat is the historical default; completion is the new mode ---
+run_bench healthy "$((PORT_BASE+6))" "$TMP/chat.out" ONLY=narr RUNS=1 WARMUPS=0
+command grep -q 'mode=chat' "$TMP/chat.out" || fail "ENDPOINT must default to chat (the historical path)"
+command grep -q 'endpoint=/v1/chat/completions' "$SRV_LOG" \
+  || fail "the default run did not drive /v1/chat/completions"
+run_bench healthy "$((PORT_BASE+7))" "$TMP/comp.out" ONLY=narr RUNS=1 WARMUPS=0 ENDPOINT=completion
+command grep -q 'mode=completion' "$TMP/comp.out" || fail "ENDPOINT=completion not reflected in the fingerprint"
+command grep -q 'endpoint=/v1/completions' "$SRV_LOG" \
+  || fail "ENDPOINT=completion did not actually drive the raw completions endpoint"
+command grep -q 'status: OK' "$TMP/comp.out" \
+  || fail "raw completions must still count tokens (choices[0].text, not a delta)"
+echo "  ✓ ENDPOINT: chat default preserved, completion drives the raw endpoint and still counts tokens"
+
+# --- 10. haystacks sized by MEASURED tokens, not words (item 7) --------------
+# The fake tokenizer emits 1.375 tok/word, so the old word-count sizing would
+# overshoot a 2000-token target by ~37% — exactly the "40K that tokenized to 55K".
+run_bench healthy "$((PORT_BASE+8))" "$TMP/ratio.out" \
+  ONLY=narr RUNS=1 WARMUPS=0 PREFILL_PROBE=1 PREFILL_DEPTHS=2000 PREFILL_RUNS=1
+python3 - "$TMP/ratio.out" <<'PY' || fail "prefill warm-up haystack is not sized by a measured token ratio"
+import re, sys
+txt = open(sys.argv[1], encoding="utf-8").read()
+m = re.search(r"warm-1\s+wall=.*?prompt_toks=\s*(\d+)", txt)
+assert m, "no prefill warm-up line found:\n" + txt[-1500:]
+got = int(m.group(1))
+# within 10% of the 2000-token target; the word heuristic lands ~37% over
+assert 1800 <= got <= 2200, f"warm-up haystack was {got} tokens for a 2000-token target"
+PY
+echo "  ✓ prefill warm-up lands on its token target (word-count sizing would overshoot ~37%)"
+
+# --- 11. STREAM triad ceiling is opt-in, and reports how it was measured -----
+command grep -q 'RAM BANDWIDTH CEILING' "$TMP/healthy.out" \
+  && fail "the STREAM calibration must be OPT-IN (it is not free)"
+run_bench healthy "$((PORT_BASE+9))" "$TMP/stream.out" ONLY=narr RUNS=1 WARMUPS=0 STREAM_CALIB=1
+if command grep -q 'RAM BANDWIDTH CEILING' "$TMP/stream.out"; then
+  command grep -qE 'triad ceiling  : [0-9.]+ GB/s  \([0-9]+ concurrent workers' "$TMP/stream.out" \
+    || fail "the triad ceiling must state its worker count — a single-threaded number is not a host ceiling"
+  echo "  ✓ STREAM_CALIB=1 reports a multi-worker sustained ceiling (and is off by default)"
+else
+  # numpy-less rigs are a supported configuration, not a failure.
+  command grep -q 'capture: STREAM triad ceiling unavailable' "$TMP/stream.out" \
+    || fail "STREAM_CALIB=1 produced neither a ceiling nor a degradation notice"
+  echo "  ✓ STREAM_CALIB=1 degrades cleanly where numpy is absent (and is off by default)"
+fi
+
+echo "test-bench-capture: ok"
