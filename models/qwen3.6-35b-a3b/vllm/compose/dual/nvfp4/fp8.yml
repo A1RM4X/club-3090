@@ -30,8 +30,15 @@
 #                → "GDN chunked-prefill scratch") applies to every GDN model.
 #   Genesis:   none — intentionally Genesis-free
 #   Status:    🧪 Experimental
-#   Best for:  full-ctx fast MoE on Blackwell/Hopper pairs — pending first
-#              community validation
+#   Best for:  ⭐ full-ctx fast MoE on Blackwell/Hopper pairs — 274.1 / 274.6
+#              decode TPS at 262K on 2× 5090 (#858), +8.8% over the AutoRound
+#              sibling on the same rig, same day, at wash-level quality
+#              ⤷ VALIDATED 2026-08-02 (#858 @paulp83) — this was the LAST
+#                unvalidated slug in the NVFP4 arc. verify-full + verify-stress
+#                6/6 to 240K (91%), soak PASS, 8-pack 110 off / 120 on.
+#                Status stays 🧪 on one rig: the single sibling needed TWO
+#                independent validations before promotion, so a second 32 GB
+#                pair is the trigger here.
 # ---------------------------------------------------------------------------
 # ⚠️ AUTHORED BLIND — READ THIS FIRST.
 # NVFP4 runs on the maintainer rig (2× RTX 3090 sm_86) via the Marlin W4A16
