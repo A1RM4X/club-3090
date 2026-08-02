@@ -596,24 +596,67 @@ def cmd_run(endpoint, req_path, timeout_s, metrics_path):
         error = f"{type(e).__name__}: {e}"
 
     wall = time.time() - t0
-    if ttft is None:
-        # No streaming content/reasoning/tool_calls delta was observed before
-        # the final chunk arrived. Common with thinking-mode responses where
-        # vLLM occasionally bundles the reasoning into the terminal chunk.
-        # We can't compute a meaningful TTFT or decode rate in that case —
-        # report TTFT as wall and decode_tps as 0 (signals "couldn't measure"
-        # without producing the spurious 2-billion-tps artifact).
+    # --- decode-rate basis (#809) --------------------------------------------
+    # decode TPS = completion_tokens / (wall - ttft) assumes token-by-token
+    # autoregressive streaming. Canvas-granularity (block-diffusion) models do
+    # not stream that way: they denoise a whole N-token canvas in parallel and
+    # the endpoint emits roughly ONE chunk per completed canvas. A response
+    # shorter than one canvas therefore arrives as a single chunk, ttft == wall,
+    # and the decode window is zero-width. Emitting a hard 0.0 there converts a
+    # wrong number into a misleading one — 20 of 25 turns unmeasurable in the
+    # #809 soak, and the summary silently described only the multi-canvas
+    # subset. So: when the window is unmeasurable but the model DID produce
+    # tokens, derive from wall time and label the basis, rather than zeroing.
+    #
+    # decode_basis, carried into the metrics JSON and turn-log.csv:
+    #   decode        real decode window observed; decode_tps IS a decode rate
+    #   wall          window unmeasurable, derived as completion_tokens / wall.
+    #                 Equals wall TPS by construction: it INCLUDES prefill and
+    #                 must never be presented as a bare decode rate.
+    #   empty         completion_tokens == 0 — genuine silent-empty. Keeps the
+    #                 0.0 that the silent-empty discriminator depends on; this
+    #                 case must not regress (club-3090 #43, #47).
+    #   unmeasurable  window unmeasurable on a run NOT classified as canvas —
+    #                 the pre-#809 autoregressive behaviour, decode_tps = 0.0.
+    #
+    # The canvas SIGNATURE is ttft ≈ wall, i.e. a zero-width window — NOT merely
+    # "narrow". That distinction is load-bearing: a fast autoregressive rig
+    # produces genuinely narrow windows (#849 measured 82-83 ms on a dual-NVFP4
+    # 5090 pair) which are sub-threshold but nowhere near zero, and those turns
+    # must keep behaving exactly as they did. SOAK_CANVAS_WINDOW_MS sets the
+    # zero-width bound (default 5 ms); SOAK_DECODE_GRANULARITY forces the
+    # classification (canvas | autoregressive | auto, default auto).
+    single_chunk = ttft is None
+    if single_chunk:
+        # No content/reasoning/tool_calls delta was observed before the final
+        # chunk. Either a canvas arriving whole, or a thinking-mode response
+        # where the engine bundled everything into the terminal chunk.
         ttft = wall
+    decode_s = wall - ttft
+    try:
+        canvas_window_ms = float(os.environ.get("SOAK_CANVAS_WINDOW_MS", "5"))
+    except ValueError:
+        canvas_window_ms = 5.0
+    granularity = (os.environ.get("SOAK_DECODE_GRANULARITY") or "auto").strip().lower()
+    if granularity not in ("auto", "canvas", "autoregressive"):
+        granularity = "auto"
+    canvas_signature = completion_tokens > 0 and (
+        single_chunk or decode_s * 1000.0 <= canvas_window_ms
+    )
+    if completion_tokens <= 0:
         decode_tps = 0.0
+        decode_basis = "empty"
+    elif decode_s >= 0.1:
+        decode_tps = round(completion_tokens / decode_s, 3)
+        decode_basis = "decode"
+    elif granularity == "canvas" or (granularity == "auto" and canvas_signature):
+        decode_tps = round(completion_tokens / wall, 3) if wall > 0 else 0.0
+        decode_basis = "wall"
     else:
-        decode_s = wall - ttft
-        if decode_s < 0.1 or completion_tokens <= 0:
-            # decode_s < 100ms means streaming closed before any decode steps
-            # were observable separately from prefill — same not-measurable
-            # case as ttft=None above.
-            decode_tps = 0.0
-        else:
-            decode_tps = round(completion_tokens / decode_s, 3)
+        # decode_s < 100 ms: streaming closed before decode steps were
+        # observable separately from prefill, on a run that is not canvas.
+        decode_tps = 0.0
+        decode_basis = "unmeasurable"
     # Reassemble the captured response for continuous-mode ingestion.
     # `tool_calls_response` is in OpenAI tool_calls format, ready to drop
     # into the next turn's assistant message.
@@ -633,6 +676,8 @@ def cmd_run(endpoint, req_path, timeout_s, metrics_path):
         "t_ms": round(wall * 1000),
         "ttft_ms": round(ttft * 1000),
         "decode_tps": decode_tps,
+        "decode_basis": decode_basis,
+        "decode_window_ms": round(decode_s * 1000),
         "completion_tokens": completion_tokens,
         # Continuous-mode capture (ignored in fresh mode):
         "content": "".join(content_parts)[:4000],
@@ -656,13 +701,24 @@ def cmd_append_log(log_path, session, turn, vram, metrics_path):
                 metrics.get("completion_tokens", 0),
                 metrics.get("status", 0),
                 metrics.get("error", ""),
+                # decode_basis last, so a consumer reading the pre-#809 column
+                # order positionally still lines up.
+                metrics.get("decode_basis", "decode"),
             ]
         )
 
 
 def cmd_metric(metrics_path):
     m = json.loads(pathlib.Path(metrics_path).read_text())
-    print(m.get("status", 0), m.get("t_ms", 0), m.get("ttft_ms", 0), m.get("decode_tps", 0))
+    # Field 5 (err_flag) lets soak-test.sh decide in bash whether a session ran
+    # CLEAN — without re-parsing the metrics JSON. The condition mirrors
+    # cmd_summary's errors[] exactly: non-200 status OR a stream error payload.
+    # Used to pick the session the warm VRAM baseline anchors on (#829).
+    err_flag = 1 if (int(m.get("status", 0)) != 200 or m.get("error")) else 0
+    # Field 6 (decode_basis) lets soak-test.sh label a wall-derived figure on the
+    # per-turn line and make the canvas classification sticky for the run (#809).
+    print(m.get("status", 0), m.get("t_ms", 0), m.get("ttft_ms", 0), m.get("decode_tps", 0),
+          err_flag, m.get("decode_basis", "decode"))
 
 
 def percentile(xs, p):
@@ -679,11 +735,18 @@ def med(xs):
     return statistics.median(xs) if xs else 0.0
 
 
-def cmd_summary(turn_log, summary_path, boot_vram, growth_limit, timed_out, expected_sessions):
+def cmd_summary(turn_log, summary_path, boot_vram, growth_limit, timed_out,
+                expected_sessions, baseline_session="1"):
     boot_vram = int(boot_vram)
     growth_limit = int(growth_limit)
     timed_out = int(timed_out) == 1
     expected_sessions = int(expected_sessions)
+    # Which session the warm VRAM baseline was anchored at the END of, or 0 when
+    # NO session completed error-free and therefore no warm baseline exists
+    # (#829). Defaulted to 1 so older callers / replayed CSVs keep the historical
+    # "baseline == end of session 1, compare against every row" behaviour.
+    baseline_session = int(baseline_session)
+    vram_unmeasurable = baseline_session <= 0
     rows = []
     with open(turn_log) as f:
         reader = csv.DictReader(f)
@@ -691,12 +754,17 @@ def cmd_summary(turn_log, summary_path, boot_vram, growth_limit, timed_out, expe
         # silent-empty discriminator below: genuine completion_tokens==0 when
         # available, else the legacy decode_tps==0 proxy for older CSVs.
         has_completion_tokens = "completion_tokens" in (reader.fieldnames or [])
+        # decode_basis column added 2026-08-01 (#809). Absent on older CSVs, in
+        # which case every row is treated as a real decode measurement — exactly
+        # the pre-#809 reading of that data.
+        has_decode_basis = "decode_basis" in (reader.fieldnames or [])
         for row in reader:
             for key in ("session_id", "turn_id", "t_ms", "vram_mib", "ttft_ms", "status"):
                 row[key] = int(float(row[key] or 0))
             row["decode_tps"] = float(row["decode_tps"] or 0)
             # completion_tokens is new (added 2026-05-04) — back-compat for old CSVs
             row["completion_tokens"] = int(float(row.get("completion_tokens", 0) or 0))
+            row["decode_basis"] = (row.get("decode_basis") or "decode") if has_decode_basis else "decode"
             rows.append(row)
 
     sessions = sorted({r["session_id"] for r in rows})
@@ -709,14 +777,43 @@ def cmd_summary(turn_log, summary_path, boot_vram, growth_limit, timed_out, expe
     # or data from older runs that pre-date the fix.
     def realistic(t):
         return 0 < t <= 500
-    tps = [r["decode_tps"] for r in rows if realistic(r["decode_tps"])]
+    # Wall-derived (canvas) turns are kept OUT of every decode statistic (#809):
+    # a wall-derived figure includes prefill, so averaging it with real decode
+    # rates would silently redefine what p50/p95/retention mean. They get their
+    # own labelled series below. On an autoregressive run `derived` is empty and
+    # every pool here is identical to the pre-#809 pools.
+    derived = [r for r in rows if r["decode_basis"] == "wall"]
+    measured_rows = [r for r in rows if r["decode_basis"] != "wall"]
+    tps = [r["decode_tps"] for r in measured_rows if realistic(r["decode_tps"])]
     ttft = [r["ttft_ms"] for r in rows if r["ttft_ms"] > 0]
-    first_tps = [r["decode_tps"] for r in rows if r["session_id"] in first and realistic(r["decode_tps"])]
-    last_tps = [r["decode_tps"] for r in rows if r["session_id"] in last and realistic(r["decode_tps"])]
+    first_tps = [r["decode_tps"] for r in measured_rows if r["session_id"] in first and realistic(r["decode_tps"])]
+    last_tps = [r["decode_tps"] for r in measured_rows if r["session_id"] in last and realistic(r["decode_tps"])]
+    dtps = [r["decode_tps"] for r in derived if realistic(r["decode_tps"])]
+    first_dtps = [r["decode_tps"] for r in derived if r["session_id"] in first and realistic(r["decode_tps"])]
+    last_dtps = [r["decode_tps"] for r in derived if r["session_id"] in last and realistic(r["decode_tps"])]
     first_ttft = [r["ttft_ms"] for r in rows if r["session_id"] in first and r["ttft_ms"] > 0]
     last_ttft = [r["ttft_ms"] for r in rows if r["session_id"] in last and r["ttft_ms"] > 0]
-    max_vram = max([r["vram_mib"] for r in rows] + [boot_vram])
-    growth = max_vram - boot_vram
+    # VRAM accretion is only meaningful FROM the warm baseline forward, and the
+    # baseline is only meaningful if the session it was taken at the end of ran
+    # clean (#829). Two consequences, both of which the pre-#829 code got wrong
+    # when session 1 died:
+    #   1. Rows recorded BEFORE the baseline was captured must not feed the peak.
+    #      They pre-date the comparison point, so a pre-baseline reading can only
+    #      manufacture growth that was never accretion.
+    #   2. If NO session ran clean there is no warm baseline at all — sampling
+    #      nvidia-smi anyway reads a dying/dead engine and every later comparison
+    #      lands multi-GB high. #827: a 31823 MiB corpse baseline against the
+    #      healthy 63876 MiB peak printed "VRAM grew 32053 MiB" + "oscillation
+    #      63866 MiB" — the loudest FAIL in the report, pointing at a memory leak
+    #      that did not exist, on a run whose actual fault was an engine crash.
+    vram_rows = [] if vram_unmeasurable else [r for r in rows if r["session_id"] >= baseline_session]
+    vram_sessions = sorted({r["session_id"] for r in vram_rows})
+    if vram_unmeasurable:
+        max_vram = 0
+        growth = 0
+    else:
+        max_vram = max([r["vram_mib"] for r in vram_rows] + [boot_vram])
+        growth = max_vram - boot_vram
     errors = [r for r in rows if r["status"] != 200 or r["error"]]
     # Silent-empty turns: HTTP 200 + no transport error + the model produced
     # NO observable output despite t_ms ≥ 1s. These slip past errors[] — the
@@ -744,8 +841,11 @@ def cmd_summary(turn_log, summary_path, boot_vram, growth_limit, timed_out, expe
     first_med = med(first_tps)
     last_med = med(last_tps)
     tps_retention = last_med / first_med if first_med > 0 else 0.0
+    d_first_med = med(first_dtps)
+    d_last_med = med(last_dtps)
+    d_retention = d_last_med / d_first_med if d_first_med > 0 else 0.0
     ttft_ratio = med(last_ttft) / med(first_ttft) if med(first_ttft) > 0 else 0.0
-    session_max = [max(r["vram_mib"] for r in rows if r["session_id"] == s) for s in sessions]
+    session_max = [max(r["vram_mib"] for r in vram_rows if r["session_id"] == s) for s in vram_sessions]
     oscillation = max([abs(b - a) for a, b in zip(session_max, session_max[1:])] or [0])
     slow_turns = [r for r in rows if r["t_ms"] > 30000]
 
@@ -753,17 +853,36 @@ def cmd_summary(turn_log, summary_path, boot_vram, growth_limit, timed_out, expe
     failures = []
     if errors:
         failures.append(f"{len(errors)} request(s) returned non-200 status or stream error.")
-    if growth > growth_limit:
+    if vram_unmeasurable:
+        # Loud, and deliberately NOT a number (#829). A numeric growth figure
+        # here would be an artifact of baselining a dead engine, and it is the
+        # single most misdirecting line a soak report can carry.
+        warnings.append(
+            f"VRAM growth + oscillation: UNMEASURABLE — no session completed without errors "
+            f"({len(errors)} errored turn(s)), so no warm baseline could be anchored. "
+            f"These metrics are NOT reported rather than reported wrong; fix the errors "
+            f"above and re-run before reading anything into VRAM."
+        )
+    elif growth > growth_limit:
         failures.append(f"VRAM grew {growth} MiB > {growth_limit} MiB threshold.")
     if first_med > 0 and tps_retention < 0.80:
         failures.append(f"Decode TPS retention was {tps_retention * 100:.1f}% < 80%.")
+    elif first_med == 0 and d_first_med > 0:
+        # Every measurable turn was canvas-derived (#809). Evaluate retention on
+        # the wall-derived series rather than reporting "no samples" — but say
+        # which series it is, because wall TPS includes prefill.
+        if d_retention < 0.80:
+            failures.append(
+                f"Wall-derived (canvas) TPS retention was {d_retention * 100:.1f}% < 80%. "
+                f"No turn had a measurable decode window, so this is a wall-time series."
+            )
     elif first_med == 0 and rows:
         warnings.append("No positive decode TPS samples; retention could not be evaluated.")
     if ttft_ratio > 1.5:
         warnings.append(f"TTFT grew {ttft_ratio:.2f}x from first sessions to last sessions.")
     if slow_turns:
         warnings.append(f"{len(slow_turns)} turn(s) exceeded 30s.")
-    if oscillation > 500:
+    if not vram_unmeasurable and oscillation > 500:
         warnings.append(f"VRAM session-to-session oscillation reached {oscillation} MiB.")
     if sessions and sessions[-1] < expected_sessions:
         warnings.append(f"Only {sessions[-1]} of {expected_sessions} sessions completed.")
@@ -782,18 +901,56 @@ def cmd_summary(turn_log, summary_path, boot_vram, growth_limit, timed_out, expe
         else:
             warnings.append(msg)
 
-    verdict = "INCONCLUSIVE" if timed_out else ("FAIL" if failures else "PASS")
-    exit_code = 2 if timed_out else (1 if failures else 0)
+    # A run with no warm baseline can never be a PASS: the VRAM-accretion class
+    # this test exists to detect went unmeasured (#829).
+    verdict = "INCONCLUSIVE" if timed_out else (
+        "FAIL" if failures else ("INCONCLUSIVE" if vram_unmeasurable else "PASS"))
+    exit_code = 2 if timed_out else (1 if failures else (2 if vram_unmeasurable else 0))
+    if vram_unmeasurable:
+        vram_lines = [
+            "- Boot VRAM baseline: **UNMEASURABLE** — no error-free session to anchor on",
+            "- Max VRAM observed: n/a (no warm baseline to compare against)",
+            "- Max growth observed: **INCONCLUSIVE** — see Warnings",
+        ]
+    else:
+        vram_lines = [
+            f"- Boot VRAM baseline: {boot_vram} MiB",
+            f"- Max VRAM observed: {max_vram} MiB",
+            f"- Max growth observed: {growth} MiB",
+        ]
+        if baseline_session > 1:
+            vram_lines.append(
+                f"- Warm baseline anchored at END of session {baseline_session} "
+                f"(sessions 1-{baseline_session - 1} had errored turns; their rows are "
+                f"excluded from growth + oscillation)"
+            )
+    # Canvas-granularity block — emitted ONLY when a wall-derived turn exists, so
+    # an autoregressive run's summary is unchanged (#809).
+    basis_lines = []
+    basis_rows = []
+    if derived:
+        basis_lines = [
+            f"- Decode-window basis: {len(rows) - len(derived)} measured / {len(derived)} "
+            f"wall-derived of {len(rows)} turn(s). A wall-derived turn arrived in a single "
+            f"chunk (canvas granularity), so its decode window is zero-width and the figure "
+            f"is completion_tokens / wall — it INCLUDES prefill and is not a decode rate.",
+        ]
+        basis_rows = [
+            f"| p50 wall-derived TPS (canvas) | {percentile(dtps, 0.50):.2f} |",
+            f"| p95 wall-derived TPS (canvas) | {percentile(dtps, 0.95):.2f} |",
+            f"| wall-derived (canvas) turns | {len(derived)} / {len(rows)} |",
+        ]
+        if d_first_med > 0:
+            basis_rows.append(f"| wall-derived TPS retention (canvas) | {d_retention * 100:.1f}% |")
     lines = [
         "# Soak test summary",
         "",
         f"- Verdict: **{verdict}**",
-        f"- Boot VRAM baseline: {boot_vram} MiB",
-        f"- Max VRAM observed: {max_vram} MiB",
-        f"- Max growth observed: {growth} MiB",
+        *vram_lines,
         f"- Sessions completed: {len(sessions)}",
         f"- Request errors: {len(errors)}",
         f"- Silent-empty turns (HTTP 200 + 0 completion tokens): {len(silent_empty)} / {len(rows)} ({silent_empty_pct:.1f}%)",
+        *basis_lines,
         "",
         "| Metric | Value |",
         "|---|---:|",
@@ -805,7 +962,9 @@ def cmd_summary(turn_log, summary_path, boot_vram, growth_limit, timed_out, expe
         f"| p50 TTFT | {percentile(ttft, 0.50):.0f} ms |",
         f"| p95 TTFT | {percentile(ttft, 0.95):.0f} ms |",
         f"| TTFT first/last ratio | {ttft_ratio:.2f}x |",
-        f"| VRAM oscillation | {oscillation} MiB |",
+        (f"| VRAM oscillation | INCONCLUSIVE |" if vram_unmeasurable
+         else f"| VRAM oscillation | {oscillation} MiB |"),
+        *basis_rows,
         "",
     ]
     if failures:
@@ -821,20 +980,36 @@ def cmd_summary(turn_log, summary_path, boot_vram, growth_limit, timed_out, expe
         rec = "Inspect docker logs and compare turn-log.csv against GPU snapshots to identify the accreting path."
     elif verdict == "INCONCLUSIVE":
         rec = "Re-run with a larger SOAK_TIMEOUT_S or fewer/lighter sessions before treating this config as soak-clean."
+    if vram_unmeasurable:
+        rec = ("Every session errored, so VRAM accretion was never measured. Diagnose the "
+               "request errors first (`docker logs <container> 2>&1 | tail -50`) — a mid-run "
+               "engine death is the common cause — then re-run the soak.")
     lines += ["## Recommendation", "", f"- {rec}"]
     pathlib.Path(summary_path).write_text("\n".join(lines) + "\n")
 
     print("")
     print("[soak] summary")
     print(f"[soak]   verdict              {verdict}")
-    print(f"[soak]   boot_vram_mib        {boot_vram}")
-    print(f"[soak]   max_vram_mib         {max_vram}")
-    print(f"[soak]   max_growth_mib       {growth} / {growth_limit}")
+    if vram_unmeasurable:
+        print(f"[soak]   boot_vram_mib        UNMEASURABLE (no error-free session)")
+        print(f"[soak]   max_vram_mib         n/a")
+        print(f"[soak]   max_growth_mib       INCONCLUSIVE / {growth_limit}")
+    else:
+        print(f"[soak]   boot_vram_mib        {boot_vram}")
+        print(f"[soak]   max_vram_mib         {max_vram}")
+        print(f"[soak]   max_growth_mib       {growth} / {growth_limit}")
+        if baseline_session > 1:
+            print(f"[soak]   baseline_session     {baseline_session} (sessions 1-{baseline_session - 1} errored; excluded)")
     print(f"[soak]   errors               {len(errors)}")
     print(f"[soak]   silent_empty         {len(silent_empty)} / {len(rows)} ({silent_empty_pct:.1f}%)")
     print(f"[soak]   p50_decode_tps       {percentile(tps, 0.50):.2f}")
+    if derived:
+        print(f"[soak]   decode_basis         {len(rows) - len(derived)} measured / {len(derived)} wall-derived (canvas)")
+        print(f"[soak]   p50_wall_tps_canvas  {percentile(dtps, 0.50):.2f}  (includes prefill — NOT a decode rate)")
     print(f"[soak]   p95_ttft_ms          {percentile(ttft, 0.95):.0f}")
     print(f"[soak]   tps_retention        {tps_retention * 100:.1f}%")
+    if derived and d_first_med > 0:
+        print(f"[soak]   wall_tps_retention   {d_retention * 100:.1f}%  (canvas series)")
     for label, items in (("failures", failures), ("warnings", warnings)):
         if items:
             print(f"[soak] {label}:")

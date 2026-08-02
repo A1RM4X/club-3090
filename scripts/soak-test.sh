@@ -67,6 +67,19 @@
 #                          sessions don't reach the target context size.)
 #   SOAK_MAX_GROWTH_MIB    Fail if max VRAM growth exceeds this after warm
 #                          baseline. Default: 200 MiB.
+#   SOAK_DECODE_GRANULARITY  auto (default) | canvas | autoregressive.
+#                          Canvas-granularity (block-diffusion) models emit one
+#                          chunk per denoised canvas, so short responses arrive
+#                          whole and the decode window is zero-width. On those
+#                          turns the harness derives TPS from wall time and
+#                          LABELS it, instead of printing decode_tps=0.0 (#809).
+#                          "auto" detects the signature and latches; "canvas"
+#                          forces it; "autoregressive" restores the old zeroing.
+#   SOAK_CANVAS_WINDOW_MS  Zero-width bound for the canvas signature, in ms.
+#                          Default: 5. Deliberately far below the 100 ms
+#                          measurability floor — a fast autoregressive rig
+#                          produces narrow-but-real windows (~82 ms on dual
+#                          NVFP4 5090s, #849) that must NOT be reclassified.
 #   SOAK_TIMEOUT_S         Hard wall-clock cap. Default: 1800 seconds.
 #   SOAK_REQ_TIMEOUT_S     Per-request timeout. Default: 600 seconds.
 #   SOAK_OUTPUT            Output dir. Default: results/soak-YYYYmmdd-HHMMSS.
@@ -77,10 +90,21 @@
 #   results/<run>/gpu-log.csv
 #   results/<run>/summary.md
 #
+# VRAM baseline semantics (#829):
+#   The warm VRAM baseline is captured at the END of the first session that
+#   completed with ZERO errored turns — not unconditionally at the end of
+#   session 1. A session that errored (engine death, non-200, stream error)
+#   would baseline a failing engine, and every later reading would then read as
+#   multi-GB growth: #827 reported "VRAM grew 32053 MiB" on a run whose only
+#   fault was an engine crash. Rows recorded BEFORE the anchor session are
+#   excluded from the growth + oscillation analysis. If no session runs clean,
+#   VRAM growth is reported as UNMEASURABLE and the verdict is INCONCLUSIVE —
+#   never a phantom number.
+#
 # Exit codes:
 #   0 pass
 #   1 fail
-#   2 inconclusive / timeout / preflight could not run
+#   2 inconclusive / timeout / no warm VRAM baseline / preflight could not run
 
 # Force Python's UTF-8 mode (PEP 540) for every python3 this script runs.
 # Repo sources are full of unicode (— × → ⚠), and without this a rig on a real
@@ -182,6 +206,17 @@ else
   SOAK_TURNS="${SOAK_TURNS:-5}"
 fi
 SOAK_MAX_GROWTH_MIB="${SOAK_MAX_GROWTH_MIB:-200}"
+# Decode-rate granularity (#809). "auto" classifies a turn as canvas when the
+# response arrives in a single chunk (zero-width decode window) with real
+# tokens; the classification then latches for the rest of the run. "canvas"
+# forces it from turn 1; "autoregressive" disables the derivation entirely and
+# restores the pre-#809 behaviour. Exported so soak-helper.py sees it.
+SOAK_DECODE_GRANULARITY="${SOAK_DECODE_GRANULARITY:-auto}"
+case "$SOAK_DECODE_GRANULARITY" in
+  auto|canvas|autoregressive) ;;
+  *) echo "ERROR: SOAK_DECODE_GRANULARITY='${SOAK_DECODE_GRANULARITY}' — must be 'auto', 'canvas' or 'autoregressive'." >&2; exit 2 ;;
+esac
+export SOAK_DECODE_GRANULARITY
 SOAK_TIMEOUT_S="${SOAK_TIMEOUT_S:-1800}"
 SOAK_REQ_TIMEOUT_S="${SOAK_REQ_TIMEOUT_S:-600}"
 SOAK_OUTPUT="${SOAK_OUTPUT:-results/soak-$(date +%Y%m%d-%H%M%S)}"
@@ -326,7 +361,7 @@ RESPONSE_DIR="${SOAK_OUTPUT}/responses"
 STATE_DIR="${SOAK_OUTPUT}/states"
 mkdir -p "$REQUEST_DIR" "$RESPONSE_DIR" "$STATE_DIR"
 
-printf 'session_id,turn_id,t_ms,vram_mib,ttft_ms,decode_tps,completion_tokens,status,error\n' > "$TURN_LOG"
+printf 'session_id,turn_id,t_ms,vram_mib,ttft_ms,decode_tps,completion_tokens,status,error,decode_basis\n' > "$TURN_LOG"
 printf 'session_id,turn_id,gpu_index,memory_used_mib,utilization_gpu_pct\n' > "$GPU_LOG"
 
 capture_state "baseline"
@@ -339,10 +374,16 @@ log "output=${SOAK_OUTPUT}"
 
 START_SECONDS="$SECONDS"
 BOOT_VRAM_MIB=""
+# Session the warm VRAM baseline was anchored at the END of; 0 = never anchored
+# (no error-free session), which makes VRAM growth UNMEASURABLE rather than a
+# phantom number (#829).
+BASELINE_SESSION=0
+TURNS_RUN=0
 TIMED_OUT=0
 
 for session in $(seq 1 "$SOAK_SESSIONS"); do
   log "session ${session}/${SOAK_SESSIONS}"
+  session_errors=0
   state_file="${STATE_DIR}/state-s${session}.json"
   if [[ "$SOAK_MODE" == "continuous" ]]; then
     python3 "$HELPER" init-session "$state_file" "$session"
@@ -370,32 +411,73 @@ for session in $(seq 1 "$SOAK_SESSIONS"); do
     append_gpu_snapshot "$session" "$turn"
     python3 "$HELPER" append-log "$TURN_LOG" "$session" "$turn" "$vram" "$metrics_file"
 
-    read -r status t_ms ttft_ms decode_tps < <(python3 "$HELPER" metric "$metrics_file")
-    log "  turn ${turn}/${SOAK_TURNS}: status=${status} wall=${t_ms}ms ttft=${ttft_ms}ms decode_tps=${decode_tps} vram=${vram}MiB"
+    read -r status t_ms ttft_ms decode_tps err_flag decode_basis < <(python3 "$HELPER" metric "$metrics_file")
+    TURNS_RUN=$((TURNS_RUN + 1))
+    [[ "${err_flag:-0}" == "1" ]] && session_errors=$((session_errors + 1))
+    if [[ "${decode_basis:-decode}" == "wall" ]]; then
+      # Canvas-granularity turn (#809): the response arrived in a single chunk,
+      # so the decode window is zero-width and the figure is derived from wall
+      # time. Label it — a wall-derived number includes prefill and must never
+      # be printed as a bare decode rate. Latch the classification for the rest
+      # of the run so later narrow-window turns on the same model are derived
+      # too, instead of alternating between a real figure and a bare 0.0.
+      if [[ "$SOAK_DECODE_GRANULARITY" != "canvas" ]]; then
+        SOAK_DECODE_GRANULARITY=canvas
+        export SOAK_DECODE_GRANULARITY
+        log "  canvas-granularity generation detected (single-chunk response, zero-width decode window)"
+        log "  per-turn figures are wall-derived from here on — wall TPS, includes prefill. See issue #809."
+      fi
+      log "  turn ${turn}/${SOAK_TURNS}: status=${status} wall=${t_ms}ms ttft=${ttft_ms}ms decode_tps=${decode_tps} (wall-derived, canvas) vram=${vram}MiB"
+    else
+      log "  turn ${turn}/${SOAK_TURNS}: status=${status} wall=${t_ms}ms ttft=${ttft_ms}ms decode_tps=${decode_tps} vram=${vram}MiB"
+    fi
   done
 
-  # Capture warm baseline at END of session 1 — after all 5 turn shapes have
-  # run once and prefix cache has filled. Real accretion is measured FROM
-  # this baseline across sessions 2-N, so cache-fill (typically +500-1500
-  # MiB on the first 12K-char tool-result paste) doesn't false-positive.
+  # Capture warm baseline at END of the first CLEAN session — after all 5 turn
+  # shapes have run once and prefix cache has filled. Real accretion is measured
+  # FROM this baseline across the remaining sessions, so cache-fill (typically
+  # +500-1500 MiB on the first 12K-char tool-result paste) doesn't false-positive.
   # Calibration validated 2026-05-03 on long-text @ 0.93 + 180K — sessions
   # 2-10 stayed flat at session-1-end VRAM, confirming the test discriminates
   # cache fill from accretion correctly.
+  #
+  # CLEAN is load-bearing (#829). Anchoring unconditionally at the end of
+  # session 1 is correct only when session 1 succeeded: if the engine died
+  # mid-session, vram_mib() samples a corpse and every later reading reads as
+  # multi-GB growth. #827 printed "VRAM grew 32053 MiB" and "oscillation
+  # 63866 MiB" on a run whose only real fault was an engine crash — the loudest
+  # FAIL in the report, pointing at a leak that did not exist. So we re-anchor
+  # on the first error-free session instead, and if none exists the summary
+  # reports VRAM as UNMEASURABLE rather than inventing a figure.
   if [[ -z "$BOOT_VRAM_MIB" ]]; then
-    BOOT_VRAM_MIB="$(vram_mib)"
-    log "warm baseline after session 1: ${BOOT_VRAM_MIB} MiB"
+    if (( session_errors == 0 )); then
+      BOOT_VRAM_MIB="$(vram_mib)"
+      BASELINE_SESSION="$session"
+      log "warm baseline after session ${session}: ${BOOT_VRAM_MIB} MiB"
+    else
+      log "session ${session} had ${session_errors} errored turn(s) — NOT anchoring the warm VRAM baseline here (would baseline a failing engine); re-anchoring on the first clean session"
+    fi
   fi
 done
 
 if [[ -z "$BOOT_VRAM_MIB" ]]; then
-  BOOT_VRAM_MIB="$(vram_mib)"
-  TIMED_OUT=1
-  log "no completed turns; writing inconclusive summary"
+  # Deliberately do NOT sample vram_mib() here: with no clean session the engine
+  # is by definition unhealthy, and a reading taken now is exactly the corpse
+  # baseline #829 is about. Pass 0 + BASELINE_SESSION=0 so the summary reports
+  # VRAM as UNMEASURABLE.
+  BOOT_VRAM_MIB=0
+  BASELINE_SESSION=0
+  if (( TURNS_RUN == 0 )); then
+    TIMED_OUT=1
+    log "no completed turns; writing inconclusive summary"
+  else
+    log "no error-free session completed — VRAM growth + oscillation are UNMEASURABLE (no warm baseline)"
+  fi
 fi
 
 set +e
 python3 "$HELPER" summary "$TURN_LOG" "$SUMMARY_MD" "$BOOT_VRAM_MIB" \
-  "$SOAK_MAX_GROWTH_MIB" "$TIMED_OUT" "$SOAK_SESSIONS"
+  "$SOAK_MAX_GROWTH_MIB" "$TIMED_OUT" "$SOAK_SESSIONS" "$BASELINE_SESSION"
 rc=$?
 set -e
 exit "$rc"
