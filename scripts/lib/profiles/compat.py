@@ -198,6 +198,15 @@ class ModelProfile:
     # hybrid models can set kv_calc_supported=false to skip C12 until
     # kv-calc gains MoE-aware activation/KV formulas.
     kv_calc_supported: bool = True
+    # #809 — how this model emits tokens, which decides whether `decode_TPS`
+    # means anything for it. "token" (the default, and correct for every
+    # autoregressive model) or "canvas" for a block-diffusion dLLM, which
+    # denoises a whole canvas in parallel and emits ~one SSE chunk per canvas —
+    # so TTFT == wall on a single-canvas response and the decode window is
+    # zero-width. Declaring it here is what lets the launchers export
+    # DECODE_GRANULARITY instead of the operator remembering the knob.
+    decode_granularity: str = "token"
+    canvas_tokens: int | None = None
 
     def hf_repos_for(self, variant: str) -> tuple[str, ...]:
         """v0.8.0 Pull-Gate — full HF slugs that resolve to this model's
@@ -437,7 +446,23 @@ def _model(data: dict[str, Any]) -> ModelProfile:
         valid_tp=tuple(int(x) for x in _tuple(data.get("valid_tp"))),
         requires_genesis=bool(data.get("requires_genesis", False)),
         kv_calc_supported=bool(data.get("kv_calc_supported", True)),
+        decode_granularity=_decode_granularity(data),
+        canvas_tokens=(int(data["canvas_tokens"])
+                       if data.get("canvas_tokens") is not None else None),
     )
+
+
+def _decode_granularity(data: dict[str, Any]) -> str:
+    """#809. Unknown values FAIL rather than silently degrading to "token":
+    a typo'd `canvass` would otherwise re-arm the epsilon divide on the exact
+    model class the field exists to protect, and nothing would say so."""
+    raw = data.get("decode_granularity", "token")
+    value = str(raw).strip().lower()
+    if value not in ("token", "canvas"):
+        raise ValueError(
+            f"model {data.get('id', '?')}: decode_granularity must be "
+            f"'token' or 'canvas' (got {raw!r})")
+    return value
 
 
 def _workload(data: dict[str, Any]) -> WorkloadProfile:

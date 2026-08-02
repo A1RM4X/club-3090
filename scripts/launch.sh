@@ -1210,6 +1210,13 @@ export_variant_engine_pin() {
         export VLLM_USE_DEEP_GEMM="$value"
         echo "[launch] fp8 weights: VLLM_USE_DEEP_GEMM=${value} (consumer card has no DeepGEMM recipe — disc #571)" ;;
       VLLM_ATTENTION_BACKEND) export VLLM_ATTENTION_BACKEND="$value" ;;
+      # #809 — the model's declared decode class. A block-diffusion (dLLM)
+      # model has no measurable decode window on a single-canvas response,
+      # so decode_TPS is not a decode rate for it; the harness labels the
+      # output instead of printing a divide-by-epsilon figure.
+      DECODE_GRANULARITY)
+        export DECODE_GRANULARITY="$value"
+        echo "[launch] decode granularity: DECODE_GRANULARITY=${value} (declared by the model profile; decode_TPS is not a decode rate for this class — #809)" ;;
       *) echo "[launch] ERROR: unexpected engine pin export: $key" >&2; exit 2 ;;
     esac
   done <<< "$output"

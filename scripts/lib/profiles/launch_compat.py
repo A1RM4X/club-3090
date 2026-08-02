@@ -368,7 +368,30 @@ def resolve_variant_pin(profiles, variant: str, gpu_spec: str = "") -> dict[str,
     exports.update(_envelope_env(profiles, variant, gpu_spec))   # Phase 2 concurrency
     exports.update(_mem_util_env(profiles, variant, gpu_spec))   # Phase 2 mem-fraction floor
     exports.update(_deepgemm_env(profiles, variant, entry, gpu_spec))  # fp8w consumer-Blackwell fix
+    exports.update(_decode_granularity_env(profiles, entry))     # #809 dLLM decode class
     return exports
+
+
+def _decode_granularity_env(profiles, entry: dict) -> dict[str, str]:
+    """#809 — export DECODE_GRANULARITY for a model that declares a non-default
+    decode class.
+
+    A block-diffusion (dLLM) model denoises a whole canvas in parallel and the
+    endpoint emits ~one chunk per canvas, so `decode_TPS = tokens/(wall - TTFT)`
+    divides by a zero-width window. The harness can auto-detect that from the
+    measured runs, but auto-detection is a majority vote over a shape — the
+    model's own profile is the authority, and declaring it means the operator
+    never has to remember the knob.
+
+    NOT gpu_spec-gated (unlike the arch-aware exports): this is a property of the
+    MODEL, identical on every card. Emitted only for the non-default value, so no
+    other slug's export set changes by a byte.
+    """
+    model = profiles.models.get(entry["model"])
+    gran = getattr(model, "decode_granularity", "token") if model else "token"
+    if gran == "token":
+        return {}
+    return {"DECODE_GRANULARITY": gran}
 
 
 def _print_env(exports: dict[str, str], fmt: str) -> None:

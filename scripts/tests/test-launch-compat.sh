@@ -233,4 +233,48 @@ PY
 assert_contains "$out" "vllm/vllm-openai:v0.25.1"   # clean (vllm/dual → vllm-stable) bumped to v0.25.1
 assert_contains "$out" "vllm/vllm-openai:v0.22.0"   # gemma (vllm/gemma-int8-mtp → vllm-gemma-stable) stays v0.22.0
 
+# --- #809: decode_granularity travels from the profile YAML to the launchers --
+# A block-diffusion (dLLM) model denoises a whole canvas in parallel and emits
+# ~one SSE chunk per canvas, so TTFT == wall on a single-canvas response and
+# `decode_TPS = tokens/(wall - TTFT)` divides by a zero-width window. The class
+# is a property of the MODEL, so it is declared in the model profile and rides
+# the same export channel as the image pin.
+out="$(python3 "$HELPER" resolve-variant-pin --variant vllm/diffusiongemma-dual --format shell)"
+assert_contains "$out" "DECODE_GRANULARITY=canvas"
+# ...and it must be gpu-spec-independent: unlike the arch-aware exports, this is
+# the same fact on every card, so it must not vanish when a spec IS passed.
+out="$(python3 "$HELPER" resolve-variant-pin --variant vllm/diffusiongemma-dual \
+  --format shell --gpu-spec "$GPU_3090")"
+assert_contains "$out" "DECODE_GRANULARITY=canvas"
+# Every autoregressive slug's export set must be unchanged — the field defaults
+# to "token" and the emitter stays silent for it, so no other slug moves a byte.
+# (vLLM slugs only — resolve-variant-pin refuses a non-docker-image engine pin,
+# which is llamacpp's pre-existing behaviour and unrelated to this field.)
+for v in vllm/dual vllm/minimal vllm/gemma-int8-mtp; do
+  out="$(python3 "$HELPER" resolve-variant-pin --variant "$v" --format shell --gpu-spec "$GPU_3090")"
+  assert_not_contains "$out" "DECODE_GRANULARITY"
+done
+# Both launchers must ACCEPT the key. Their allowlists are hand-written and an
+# unlisted key is `exit 2`, not a silent no-op — so an emitter without both arms
+# breaks the launch, and nothing else in the suite would catch it.
+for f in "$ROOT_DIR/scripts/launch.sh" "$ROOT_DIR/scripts/switch.sh"; do
+  command grep -q 'DECODE_GRANULARITY)' "$f" \
+    || { echo "ASSERTION FAILED: $f does not allowlist DECODE_GRANULARITY (launch would exit 2)" >&2; exit 1; }
+done
+# The profile field is validated, not coerced: a typo must FAIL rather than
+# silently degrade to "token" and re-arm the epsilon divide on the one model
+# class the field exists to protect.
+out="$(python3 - <<'PY' 2>&1 || true
+from scripts.lib.profiles.compat import _decode_granularity
+try:
+    _decode_granularity({"id": "x", "decode_granularity": "canvass"})
+    print("NO-RAISE")
+except ValueError as e:
+    print(f"raised: {e}")
+PY
+)"
+assert_contains "$out" "raised:"
+assert_not_contains "$out" "NO-RAISE"
+echo "  ✓ #809: decode_granularity reaches both launchers, only for the model that declares it"
+
 echo "test-launch-compat: ok"

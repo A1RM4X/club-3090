@@ -308,6 +308,23 @@ export PREFILL_PROBE PREFILL_DEPTHS PREFILL_RUNS
 ENABLE_THINKING="${ENABLE_THINKING:-0}"
 FORCE_TOKENS="${FORCE_TOKENS:-0}"
 # --- decode-granularity knobs (#809) ----------------------------------------
+# Precedence: an explicit env var (the operator meant it) > the SERVED MODEL's
+# own declaration > auto-detection from the measured runs.
+#
+# The middle rung is the point: a model that declares `decode_granularity:
+# canvas` in its profile YAML has that injected into the serving container by
+# switch.sh/launch.sh, so the class travels WITH the server instead of living in
+# an operator's memory. Auto-detection still works and still fires as the
+# backstop — but it is a majority vote over a measured shape, and the model's
+# own profile is the authority.
+if [[ -z "${DECODE_GRANULARITY:-}" ]] && [[ "${CONTAINER:-}" != "none" ]] \
+   && command -v docker >/dev/null 2>&1 && docker inspect "${CONTAINER}" >/dev/null 2>&1; then
+  _served_gran="$(docker exec "$CONTAINER" printenv DECODE_GRANULARITY 2>/dev/null | tr -d '\r' || true)"
+  if [[ "$_served_gran" == "canvas" || "$_served_gran" == "token" ]]; then
+    DECODE_GRANULARITY="$_served_gran"
+    echo "[bench] decode granularity: ${DECODE_GRANULARITY} (declared by the served model's profile)"
+  fi
+fi
 DECODE_GRANULARITY="${DECODE_GRANULARITY:-auto}"
 case "$DECODE_GRANULARITY" in
   auto|token|canvas) : ;;
