@@ -19,8 +19,11 @@ Public API (stable for E3/E4)
     #     .sha_verified -> bool        (every *.safetensors verified vs the
     #                                   HF API lfs.sha256)
     #     .failure      -> None | "no-etag" | "sha-mismatch" | "gated-401"
-    #                          | "disk" | "hf-cli-missing"
-    #     .detail       -> str  (actionable message for "hf-cli-missing")
+    #                          | "disk" | "hf-cli-missing" | "in-progress"
+    #     .detail       -> str  (actionable message for "hf-cli-missing", or
+    #                            the adoption summary on a #812 skip)
+    #     .adopted      -> list[str]  (#812 — files verified in place and NOT
+    #                                  re-downloaded)
     #     .local_dir    -> str         (the CONTRACT-2 host --model dir, or
     #                                   the .incomplete path on failure)
 
@@ -70,6 +73,15 @@ CONTRACT-3 invariants enforced here
   'huggingface_hub'")`. The fetcher is injectable so tests are hermetic (a
   recorded-fixture fetcher / mocked subprocess; NO live multi-GB network
   in CI).
+
+Later addition, implemented in `hf_fetch.py` (see its docstring) and wired here:
+
+* **#812 — verify-in-place + announce WHY.** Before any bytes move,
+  `_download_model_impl` announces, per already-present file, what was found
+  and what will happen to it. With `VERIFY_IN_PLACE=1` a metadata-less local
+  file is sha256'd against the hub and ADOPTED on a match (0 bytes
+  re-downloaded, HF metadata stub written) instead of silently re-pulled.
+  Size agreement alone is never called "verified".
 """
 
 from __future__ import annotations
@@ -88,6 +100,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from . import deriver as D
+from . import hf_fetch as HF
 
 _HF_RESOLVE = "https://huggingface.co"
 _NET_TIMEOUT = 60  # seconds (HEAD for etag is cheap; weight bytes via hub)
@@ -105,13 +118,16 @@ class DownloadResult:
     bytes: int = 0
     sha_verified: bool = False
     # None | "no-etag" | "sha-mismatch" | "gated-401" | "disk"
-    #      | "hf-cli-missing"
+    #      | "hf-cli-missing" | "in-progress"
     failure: Optional[str] = None
     local_dir: str = ""
     # Actionable detail (populated for "hf-cli-missing"; the canonical
     # PEP-668-aware install hint, in sync with setup.sh `ensure_hf_cli`).
     # Optional / additive — existing failure paths leave it "".
     detail: str = ""
+    # #812 — files that were already on disk, verified in place, and NOT
+    # re-downloaded. Empty on every pre-existing path.
+    adopted: list[str] = field(default_factory=list)
 
 
 # The canonical actionable message when NEITHER `hf` nor `huggingface-cli`
@@ -445,6 +461,9 @@ class DiskError(RuntimeError):
 
 # ---------------------------------------------------------------------------
 # THE download stage.
+
+# ---------------------------------------------------------------------------
+# THE download stage.
 # ---------------------------------------------------------------------------
 def download_model(einput, *, fetcher: Optional[Any] = None) -> DownloadResult:
     """Public entry — serialize per-repo via an atomic pull-dir lock, then run
@@ -535,18 +554,76 @@ def _download_model_impl(einput, *, fetcher: Optional[Any] = None) -> DownloadRe
                                        -> failure="hf-cli-missing"
         (STRUCTURED, with actionable .detail — NEVER a bare
         ModuleNotFoundError; the on-rig E5 regression this closes)
-    """
-    if fetcher is None:
-        fetcher = HubFetcher()
 
+    #812 — BEFORE any of that, the already-present contents of the final dir
+    are announced file-by-file and (with VERIFY_IN_PLACE=1) sha256-checked
+    against the hub. A fully-verified pull dir returns ok WITHOUT touching the
+    network. Nothing here starts a transfer without first printing why.
+    """
     slug = einput.slug
     api = _selected_files_api(einput)
     # The ONE shared allowlist — identical object [C2a] sized + E3 will smoke.
     allow = D.download_set(api)
 
+    if fetcher is None:
+        fetcher = HubFetcher()
+
     hf_home = Path(einput.hf_home)
     final_dir = pull_dir(hf_home, slug)
     staging = final_dir / ".incomplete"
+    log = getattr(fetcher, "log", None) or HF.default_log
+
+    # --- #812: announce, and verify in place, BEFORE any bytes move --------
+    # The silent re-pull of a present 160 GB file is the bug being fixed. The
+    # announcement is unconditional; the *adoption* needs VERIFY_IN_PLACE=1
+    # because hashing a multi-GB file costs a full read — but a size match
+    # alone is NEVER treated as (or called) verification.
+    adopted: list[str] = []
+    plan: list = []
+    if allow:
+        try:
+            plan = HF.plan_and_announce(
+                final_dir, allow, HF.api_meta(api),
+                do_hash=HF.verify_in_place_enabled(), log=log,
+                prefix="[download]",
+                commit=str((api or {}).get("sha") or ""),
+            )
+        except Exception as exc:   # a planning failure must never block a pull
+            log(f"[download] could not check the existing files ({exc!r}) — "
+                f"proceeding with a full download")
+            plan = []
+        adopted = [e.name for e in plan if e.action == "adopt"]
+        if plan and len(adopted) == len(allow):
+            hashed = [e.name for e in plan if e.hashed]
+            total = 0
+            for name in allow:
+                try:
+                    total += (final_dir / name).stat().st_size
+                except OSError:
+                    pass
+            log(f"[download] SKIPPED — all {len(allow)} file(s) already "
+                f"present and accounted for in {final_dir} "
+                f"({len(hashed)} sha256-verified in place, "
+                f"{len(adopted) - len(hashed)} matched by the downloader's "
+                f"own record). 0 bytes re-downloaded.")
+            _rmtree(staging)
+            return DownloadResult(
+                ok=True, files=list(allow), bytes=total,
+                # honest: only a computed hash counts as verification here.
+                sha_verified=bool(hashed) and len(hashed) == len(allow),
+                local_dir=str(final_dir), adopted=adopted,
+                detail=f"adopted {len(adopted)} file(s) in place",
+            )
+
+    # Announce WHY the download starts — #812 acceptance: "No code path starts
+    # a download without printing why."
+    reasons = sorted({e.reason for e in plan if e.action == "download"})
+    if not plan:
+        reasons = ["no-local-copy"]
+    log(f"[download] starting: {slug} -> {final_dir} "
+        f"({len(allow)} file(s); reason: {', '.join(reasons)}"
+        + (f"; {len(adopted)} already verified and kept" if adopted else "")
+        + ")")
 
     # Fresh staging tree (never reuse a prior partial — aria2c lesson).
     _rmtree(staging)
@@ -560,12 +637,31 @@ def _download_model_impl(einput, *, fetcher: Optional[Any] = None) -> DownloadRe
             files=[],
         )
 
-    # --- fetch EXACTLY the shared download_set ----------------------------
+    # --- #812: carry the already-verified files INTO the staging tree ------
+    # A rename inside the same pull dir, so an adopted 96 GB shard is not
+    # re-fetched just because a sibling file is missing. Only files whose
+    # sha256 was matched above get here, and they are still hashed again in
+    # the SHA stage below unless the ladder already did it.
+    pre_staged: list[str] = []
+    for name in adopted:
+        src, dst = final_dir / name, staging / name
+        try:
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(str(src), str(dst))
+            pre_staged.append(name)
+        except OSError:
+            pass                      # fall back to fetching it
+    fetch_set = [n for n in allow if n not in pre_staged]
+    if pre_staged:
+        log(f"[download] keeping {len(pre_staged)} verified file(s); "
+            f"fetching only the remaining {len(fetch_set)}")
+
+    # --- fetch EXACTLY the shared download_set (minus anything adopted) ----
     try:
         written = fetcher.snapshot(
             repo_id=slug,
             local_dir=str(staging),
-            allow_patterns=list(allow),
+            allow_patterns=list(fetch_set),
         )
     except _MissingHfCli as exc:
         # NEITHER `hf` nor `huggingface-cli` resolvable. STRUCTURED failure
@@ -587,7 +683,7 @@ def _download_model_impl(einput, *, fetcher: Optional[Any] = None) -> DownloadRe
             ok=False, failure="disk", local_dir=str(staging), files=[]
         )
 
-    written_set = sorted(set(written))
+    written_set = sorted(set(written) | set(pre_staged))
 
     # --- SHA: every *.safetensors via the HF API lfs.sha256 ---------------
     # E2-fix-2 (on-rig E5): the trusted hash now comes from the HF model API
@@ -686,4 +782,5 @@ def _download_model_impl(einput, *, fetcher: Optional[Any] = None) -> DownloadRe
         sha_verified=sha_ok,
         failure=None,
         local_dir=str(final_dir),
+        adopted=pre_staged,
     )

@@ -32,6 +32,20 @@
 #
 # Opts: --yes  --force-download  --experimental-arch  --trust-remote-code
 #       --hf-home DIR  --out FILE (Path A)  --hardware SM (override nvidia-smi)
+#       --verify-in-place                (download behaviour — see below)
+#
+# Download behaviour flag (club-3090 #812)
+# -------------------------------------------------------------------------
+#   --verify-in-place   When a target file is ALREADY at the destination with no
+#                       HF download metadata beside it (hand-placed weights),
+#                       sha256 it against the hub instead of re-downloading, and
+#                       adopt it on a match (0 bytes over the wire). Off by
+#                       default because hashing a 40 GB file costs a full read.
+#                       The *announcement* of what was found and why a download
+#                       is (or isn't) starting is UNCONDITIONAL — this flag only
+#                       controls whether the hash is computed. A size match
+#                       alone is never treated as, or reported as, verification.
+#                       Env equivalent: VERIFY_IN_PLACE=1.
 #
 # All decision logic lives in scripts/lib/profiles/pull.py (this is a thin
 # argv pass-through, matching the generate-compose.sh / diagnose-profile.sh
@@ -75,6 +89,20 @@ set -euo pipefail
 export PYTHONUTF8="${PYTHONUTF8:-1}"
 
 ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# Download-behaviour flag (#812). Stripped HERE and turned into env, so every
+# downstream path — the gate, --json, --apply-swap — sees an argv it already
+# understands and `pull.py`'s parser is untouched. The bare VERIFY_IN_PLACE env
+# var from the issue keeps working on its own; the flag just sets it for one
+# invocation. Default OFF: in-place hashing costs a full read of a multi-GB file.
+_pull_dlargs=()
+for _a in "$@"; do
+    case "$_a" in
+        --verify-in-place)  export CLUB3090_VERIFY_IN_PLACE=1 ;;
+        *)                  _pull_dlargs+=("$_a") ;;
+    esac
+done
+set -- "${_pull_dlargs[@]+"${_pull_dlargs[@]}"}"
 
 # Intercept --json (strictly additive). Absent -> the original exec path,
 # byte-identical. Present -> strip it and hand the remaining argv to the
