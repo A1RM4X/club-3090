@@ -466,7 +466,7 @@ show_status() {
         echo -e "  ${GREEN}▶${NC} LiteLLM @ :4000         → ${m:-unknown}"
     fi
     if [ "$_endpoint_up" -eq 0 ]; then
-        echo -e "  ${YELLOW}(no inference endpoint responding)${NC}"
+        echo -e "  ${YELLOW}(none of gpu-mode's known lanes responding — this legacy view probes a fixed subset; for the full registry-derived estate use c3: tools/serve-cockpit)${NC}"
     fi
     echo ""
     echo -e "${CYAN}═══ GPU Status ═══${NC}"
