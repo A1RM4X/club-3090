@@ -20,6 +20,16 @@
 #   bash scripts/report.sh --full-calibration  # kv-calc matrix for ALL models (default: only the running model; skipped on llama.cpp/ik_llama)
 #   bash scripts/report.sh > my-rig.md       # capture for paste
 #
+# Exit codes (#813, committed to on #619):
+#   0  every stage that ran passed — or no stage was requested
+#   2  ADVISORY-only: a check flagged headroom/risk rather than incorrectness
+#      (today: verify-stress's agent-safety VRAM margin at the context ceiling —
+#      recall is correct there, the margin for sustained agent load is not)
+#   1  hard failure: a stage failed a correctness check, could not run, or the
+#      engine died mid-run and the remaining stages were skipped
+# The "Check summary" section names the failing check, so it is identifiable
+# from the exit path without reading every inner block.
+#
 # Why --soak is its own flag:
 #   verify-full + verify-stress + bench all PASS on configs that FAIL the
 #   multi-turn continuous soak (Cliff 2b at ~25K accumulated tokens). Until
@@ -1019,9 +1029,83 @@ ENGINE_DEAD=0
 ENGINE_DEAD_AFTER=""
 ENGINE_UP_AT_START=0
 LAST_STAGE_RUN=""
-# A run whose engine died did not produce the artifact --full promises, so it
-# must not exit 0. Generalised into a full per-stage verdict in #813.
-REPORT_EXIT=0
+
+# ---------------------------------------------------------------------------
+# Stage verdict accounting (#813) — inner verdicts must reach the outer exit.
+# ---------------------------------------------------------------------------
+# Committed to on #619: `report.sh --full` exited 0 while verify-stress printed
+# "1 stress check(s) failed" inside. A --full chain whose exit code doesn't
+# reflect inner verdicts is unsafe to automate against, which is the entire
+# point of --full. @seanyourhighness caught it only by reading inner verdicts,
+# which most reporters reasonably won't.
+#
+# Exit contract:
+#   0  every stage that ran passed (or no stage was requested)
+#   2  ADVISORY-only failure — a check fired that flags headroom or risk rather
+#      than incorrectness. Today that is verify-stress's agent-safety VRAM
+#      margin: recall is CORRECT at the ceiling, what fails is the margin for
+#      sustained agent load. Distinguishable so a caller can gate on hard
+#      failures alone.
+#   1  hard failure — a stage failed a correctness check, could not run, or the
+#      engine died mid-run.
+#
+# The advisory classifier reads the stage's own output rather than its exit
+# code, because verify-stress exits with the COUNT of failed checks and does not
+# distinguish the classes. `✗` is emitted only by fail(); the margin advisory
+# prints `⚠ VRAM margin thin at ceiling`. So: nonzero exit + no `✗` + a margin
+# line == advisory-only. Read from the RAW output, before redaction.
+STAGE_ROWS=()
+STAGE_WORST=0         # 0 clean · 2 advisory · 1 hard
+STAGE_RAW_DIR="$(mktemp -d)"
+trap 'rm -rf "$STAGE_RAW_DIR"' EXIT
+
+# Escalate to the worst verdict seen. Hard (1) outranks advisory (2).
+stage_escalate() {
+  case "$1" in
+    1) STAGE_WORST=1 ;;
+    2) [[ $STAGE_WORST -eq 1 ]] || STAGE_WORST=2 ;;
+  esac
+}
+
+# stage_record <flag-key> <exit-code> <raw-output-file|"">
+stage_record() {
+  local key="$1" rc="$2" raw="${3:-}" verdict detail advisory=0 hard=0
+  if [[ "$rc" -eq 0 ]]; then
+    verdict="PASS"; detail="—"
+  else
+    if [[ -n "$raw" && -f "$raw" ]]; then
+      hard="$(command grep -c '✗' "$raw" 2>/dev/null || true)"
+      advisory="$(command grep -c 'VRAM margin thin at ceiling' "$raw" 2>/dev/null || true)"
+    fi
+    if [[ "${hard:-0}" -eq 0 && "${advisory:-0}" -gt 0 ]]; then
+      verdict="ADVISORY"
+      detail="agent-safety VRAM margin thin at ceiling (recall correct; headroom is not)"
+      stage_escalate 2
+    else
+      verdict="FAIL"
+      if [[ -n "$raw" && -f "$raw" && "${hard:-0}" -gt 0 ]]; then
+        # Name the failing checks so they're identifiable from the exit path.
+        detail="$(sed -E 's/\x1b\[[0-9;]*[mK]//g' "$raw" | command grep '✗' \
+          | sed -E 's/^[[:space:]]*✗[[:space:]]*//' | head -3 | paste -sd';' - \
+          | sed -E 's/;/ · /g')"
+        [[ -n "$detail" ]] || detail="see the block above"
+      else
+        detail="see the block above"
+      fi
+      stage_escalate 1
+    fi
+  fi
+  # `|` is the row separator AND the markdown cell separator — a check message
+  # carrying one would split the row in both places.
+  detail="${detail//|/ / }"
+  STAGE_ROWS+=("$(stage_label "$key")|${rc}|${verdict}|${detail}")
+}
+
+# stage_skipped <flag-key> <reason>
+stage_skipped() {
+  STAGE_ROWS+=("$(stage_label "$1")|-|SKIPPED|$2")
+  stage_escalate 1
+}
 
 # Flag key -> the script the stage runs, for human-readable causal statements.
 stage_label() {
@@ -1067,7 +1151,7 @@ stage_guard() {
     printf '_SKIPPED — endpoint unreachable since **%s** (the engine appears to have crashed there). ' "$ENGINE_DEAD_AFTER"
     printf 'This stage was not run, so it contributes no evidence: it would only have reproduced the same '
     printf 'connection failure. Container logs are above. Re-run `bash scripts/report.sh --%s` once the service is back._\n' "$stage"
-    REPORT_EXIT=1
+    stage_skipped "$stage" "endpoint unreachable since ${ENGINE_DEAD_AFTER}"
     return 1
   fi
   if [[ $ENGINE_PROBE -eq 1 ]] && ! engine_alive; then
@@ -1076,7 +1160,7 @@ stage_guard() {
     printf '_SKIPPED — the endpoint stopped answering after **%s**. ' "$ENGINE_DEAD_AFTER"
     printf 'The engine did not survive that stage; every remaining stage is skipped rather than run into the '
     printf 'same wall. Container logs are above. Re-run `bash scripts/report.sh --%s` once the service is back._\n' "$stage"
-    REPORT_EXIT=1
+    stage_skipped "$stage" "endpoint died during ${ENGINE_DEAD_AFTER}"
     return 1
   fi
   LAST_STAGE_RUN="$stage"
@@ -1107,7 +1191,11 @@ if [[ $DO_VERIFY -eq 1 ]]; then
   if [[ ! -f scripts/verify-full.sh ]]; then
     echo "_scripts/verify-full.sh not found_"
   elif stage_guard verify; then
-    bash scripts/verify-full.sh 2>&1 | redact | details "verify-full output"
+    # tee the RAW output aside so stage_record can classify + name the failing
+    # checks; redaction would keep the markers but the tee is where the exit
+    # path gets its evidence. PIPESTATUS[0] is the stage's own code.
+    bash scripts/verify-full.sh 2>&1 | tee "${STAGE_RAW_DIR}/verify" | redact | details "verify-full output"
+    stage_record verify "${PIPESTATUS[0]}" "${STAGE_RAW_DIR}/verify"
   fi
 fi
 
@@ -1120,7 +1208,8 @@ if [[ $DO_STRESS -eq 1 ]]; then
   if [[ ! -f scripts/verify-stress.sh ]]; then
     echo "_scripts/verify-stress.sh not found_"
   elif stage_guard stress; then
-    bash scripts/verify-stress.sh 2>&1 | redact | details "verify-stress output (7 boundary checks incl. Cliff 2 needle recall)"
+    bash scripts/verify-stress.sh 2>&1 | tee "${STAGE_RAW_DIR}/stress" | redact | details "verify-stress output (7 boundary checks incl. Cliff 2 needle recall)"
+    stage_record stress "${PIPESTATUS[0]}" "${STAGE_RAW_DIR}/stress"
   fi
 fi
 
@@ -1136,7 +1225,8 @@ if [[ $DO_SOAK -eq 1 ]]; then
     soak_run_dir="results/report-soak-$(date +%Y%m%d-%H%M%S)"
     SOAK_MODE=continuous SOAK_SESSIONS=5 SOAK_TURNS=5 SOAK_OUTPUT="$soak_run_dir" \
       SOAK_TIMEOUT_S="${SOAK_TIMEOUT_S:-1800}" \
-      bash scripts/soak-test.sh 2>&1 | redact | details "soak-test stdout (5-session × 5-turn ramping conversation, ~25 min)"
+      bash scripts/soak-test.sh 2>&1 | tee "${STAGE_RAW_DIR}/soak" | redact | details "soak-test stdout (5-session × 5-turn ramping conversation, ~25 min)"
+    stage_record soak "${PIPESTATUS[0]}" "${STAGE_RAW_DIR}/soak"
     if [[ -f "$soak_run_dir/summary.md" ]]; then
       echo
       echo "**Soak summary** (\`$soak_run_dir/summary.md\`):"
@@ -1157,7 +1247,8 @@ if [[ $DO_BENCH -eq 1 ]]; then
   if [[ ! -f scripts/bench.sh ]]; then
     echo "_scripts/bench.sh not found_"
   elif stage_guard bench; then
-    bash scripts/bench.sh 2>&1 | redact | details "bench output (3 warmups + 5 measured per prompt)"
+    bash scripts/bench.sh 2>&1 | tee "${STAGE_RAW_DIR}/bench" | redact | details "bench output (3 warmups + 5 measured per prompt)"
+    stage_record bench "${PIPESTATUS[0]}" "${STAGE_RAW_DIR}/bench"
   fi
 fi
 
@@ -1191,7 +1282,8 @@ if [[ $DO_AGENTIC -eq 1 ]]; then
   if [[ ! -f scripts/bench-agentic.sh ]]; then
     echo "_scripts/bench-agentic.sh not found_"
   elif stage_guard agentic; then
-    SESSIONS=1 bash scripts/bench-agentic.sh 2>&1 | redact | details "bench-agentic output (1 session x 12 default turns, curve-shape estimate; ~8 min estimate)"
+    SESSIONS=1 bash scripts/bench-agentic.sh 2>&1 | tee "${STAGE_RAW_DIR}/agentic" | redact | details "bench-agentic output (1 session x 12 default turns, curve-shape estimate; ~8 min estimate)"
+    stage_record agentic "${PIPESTATUS[0]}" "${STAGE_RAW_DIR}/agentic"
   fi
 fi
 
@@ -1259,6 +1351,26 @@ EOF
 fi
 
 # ---------------------------------------------------------------------------
+# Check summary (#813) — the failing check must be nameable from the exit path.
+# ---------------------------------------------------------------------------
+
+if [[ ${#STAGE_ROWS[@]} -gt 0 ]]; then
+  section "Check summary"
+  echo "| Stage | Exit | Verdict | Detail |"
+  echo "|---|---:|---|---|"
+  for row in "${STAGE_ROWS[@]}"; do
+    IFS='|' read -r _s _rc _v _d <<< "$row"
+    printf '| %s | %s | %s | %s |\n' "$_s" "$_rc" "$_v" "$_d"
+  done | redact
+  echo
+  case "$STAGE_WORST" in
+    0) echo "**Overall: PASS** — every stage that ran passed. \`report.sh\` exits 0." ;;
+    2) echo "**Overall: ADVISORY** — no correctness check failed, but an advisory fired (headroom / risk, not incorrectness). \`report.sh\` exits **2**, so a caller can gate on hard failures alone." ;;
+    *) echo "**Overall: FAIL** — at least one stage failed a check, could not run, or was skipped. \`report.sh\` exits **1**." ;;
+  esac
+fi
+
+# ---------------------------------------------------------------------------
 # Footer
 # ---------------------------------------------------------------------------
 
@@ -1266,7 +1378,7 @@ cat <<'EOF'
 
 ---
 
-_Generated by `bash scripts/report.sh`. Flags: `--verify` (verify-full), `--stress` (verify-stress 7/7 incl. Cliff 2 needles), `--soak` (SOAK_MODE=continuous, catches Cliff 2b), `--bench` (canonical TPS), `--agentic` (multi-turn TTFT/decode curve-shape, ~8 min estimate), `--studio` (AI Studio / ComfyUI container log tails — for generation bugs), `--full` (all five, ~43 min estimate). Use `--no-redact` to disable redaction (internal sharing only)._
+_Generated by `bash scripts/report.sh`. Flags: `--verify` (verify-full), `--stress` (verify-stress 7/7 incl. Cliff 2 needles), `--soak` (SOAK_MODE=continuous, catches Cliff 2b), `--bench` (canonical TPS), `--agentic` (multi-turn TTFT/decode curve-shape, ~8 min estimate), `--studio` (AI Studio / ComfyUI container log tails — for generation bugs), `--full` (all five, ~43 min estimate). Use `--no-redact` to disable redaction (internal sharing only). Exit code: 0 all-clear · 2 advisory-only · 1 hard failure._
 EOF
 
-exit "$REPORT_EXIT"
+exit "$STAGE_WORST"
