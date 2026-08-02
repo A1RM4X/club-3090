@@ -62,6 +62,22 @@
 #                      generation — you must force the length to measure sustained
 #                      throughput. vLLM-oriented (ignore_eos/min_tokens). 0 = off
 #                      (model decides length). Default: 0.
+#   DECODE_GRANULARITY How this model emits tokens, which decides whether
+#                      `decode_TPS` means anything at all (#809).
+#                        auto   (default) classify from the measured runs
+#                        token  autoregressive — decode_TPS is a decode rate
+#                        canvas block diffusion (dLLM): the model denoises a whole
+#                               canvas in parallel and the SSE endpoint emits ~one
+#                               chunk per canvas, so TTFT == wall on any response
+#                               that fits in one block and the decode window is
+#                               zero-width. decode_TPS is NOT a decode rate for
+#                               this class; the headline number is wall_TPS.
+#   BENCH_DEGEN_WINDOW_FRAC
+#                      A run whose decode window is below this fraction of its own
+#                      wall time has no measurable decode rate and prints n/a
+#                      rather than a number. Default: 0.05 — an AR decode window
+#                      is ~the whole wall, so this sits ~20x away from any AR run
+#                      and cannot fire on one.
 #
 # Capture knobs (the always-on capture layer — scripts/lib/capture.sh):
 #   SERVER_LOG         Path to a BARE-METAL server log. CONTAINER=none runs used to
@@ -171,6 +187,14 @@ PREFILL_RUNS="${PREFILL_RUNS:-3}"
 export PREFILL_PROBE PREFILL_DEPTHS PREFILL_RUNS
 ENABLE_THINKING="${ENABLE_THINKING:-0}"
 FORCE_TOKENS="${FORCE_TOKENS:-0}"
+# --- decode-granularity knobs (#809) ----------------------------------------
+DECODE_GRANULARITY="${DECODE_GRANULARITY:-auto}"
+case "$DECODE_GRANULARITY" in
+  auto|token|canvas) : ;;
+  *) echo "ERROR: DECODE_GRANULARITY must be 'auto', 'token' or 'canvas' (got '$DECODE_GRANULARITY')" >&2; exit 1 ;;
+esac
+BENCH_DEGEN_WINDOW_FRAC="${BENCH_DEGEN_WINDOW_FRAC:-0.05}"
+export DECODE_GRANULARITY BENCH_DEGEN_WINDOW_FRAC
 # --- capture layer knobs (see the header block) -----------------------------
 CAPTURE="${CAPTURE:-1}"
 ENDPOINT="${ENDPOINT:-chat}"
@@ -619,11 +643,61 @@ def run_once(prompt, max_tokens):
         prompt_tokens = max(1, len(prompt.split()))
     return wall, ttft, completion_tokens, prompt_tokens
 
+# --- decode-window guard (#809) ---------------------------------------------
+# `decode_TPS = toks / (wall - TTFT)` assumes token-by-token AR streaming. A
+# canvas-granularity (block-diffusion) model denoises a whole canvas in parallel
+# and the SSE endpoint emits roughly ONE chunk per completed canvas: any response
+# that fits in a single canvas arrives as one chunk, TTFT == wall, and the decode
+# window is zero-width. The old `max(wall - ttft, 1e-6)` then divided by an
+# epsilon and printed `decode_TPS=690000000.00` as though it were a throughput
+# (#822, real output from a 2x5090 diffusiongemma run).
+#
+# The guard is a RATIO, not an absolute threshold, and that is what makes it safe
+# for AR models: a real AR decode window IS essentially the whole wall (TTFT is a
+# few percent of it), so 5% sits ~20x away from any autoregressive run and cannot
+# fire on one. When it does fire there is no decode rate to report — not a small
+# one, not a large one — so the column prints n/a and the run is excluded from the
+# decode statistics. wall_TPS is the honest number for such a run.
+try:
+    DEGEN_WINDOW_FRAC = float(os.environ.get("BENCH_DEGEN_WINDOW_FRAC", "0.05"))
+except ValueError:
+    DEGEN_WINDOW_FRAC = 0.05
+GRANULARITY = (os.environ.get("DECODE_GRANULARITY", "auto") or "auto").strip().lower()
+if GRANULARITY not in ("auto", "token", "canvas"):
+    GRANULARITY = "auto"
+
+
+def decode_window(wall, ttft):
+    """(decode_seconds, degenerate?). Degenerate means UNMEASURABLE, not slow."""
+    dt = wall - ttft
+    return dt, (wall <= 0 or dt <= 0 or dt < DEGEN_WINDOW_FRAC * wall)
+
+
+def classify_granularity(n_runs, degen_runs):
+    """(granularity, why). Declared wins; otherwise classify from the runs."""
+    if GRANULARITY in ("token", "canvas"):
+        return GRANULARITY, f"declared: DECODE_GRANULARITY={GRANULARITY}"
+    # A single degenerate run can be a fluke (a scheduler hiccup, an EOS on the
+    # first chunk). A MAJORITY of them across a shape is a property of the model.
+    if n_runs >= 2 and degen_runs * 2 >= n_runs:
+        return "canvas", (f"auto-detected: {degen_runs}/{n_runs} runs emitted their whole "
+                          f"completion inside one block, TTFT == wall")
+    return "token", ""
+
+
 def fmt(label, wall, ttft, toks):
-    decode_t = max(wall - ttft, 1e-6)
+    dt, degen = decode_window(wall, ttft)
     wtps = toks / wall if wall > 0 else 0
-    dtps = toks / decode_t
-    line = f"  {label:<10s} wall={wall:6.2f}s  ttft={ttft*1000:6.0f}ms  toks={toks:>4d}  wall_TPS={wtps:6.2f}  decode_TPS={dtps:6.2f}"
+    if degen:
+        # Never a number here. The historical divide-by-1e-6 is the defect (#809).
+        dtps = None
+        pct = (dt / wall * 100) if wall > 0 else 0.0
+        dcol = (f"decode_TPS={'n/a':>6s}  (decode window {max(dt, 0.0):.3f}s = {pct:.1f}% of wall "
+                f"— single-block emission, no measurable decode rate; quote wall_TPS)")
+    else:
+        dtps = toks / dt
+        dcol = f"decode_TPS={dtps:6.2f}"
+    line = f"  {label:<10s} wall={wall:6.2f}s  ttft={ttft*1000:6.0f}ms  toks={toks:>4d}  wall_TPS={wtps:6.2f}  {dcol}"
     return wtps, dtps, ttft, line
 
 def fmt_pp(label, wall, ttft, prompt_tokens):
@@ -694,19 +768,29 @@ def run_set(label, prompt, max_tokens):
             print(f"  warm-{i+1}  FAIL: {e}")
     print(f"\n=== measured ({RUNS}) ===")
     walls, decodes, ttfts, toks_seen = [], [], [], []
+    ptoks_seen = []          # prompt size per run — the #817 plausibility gate needs it
+    degen_runs = 0           # runs with a zero-width decode window (#809)
     errors = 0
     mt = FORCE if FORCE > 0 else max_tokens
     phase_t0 = phase_start()
     for i in range(RUNS):
         try:
-            w, t, k, _ = run_once(prompt, max_tokens)
+            w, t, k, ptk = run_once(prompt, max_tokens)
             wtps, dtps, ttft, line = fmt(f"run-{i+1}", w, t, k)
             if not QUIET:
                 print(line)
+            rate = f"{dtps:.2f} decode TPS" if dtps is not None else f"{wtps:.2f} wall TPS (no decode window)"
             progress(f"[bench] {label} run {i+1}/{RUNS}: {k} tok in {w:.1f}s "
-                     f"({dtps:.2f} decode TPS, ttft {ttft*1000:.0f}ms)")
-            walls.append(wtps); decodes.append(dtps); ttfts.append(ttft)
-            toks_seen.append(k)
+                     f"({rate}, ttft {ttft*1000:.0f}ms)")
+            walls.append(wtps); ttfts.append(ttft)
+            # A degenerate run contributes NO decode value. Averaging in a
+            # divide-by-epsilon is how `decode_TPS mean=2728143.37 CV=223.6%`
+            # reached three community reports (#809).
+            if dtps is None:
+                degen_runs += 1
+            else:
+                decodes.append(dtps)
+            toks_seen.append(k); ptoks_seen.append(ptk)
         except Exception as e:
             errors += 1
             print(f"  run-{i+1}  FAIL: {e}")
@@ -724,21 +808,51 @@ def run_set(label, prompt, max_tokens):
         m = s.mean(xs)
         return (s.stdev(xs) / m * 100) if m > 0 else 0.0
 
+    gran, gran_why = classify_granularity(len(walls), degen_runs)
+    # Derived == "every run had a zero-width decode window", so the only rate
+    # available is completion/wall, which IS wall_TPS by construction.
+    derived = bool(walls) and not decodes
     SUMMARY["shapes"][label] = {
         "n": len(walls), "n_usable": len(usable), "errors": errors,
         "max_tokens": mt, "short_eos_floor": floor,
         "tokens": toks_seen,
         "wall_tps_mean": (s.mean(walls) if walls else 0.0),
         "wall_tps_cv": _cv(walls),
-        "decode_tps_mean": (s.mean(decodes) if decodes else 0.0),
-        "decode_tps_cv": _cv(decodes),
+        "decode_tps_mean": (s.mean(decodes) if decodes else (s.mean(walls) if walls else 0.0)),
+        "decode_tps_cv": (_cv(decodes) if decodes else _cv(walls)),
+        "decode_degenerate": degen_runs,
+        "decode_derived": derived,
+        "decode_granularity": gran,
         "ttft_mean_ms": (s.mean(ttfts) * 1000 if ttfts else 0.0),
         "ttft_std_ms": (s.stdev(ttfts) * 1000 if len(ttfts) > 1 else 0.0),
     }
     if walls:
         print(f"\n=== summary [{label}] (n={len(walls)}) ===")
         print(stats("wall_TPS",   walls))
-        print(stats("decode_TPS", decodes))
+        if decodes:
+            print(stats("decode_TPS", decodes))
+        else:
+            # #809 proposal item 1: DERIVE, don't zero — and never present the
+            # derived value bare. Printing nothing here would also strand the
+            # measurement-record producer, which keys off a `decode_TPS mean=`
+            # line and refuses to write a record without one.
+            print(stats("decode_TPS", walls))
+            print(f"  ⚠ decode_TPS above is DERIVED, NOT MEASURED: all {len(walls)} run(s) had a "
+                  f"zero-width decode")
+            print("    window, so it is completion/wall = wall_TPS by construction. It INCLUDES "
+                  "prefill and")
+            print("    must never be quoted as a decode rate (#809).")
+        if degen_runs and decodes:
+            print(f"  decode-window  unmeasurable on {degen_runs}/{len(walls)} run(s) "
+                  f"(decode window < {DEGEN_WINDOW_FRAC:.0%} of wall); "
+                  f"decode_TPS above is over the {len(decodes)} measured run(s)")
+        if gran == "canvas":
+            print(f"  ⚠ CANVAS GRANULARITY ({gran_why})")
+            print("    dLLM: block emission, decode window undefined. decode_TPS is NOT a decode "
+                  "rate for")
+            print("    this model class — the HEADLINE number is wall_TPS (#809).")
+            if GRANULARITY == "auto":
+                print("    Set DECODE_GRANULARITY=token if this model really is autoregressive.")
         print(f"  TTFT          mean={s.mean(ttfts)*1000:6.0f}ms  std={s.stdev(ttfts)*1000 if len(ttfts) > 1 else 0:5.0f}ms  min={min(ttfts)*1000:.0f}ms  max={max(ttfts)*1000:.0f}ms")
         print(f"  n-usable      {len(usable)}/{len(walls)}  (runs with >= {floor} tokens, "
               f"{SHORT_EOS_FRAC:.0%} of max_tokens={mt})")
@@ -1080,7 +1194,9 @@ try:
     d = json.load(open(sys.argv[1], encoding="utf-8"))
 except Exception:
     sys.exit(1)
-xs = [v.get("decode_tps_mean", 0) for v in d.get("shapes", {}).values() if v.get("decode_tps_mean")]
+shapes = d.get("shapes", {}).values()
+xs = [v.get("decode_tps_mean", 0) for v in shapes
+      if v.get("decode_tps_mean") and not v.get("decode_derived")]
 print(f"{sum(xs)/len(xs):.2f}" if xs else "")
 ' "$CAP_WORK/summary.json" 2>/dev/null || true)"
       if [[ -n "$_eng" && -n "$_cli" ]]; then
@@ -1237,7 +1353,25 @@ except Exception:
     sys.exit(1)
 print(d.get("total_errors", 0))
 ' "$CAP_WORK/summary.json" 2>/dev/null || echo 0)"
-  CAP_TPS="${_cli:-0}"
+  # The status enum keys on A tps, and `_cli` only exists when an engine-side log
+  # was available to cross-check against. With no log — CONTAINER=none and no
+  # SERVER_LOG — a perfectly healthy run classified NO_TOKENS purely because the
+  # cross-check had nothing to compare with. Same hole now reachable a second way:
+  # a canvas-granularity run's decode mean is DERIVED and deliberately excluded
+  # from the cross-check (#809), which empties `_cli` on a run that measured fine.
+  # Fall back to the client-measured wall rate, which every successful run has.
+  CAP_TPS="${_cli:-}"
+  if [[ -z "$CAP_TPS" || "$CAP_TPS" == "0" ]]; then
+    CAP_TPS="$(python3 -c '
+import json, sys
+try:
+    d = json.load(open(sys.argv[1], encoding="utf-8"))
+except Exception:
+    sys.exit(1)
+xs = [v.get("wall_tps_mean", 0) for v in d.get("shapes", {}).values() if v.get("wall_tps_mean")]
+print(f"{sum(xs)/len(xs):.2f}" if xs else "0")
+' "$CAP_WORK/summary.json" 2>/dev/null || echo 0)"
+  fi
   CAP_STATUS="$(cap_status_classify "${CAP_TOKENS:-0}" "${CAP_TPS:-0}" "${CAP_ERRS:-0}" \
                   "$CAP_CACHE_WANTED" "${CAP_CACHE_OK:-1}" "${_byp:-0}")"
   echo "  status: ${CAP_STATUS}"
@@ -1278,6 +1412,14 @@ for name, v in d.get("shapes", {}).items():
     if n and u < n:
         print(f"  ⚠ n-usable   : {name} {u}/{n} runs above the short-EOS floor "
               f"({floor} tok) - the CV for this shape is not trustworthy")
+    dg = v.get("decode_degenerate", 0)
+    if n and dg:
+        gran = v.get("decode_granularity", "token")
+        tag = ("canvas granularity - dLLM block emission, decode window undefined"
+               if gran == "canvas" else "zero-width decode window")
+        note = " decode_TPS is DERIVED (= wall_TPS)." if v.get("decode_derived") else ""
+        print(f"  ⚠ decode-win : {name} {dg}/{n} run(s) unmeasurable - {tag}.{note}"
+              f" Quote wall_TPS, not decode_TPS (#809)")
 ' "$CAP_WORK/summary.json" || true
 
   # ---- BENCH CARD (opt-in: CARD=snapshot | ab) ----------------------------

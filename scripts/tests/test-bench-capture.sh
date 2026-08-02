@@ -93,6 +93,18 @@ for f in "$LIB" "$BENCH"; do
 done
 echo "  ✓ no pgrep/pkill -f (self-match footgun)"
 
+# #809: the decode window must never be floored to an epsilon and divided by.
+# `max(wall - ttft, 1e-6)` is the exact expression that printed
+# `decode_TPS=690000000.00` on a block-diffusion model (#822).
+# `^[^#]*` keeps this to CODE — the defect is quoted verbatim in the comment that
+# explains it, and matching that would make the guard unwritable.
+if command grep -nE '^[^#]*max\(wall ?- ?ttft, ?1e-6\)' "$BENCH"; then
+  fail "bench.sh still floors the decode window to 1e-6 and divides by it (#809)"
+fi
+command grep -q 'DEGEN_WINDOW_FRAC' "$BENCH" \
+  || fail "bench.sh must guard the decode window by RATIO (#809)"
+echo "  ✓ no divide-by-epsilon decode window (#809)"
+
 # grep is shimmed to ugrep in interactive shells on some rigs, which breaks exact
 # output matching. Every scrape in the lib must use `command grep`.
 bare=$(command grep -nE '(^|[|;&(]|\$\()\s*grep ' "$LIB" || true)
@@ -537,5 +549,100 @@ else
     || fail "STREAM_CALIB=1 produced neither a ceiling nor a degradation notice"
   echo "  ✓ STREAM_CALIB=1 degrades cleanly where numpy is absent (and is off by default)"
 fi
+
+# --- 12. canvas granularity: no divide-by-epsilon decode rate (#809) --------
+# A block-diffusion model denoises a whole canvas in parallel and the endpoint
+# emits ~one chunk per canvas, so TTFT == wall and the decode window is zero
+# width. master divided by 1e-6 and printed 8- and 9-digit "throughputs"
+# (decode_TPS=690000000.00, shape mean=2728143.37 CV=223.6% — #822, real).
+#
+# The realism bound below is the assertion that matters: NO decode figure
+# anywhere in the output, per-run or aggregate, may exceed it.
+REALISM_BOUND=100000
+
+assert_no_absurd_decode() {   # $1=file $2=context
+  python3 - "$1" "$2" "$REALISM_BOUND" <<'PY' || fail "an absurd decode figure was printed"
+import re, sys
+path, ctx, bound = sys.argv[1], sys.argv[2], float(sys.argv[3])
+bad = []
+for ln in open(path, encoding="utf-8"):
+    for m in re.finditer(r"decode_TPS[= ]\s*(?:mean=\s*)?([0-9]+(?:\.[0-9]+)?)", ln):
+        if float(m.group(1)) > bound:
+            bad.append(ln.rstrip())
+if bad:
+    sys.exit(f"{ctx}: decode figure above the realism bound ({bound:.0f}):\n" + "\n".join(bad))
+PY
+}
+
+run_bench canvas "$((PORT_BASE+10))" "$TMP/canvas.out" ONLY=narr
+C="$TMP/canvas.out"
+assert_no_absurd_decode "$C" "canvas run"
+command grep -q 'decode_TPS=   n/a' "$C" \
+  || { command grep -m2 'run-' "$C" >&2; fail "a zero-width decode window must print n/a, never a number"; }
+command grep -q 'single-block emission' "$C" \
+  || fail "the n/a must name WHY the window is unmeasurable"
+command grep -q '⚠ CANVAS GRANULARITY' "$C" \
+  || fail "an all-degenerate shape must be classified canvas-granularity (#809)"
+command grep -q 'HEADLINE number is wall_TPS' "$C" \
+  || fail "the canvas marker must name wall_TPS as the headline"
+command grep -q 'DERIVED, NOT MEASURED' "$C" \
+  || fail "with no measurable run the decode figure is derived and must say so"
+command grep -q '⚠ decode-win : narrative' "$C" \
+  || fail "the integrity panel must state the unmeasurable-window split"
+# ...and the run must not be mistaken for a failed one. A canvas run's decode mean
+# is DERIVED, so it is excluded from the engine cross-check — which used to leave
+# the status enum with no TPS at all and classify a healthy run NO_TOKENS.
+command grep -q 'status: NO_TOKENS' "$C" \
+  && { command grep -A3 'CAPTURE: INTEGRITY' "$C" >&2; fail "a healthy canvas run must not classify NO_TOKENS"; }
+# The record producer refuses to write a measured record without a parseable
+# `decode_TPS mean=` line, so suppressing the column outright would break it.
+command grep -qE '^\s+decode_TPS\s+mean=' "$C" \
+  || fail "the decode_TPS summary line must stay parseable (measurement_record.py keys off it)"
+echo "  ✓ canvas: n/a per run, derived+labelled aggregate, canvas marker, no absurd figure"
+
+# --- 13. the #822 SHAPE: some runs degenerate, some measurable --------------
+# Four plausible runs and one 690000000.00 is what produced mean=2728143.37.
+# The degenerate run must be EXCLUDED from the statistic, and the exclusion said
+# out loud — a quietly-dropped sample is its own defect.
+run_bench canvas_mixed "$((PORT_BASE+11))" "$TMP/mixed.out" ONLY=narr
+M="$TMP/mixed.out"
+assert_no_absurd_decode "$M" "canvas_mixed run"
+command grep -qE 'decode-window  unmeasurable on [0-9]+/[0-9]+ run\(s\)' "$M" \
+  || fail "excluding a run from decode_TPS must be stated, not silent"
+command grep -q 'decode_TPS above is over the' "$M" \
+  || fail "the summary must say how many runs the decode statistic actually rests on"
+python3 - "$M" <<'PY' || fail "the mixed shape did not produce a finite, interpretable decode CV"
+import re, sys
+txt = open(sys.argv[1], encoding="utf-8").read()
+m = re.search(r"^\s+decode_TPS\s+mean=\s*([\d.]+)\s+std=\s*([\d.]+)\s+CV=\s*([\d.]+)%", txt, re.M)
+assert m, "no decode_TPS summary line"
+mean, cv = float(m.group(1)), float(m.group(3))
+# master on this same scenario: mean=81584.17 CV=140.7%
+assert mean < 100000, f"decode mean {mean} is not interpretable"
+assert cv < 100, f"decode CV {cv}% — the degenerate run is still in the sample"
+PY
+echo "  ✓ canvas_mixed: degenerate run excluded from the statistic, and the exclusion is stated"
+
+# --- 14. AR models are untouched, and the guard is not overridable ----------
+# The healthy (autoregressive) run must carry NONE of the canvas machinery.
+for unwanted in 'decode_TPS=   n/a' 'CANVAS GRANULARITY' 'decode-win :' 'DERIVED, NOT MEASURED'; do
+  command grep -qF "$unwanted" "$H" \
+    && fail "an autoregressive run grew canvas output: $unwanted"
+done
+echo "  ✓ AR run carries none of the canvas machinery (output unchanged)"
+
+# DECODE_GRANULARITY=canvas declares the class on a model whose runs look AR.
+run_bench healthy "$((PORT_BASE+12))" "$TMP/declared.out" ONLY=narr RUNS=1 WARMUPS=0 \
+  DECODE_GRANULARITY=canvas
+command grep -q 'declared: DECODE_GRANULARITY=canvas' "$TMP/declared.out" \
+  || fail "DECODE_GRANULARITY=canvas must declare the class without waiting for auto-detection"
+# ...and declaring `token` must NOT buy back the divide-by-epsilon. The per-run
+# guard is unconditional: there is no decode rate to print, whatever the label.
+run_bench canvas "$((PORT_BASE+13))" "$TMP/forced.out" ONLY=narr RUNS=1 WARMUPS=0 \
+  DECODE_GRANULARITY=token
+assert_no_absurd_decode "$TMP/forced.out" "canvas run with DECODE_GRANULARITY=token"
+command grep -q 'CANVAS GRANULARITY' "$TMP/forced.out" \
+  && fail "DECODE_GRANULARITY=token must suppress the canvas classification"
+echo "  ✓ DECODE_GRANULARITY declares the class, and cannot re-enable the epsilon divide"
 
 echo "test-bench-capture: ok"

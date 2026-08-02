@@ -43,6 +43,15 @@ FAKE_SCENARIO:
                   census line shape (type=/expert=/slots=/total=) -> per-device
                   aggregation, and the #824 detector must key on DEVICES-with-a
                   -pool, not on the raw pool-line count
+  canvas          CANVAS GRANULARITY (block diffusion / dLLM, #809): the whole
+                  completion is denoised in parallel and emitted as ONE SSE chunk
+                  after the block's compute, so TTFT == wall and the decode window
+                  is zero-width. On master this divides by 1e-6 and prints an
+                  8-digit decode_TPS (real: 690000000.00 in #822)
+  canvas_mixed    the #822 SHAPE: odd requests fit one canvas (zero-width window),
+                  even requests span two (a genuine, measurable window). Four runs
+                  read plausibly, one printed 690000000.00, and the shape mean came
+                  out at 2728143.37 with CV=223.6%
   probefail       the n_layer line NEVER appears, so the layer probe times out --
                   and the process IGNORES SIGTERM, the way a real server does
                   while still inside model load. Only a probe that escalates past
@@ -79,6 +88,9 @@ EXPERT_KIB   = int(os.environ.get("FAKE_EXPERT_KIB", "1536"))
 # needs a measured phase LONGER than the 1 Hz dmon sample period raises it, since
 # a phase shorter than the sample period genuinely contains no samples.
 TOK_DELAY    = float(os.environ.get("FAKE_TOKEN_DELAY", "0.002"))
+# Per-canvas denoise cost for the canvas/canvas_mixed scenarios. Spent BEFORE the
+# block becomes visible, which is what collapses the decode window to zero width.
+CANVAS_DELAY = float(os.environ.get("FAKE_CANVAS_DELAY", "0.05"))
 _req_n       = [0]
 
 
@@ -270,6 +282,16 @@ class H(BaseHTTPRequestHandler):
         else:
             emit = min(gen, TOKS)
 
+        # Canvas granularity (#809). A block-diffusion model denoises a whole
+        # canvas in parallel, so the endpoint emits ~ONE chunk per canvas instead
+        # of one per token -- and the block's compute happens BEFORE any of it is
+        # visible, so a response that fits in a single canvas has TTFT == wall.
+        canvas = 0
+        if SC == "canvas":
+            canvas = max(emit, 1)                       # everything in one block
+        elif SC == "canvas_mixed":
+            canvas = max(emit, 1) if _req_n[0] % 2 == 1 else max(emit // 2, 1)
+
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Transfer-Encoding", "chunked")
@@ -278,7 +300,20 @@ class H(BaseHTTPRequestHandler):
             b = s.encode()
             self.wfile.write(f"{len(b):X}\r\n".encode() + b + b"\r\n"); self.wfile.flush()
         try:
-            for i in range(emit):
+            if canvas:
+                i = 0
+                while i < emit:
+                    blk = min(canvas, emit - i)
+                    time.sleep(TOK_DELAY * blk + CANVAS_DELAY)   # the denoise
+                    text = "".join(f"tok{j} " for j in range(i, i + blk))
+                    d = ({"choices": [{"text": text}]} if raw_completion
+                         else {"choices": [{"delta": {"content": text}}]})
+                    chunk("data: " + json.dumps(d) + "\n\n")
+                    i += blk
+                emit_loop = range(0)
+            else:
+                emit_loop = range(emit)
+            for i in emit_loop:
                 if raw_completion:
                     d = {"choices": [{"text": f"tok{i} "}]}
                 else:

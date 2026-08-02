@@ -221,6 +221,36 @@ Add these four lines to the checklist in both templates. Each is printed by the 
 - [ ] **VRAM growth / leak delta** — labelled *growth* when an expert cache is active (its pool and
       graphs allocate lazily on first inference, so one run grows VRAM by design) and *leak*
       otherwise. Only a monotonic rise across REPEATED runs is evidence of a leak.
+- [ ] **no `⚠ decode-win` line** — a run carrying one measured at least one **zero-width decode
+      window**, so `decode_TPS` for that shape is over fewer runs than `n` says (or, when *every*
+      run was zero-width, is `wall_TPS` under a `decode_TPS` label). See below.
+
+### Canvas-granularity models: quote `wall_TPS`, not `decode_TPS`
+
+`decode_TPS = tokens / (wall − TTFT)` assumes token-by-token autoregressive streaming. A
+**block-diffusion (dLLM) model denoises a whole canvas in parallel** and the SSE endpoint emits
+roughly one chunk per completed canvas — so any response that fits in one canvas arrives as a single
+chunk, `TTFT == wall`, and the decode window is zero-width. Dividing by it produced
+`decode_TPS=690000000.00` and a shape summary reading `mean=2728143.37 CV=223.6%`, which three
+community reports pasted as measurements (#809, #822).
+
+The run now handles this itself:
+
+| Situation | What the run prints |
+|---|---|
+| One run's decode window is zero-width | `decode_TPS=   n/a  (decode window … % of wall — single-block emission …)`. Never a number. |
+| Some runs degenerate, some not | The degenerate runs are **excluded** from `decode_TPS`, and the exclusion is stated: `decode-window  unmeasurable on 1/5 run(s) …`. |
+| Every run degenerate | `decode_TPS` is **derived** as completion/wall — which *is* `wall_TPS` by construction — and is labelled `DERIVED, NOT MEASURED` on the next line. It includes prefill. |
+| The shape reads canvas-granularity | `⚠ CANVAS GRANULARITY` names the class and points at `wall_TPS` as the headline. |
+
+**On a card for one of these models, put `wall_TPS` in the throughput row and say `decode: n/a
+(canvas granularity)`.** A `decode_TPS` copied off such a run is either a divide-by-noise artifact or
+`wall_TPS` wearing the wrong label; neither is comparable to an autoregressive row.
+
+Set `DECODE_GRANULARITY=canvas` to declare the class up front rather than waiting for the run to
+classify it, or `=token` to suppress the classification on a model you know is autoregressive. The
+per-run `n/a` guard is **not** overridable — a zero-width window has no decode rate whatever the
+label says.
 
 Two numbers on the card need their provenance stated, because both are easy to quote wrongly:
 
@@ -239,4 +269,5 @@ Two numbers on the card need their provenance stated, because both are easy to q
 | `ENDPOINT=chat` \| `completion` | `chat` (default) applies the model's template — the historical behaviour, so numbers stay comparable. `completion` drives raw `/v1/completions` with no template, for base models. Numbers are **not** comparable across modes. |
 | `STREAM_CALIB=1` | ~3 s STREAM-triad ceiling on the host, so the derived miss-path RAM demand can be stated as a fraction ("~29 of ~99 GB/s"). Off by default. The *contention* probe (co-running STREAM during decode) is deliberately not included — it perturbs the run by construction. |
 | `FORCE_TOKENS=<n>` | The fix when `n-usable < n`. |
+| `DECODE_GRANULARITY=canvas` \| `token` \| `auto` | Declares whether `decode_TPS` means anything for this model (see above). `auto` (default) classifies from the measured runs. |
 | `CAPTURE=0` | Suppress the capture layer entirely (for a harness parsing the older output shape). |
