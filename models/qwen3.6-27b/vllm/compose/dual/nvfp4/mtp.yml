@@ -333,12 +333,13 @@ services:
       - --enable-auto-tool-choice
       - --tool-call-parser
       - qwen3_coder
-      # Prefix-caching ON by default (flipped 2026-07-17, #710/#736): this
-      # compose ships NO MTP arg, so the vllm#43559 corruption pair cannot
-      # form here — the #720 off-default was pure TTFT cost (measured 7.4x on
-      # ⚠️ #810: SPEC_ARGS injects MTP by default, so prefix-cache-ON forms the
-      # vllm#43559 corruption pair (the old exemption note claiming 'no MTP arg' was
-      # stale). Defaults OFF until pr48375 is wired here (#810).
+      # ⚠️ Prefix caching defaults OFF here BY POLICY (#810, maintainer ruling
+      # 2026-08-02): SPEC_ARGS injects MTP by default, and MTP + prefix caching
+      # is the vllm#43559 DeltaNet corruption pair. This slug does NOT vendor
+      # pr48375 and will not — no new patch vendoring; the pair-safety clears
+      # only when a pinned release contains the merged upstream fix (still open
+      # as of 2026-08-02; trigger on the docs/UPSTREAM.md #43559/#48375 row).
+      # Runtime-verified OFF on target hardware in #849's boot log.
       # Re-enable at your own risk: PREFIX_CACHE_ARG=--enable-prefix-caching
       - "${PREFIX_CACHE_ARG:---no-enable-prefix-caching}"
       - --enable-chunked-prefill
