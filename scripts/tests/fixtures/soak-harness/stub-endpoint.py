@@ -137,6 +137,9 @@ class Handler(BaseHTTPRequestHandler):
             usage = {"prompt_tokens": 100, "completion_tokens": 40, "total_tokens": 140}
 
             if kind == "empty":
+                # Slow enough to clear cmd_summary's t_ms >= 1000 ms floor, which
+                # is what separates a genuine silent-empty turn from a fast no-op.
+                time.sleep(1.2)
                 usage["completion_tokens"] = 0
                 self.wfile.write(chunk(usage=usage))
                 self.wfile.write(b"data: [DONE]\n\n")
