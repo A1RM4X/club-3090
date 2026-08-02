@@ -12,8 +12,11 @@
 #   - clones Sandermage/genesis-vllm-patches into models/<model>/vllm/patches/genesis
 #     (vLLM-only; skip with SKIP_GENESIS=1 if you only need llama.cpp / SGLang;
 #     Gemma 4 doesn't fetch Genesis at all yet)
-#   - downloads model weights into $MODEL_DIR with SHA256 verification
-#     against HF x-linked-etag
+#   - downloads model weights into $MODEL_DIR with SHA256 verification against
+#     the hub's published x-linked-etag (no-redirect resolve HEAD via
+#     scripts/lib/profiles/hf_fetch.py). A file the hub publishes no hash for is
+#     reported UNVERIFIED and EXCLUDED from the verified count — "verified"
+#     never attaches to a size-only check (#857)
 #   - downloads the always-required drafter (Gemma 4: MTP "assistant"; Qwen3.6:
 #     no always-required drafter — DFlash is optional via WITH_DFLASH_DRAFT=1)
 #
@@ -649,6 +652,51 @@ _hf_download_repo() {
   fi
 }
 
+# _hf_remote_meta <repo> <revision> <file> -> "<sha256> <size>" on stdout
+#
+# Delegates to scripts/lib/profiles/hf_fetch.py::resolve_head (#855) rather than
+# re-implementing the lookup here. Two reasons that are not style preferences:
+#
+#   1. The HEAD must NOT follow redirects. The old `curl -sfI` did, and on any
+#      Xet-backed repo the 302 lands on the CAS bridge, whose response carries
+#      the CAS *blob* ETag and NO `x-linked-etag` — so the canonical sha256,
+#      which lives on the FIRST hop, read as "not published" on every modern
+#      repo. The SKIP was the normal outcome, not a rare edge (#857).
+#   2. One implementation means the downloader and setup.sh cannot disagree
+#      about what "verified" means. They already did, and the weaker surface
+#      was the one printing the reassuring line.
+#
+# Prints "<sha256|-> <size|->" and returns 0 when the hub answered at all;
+# returns non-zero only when the lookup itself failed. A literal "-" in the hash
+# field means the hub published NO sha256 for this file — the caller MUST treat
+# that as UNVERIFIED, never as a pass, however good the size looks.
+_hf_remote_meta() {
+  local repo="$1" revision="$2" file="$3"
+  command -v python3 >/dev/null 2>&1 || return 1
+  [[ -f "${ROOT_DIR}/scripts/lib/profiles/hf_fetch.py" ]] || return 1
+  python3 - "$repo" "$revision" "$file" <<PY 2>/dev/null
+import sys
+sys.path.insert(0, "${ROOT_DIR}/scripts/lib/profiles")
+import hf_fetch
+m = hf_fetch.resolve_head(sys.argv[1], sys.argv[3], revision=sys.argv[2],
+                          token=hf_fetch._token())
+if m.sha256 is None and m.size is None:
+    raise SystemExit(1)          # the hub told us nothing at all
+print(f"{m.sha256 or '-'} {m.size if m.size is not None else '-'}")
+PY
+}
+
+# Verify the downloaded artifacts against the hub's published hashes.
+#
+# #857 — the word "verified" only ever attaches to a HASH check. Before this,
+# a file whose etag lookup came back empty printed `SKIP (no etag)`, was not
+# counted as a failure, and was still included in the `N file(s) SHA-verified`
+# total. Combined with the redirect-following lookup above, on a Xet-backed repo
+# that meant the reassuring line was printed for files nothing had checked —
+# the same failure shape as the historical "DONE (hash-verified)" incident.
+#
+# Now: hash-checkable files are verified; everything else is UNVERIFIED (size-
+# only at best) and is EXCLUDED from the verified count, with the split stated.
 _verify_downloaded_files() {
   local repo="$1"
   local subdir="$2"
@@ -656,20 +704,44 @@ _verify_downloaded_files() {
   # Pin the etag lookup to the same revision we downloaded (#319). Empty -> main
   # HEAD; a stale pin would otherwise etag-check against a newer HEAD and FAIL.
   local revision="${4:-main}"
-  local fail=0 count=0 f expected actual
+  local fail=0 verified=0 unverified=0 total=0
+  local f meta expected exp_size actual local_size
 
-  echo "[verify]  Checking SHA256 of every ${verify_glob} against HF x-linked-etag (rev: ${revision}) ..."
+  echo "[verify]  Checking SHA256 of every ${verify_glob} against the hub's published"
+  echo "          x-linked-etag (no-redirect resolve HEAD, rev: ${revision}) ..."
   cd "${MODEL_DIR}/${subdir}"
   for f in ${verify_glob}; do
     [[ -f "$f" ]] || continue
-    count=$((count + 1))
-    expected="$(curl -sfI "https://huggingface.co/${repo}/resolve/${revision}/$f" \
-      | grep -i '^x-linked-etag:' | tr -d '"\r' | awk '{print $NF}' || true)"
-    actual="$(sha256sum "$f" | awk '{print $1}')"
+    total=$((total + 1))
+    expected=""; exp_size=""
+    if meta="$(_hf_remote_meta "$repo" "$revision" "$f")"; then
+      read -r expected exp_size <<<"$meta"
+      [[ "$expected" == "-" ]] && expected=""
+      [[ "$exp_size" == "-" ]] && exp_size=""
+    fi
     if [[ -z "$expected" ]]; then
-      printf "  %-50s SKIP (no etag)\n" "$f"
-    elif [[ "$expected" == "$actual" ]]; then
+      # No published hash -> this file CANNOT be verified. Size is the only
+      # cross-check available and it is not a verification: a truncated-then-
+      # padded or silently-corrupted file matches on size (the exact incident
+      # this rule exists for). Say so, and keep it out of the verified count.
+      local_size="$(stat -c '%s' "$f" 2>/dev/null || echo "?")"
+      if [[ -n "$exp_size" && "$exp_size" == "$local_size" ]]; then
+        printf "  %-50s UNVERIFIED (no published hash; size matches: %s bytes — NOT a verification)\n" \
+          "$f" "$local_size"
+      elif [[ -n "$exp_size" ]]; then
+        printf "  %-50s FAIL  size mismatch  exp=%s  act=%s\n" "$f" "$exp_size" "$local_size"
+        fail=$((fail + 1))
+        continue
+      else
+        printf "  %-50s UNVERIFIED (hub published neither hash nor size)\n" "$f"
+      fi
+      unverified=$((unverified + 1))
+      continue
+    fi
+    actual="$(sha256sum "$f" | awk '{print $1}')"
+    if [[ "$expected" == "$actual" ]]; then
       printf "  %-50s OK\n" "$f"
+      verified=$((verified + 1))
     else
       printf "  %-50s FAIL  exp=%.12s  act=%.12s\n" "$f" "$expected" "$actual"
       fail=$((fail + 1))
@@ -678,15 +750,26 @@ _verify_downloaded_files() {
   cd "${ROOT_DIR}"
 
   if [[ "$fail" != "0" ]]; then
-    echo "[verify]  ${fail} file(s) failed SHA check." >&2
+    echo "[verify]  ${fail} file(s) failed their integrity check." >&2
     echo "          Delete ${MODEL_DIR}/${subdir} and re-run setup.sh." >&2
     exit 1
   fi
-  if [[ "$count" == "0" ]]; then
+  if [[ "$total" == "0" ]]; then
     echo "[verify]  No ${verify_glob} found in ${MODEL_DIR}/${subdir} — download may have failed." >&2
     exit 1
   fi
-  echo "[done]    ${count} file(s) SHA-verified in ${subdir}."
+  # The count in this line is HASH-VERIFIED FILES ONLY. Anything the hub does
+  # not publish a hash for is reported separately and loudly — a reader must
+  # never be able to read "N file(s) SHA-verified" and conclude N == total when
+  # it does not.
+  echo "[done]    ${verified}/${total} file(s) SHA-verified in ${subdir}."
+  if [[ "$unverified" != "0" ]]; then
+    echo "[verify]  ⚠ ${unverified}/${total} file(s) UNVERIFIED — the hub published no sha256 for them,"
+    echo "            so nothing checked their contents (a size match is not a verification)."
+    echo "            Re-fetch through the resilience ladder for a hash-gated pull:"
+    echo "              python3 scripts/lib/profiles/hf_fetch.py ${repo} \\"
+    echo "                --local-dir ${MODEL_DIR}/${subdir} --verify-in-place"
+  fi
 }
 
 download_weight_key() {
