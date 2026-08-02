@@ -14,6 +14,8 @@
 # Order matches docs/QUALITY_TEST.md "test pipeline":
 #   0. verify-full.sh          — functional preflight, FAIL-FAST (~2 min)
 #   1. bench.sh                — TPS narrative + code (~5 min)
+#   1b. bench-agentic.sh       — multi-turn prefill curve (~8 min) [#805 parity]
+#   1c. concurrency-probe.sh   — N=1 control + N=2/4 rungs (~5 min) [#805 parity]
 #   2. verify-stress.sh        — long-context + boundary (~10-15 min)
 #   3. 8-pack quality          — OPT-IN, skipped by default (#338). Enable with
 #      --with-8pack-thinking[=off|on|both]:
@@ -125,6 +127,8 @@ localhost env, port, --resume idempotency). Artifacts land in results/rebench/<t
 PIPELINE
   0. verify-full     functional preflight, FAIL-FAST                      (~2 min)
   1. bench           narrative + code TPS                                 (~5 min)
+  1b. bench-agentic  multi-turn prefill curve (agent workload)            (~8 min)
+  1c. concurrency    N=1 control + N=2/4 rungs, capped at served slots    (~5 min)
   2. verify-stress   long-context NIAH ladder + boundary                  (~10-15 min)
   3. 8-pack quality  OPT-IN via --with-8pack-thinking (needs benchlocal)  (~45-90 min/pass)
   4. soak            multi-turn VRAM stability                            (~15-20 min)
@@ -139,8 +143,14 @@ OPTIONS
                   on=reasoning-ON, both=both passes (production-promotion gate).
                   Omit to run structural gates only (~35-45 min). Requires
                   benchlocal-cli + sandbox images (see docs/QUALITY_TEST.md).
+  --with-concurrency-deep
+                  Add the mixed-regime rung to the concurrency step: N=4 x 10K
+                  prompts. Off by default (slow) — but it is the rung that
+                  caught the 60.2-vs-16.3 regime split, so run it before
+                  publishing a concurrency claim.
   --tag NAME      Output-dir basename (default: <model>-YYYYMMDD-HHMM).
-  --skip CSV      Skip phases (comma-sep): verify-full,bench,verify-stress,soak.
+  --skip CSV      Skip phases (comma-sep): verify-full,bench,bench-agentic,
+                  concurrency,verify-stress,soak.
   --resume        Skip steps that already have artifacts (idempotent).
   --url URL       Target any OpenAI-compatible endpoint; skips container
                   autodetect and runs host-only (CONTAINER=none).
@@ -152,6 +162,10 @@ ENV OVERRIDES (rarely needed — preflight autodetects our composes)
   URL MODEL TAG OUT_DIR · SOAK_SESSIONS (10) · SOAK_TURNS (5)
   MAX_TOKENS (both 8-pack passes) · THINKING_MAX_TOKENS (reasoning-ON pass)
   SAMPLING_FROM_SERVER (inherit serving sampling; tags runs non-canonical)
+  AGENTIC_SESSIONS (1) · AGENTIC_TURNS (12)
+  CONCURRENCY_RUNGS ("1 2 4", auto-capped at the served slot count) ·
+  CONCURRENCY_PROMPT_TOKENS (256) · CONCURRENCY_GEN_TOKENS (256) ·
+  CONCURRENCY_ROUNDS (3)
 
 EXAMPLES
   bash scripts/rebench-full.sh                             # structural gates only
@@ -169,9 +183,11 @@ URL_FLAG=""
 MODEL_FLAG=""
 ENGINE_FLAG=""
 WITH_8PACK=""   # #338: 8-pack quality opt-in — "" (omit)=skip | off | on | both
+WITH_CONCURRENCY_DEEP=0   # #805: the slow N=4 x 10K mixed-regime rung
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --skip)     SKIP_CSV="$2"; shift 2 ;;
+    --with-concurrency-deep) WITH_CONCURRENCY_DEEP=1; shift ;;
     --tag)      TAG_OVERRIDE="$2"; shift 2 ;;
     --resume)   RESUME=1; shift ;;
     --url)      URL_FLAG="$2"; shift 2 ;;
@@ -279,6 +295,8 @@ echo "  out dir:     $OUT_DIR"
 echo "  resume:      $RESUME"
 echo "  skips:       ${SKIP_CSV:-(none)}"
 echo "  8-pack:      ${WITH_8PACK:-(skipped — opt-in via --with-8pack-thinking=off|on|both)}"
+echo "  agentic:     bench-agentic.sh (sessions=${AGENTIC_SESSIONS:-1}, turns=${AGENTIC_TURNS:-12})"
+echo "  concurrency: rungs ${CONCURRENCY_RUNGS:-1 2 4 (capped at served slots)}$([[ "$WITH_CONCURRENCY_DEEP" == "1" ]] && echo " + deep N=4×10K" || echo " (deep rung off — --with-concurrency-deep)")"
 echo "  hermes env:  BENCHLOCAL_HERMES_RESOLVE_LOCALHOST=${BENCHLOCAL_HERMES_RESOLVE_LOCALHOST:-0}"
 echo "  thinking:    ${ENABLE_THINKING:-0}${THINKING_MAX_TOKENS:+ (max_tokens=$THINKING_MAX_TOKENS)}"
 echo "==============================================================="
@@ -389,6 +407,88 @@ URL="$URL" MODEL="$MODEL" RUNS="${RUNS:-5}" WARMUPS="${WARMUPS:-3}" \
   ENABLE_THINKING="${ENABLE_THINKING:-0}" \
   run_step bench "$OUT_DIR/bench.log" \
     bash "$ROOT_DIR/scripts/bench.sh" || true
+
+# --- step 1b: bench-agentic (multi-turn prefill curve) ----------------------
+# #805 parity: report.sh --agentic/--full has always run this; rebench — the
+# CANONICAL eval pipeline — did not, so the pipeline that produces BENCHMARKS
+# rows captured strictly less than the paste-bundle did, and the docs had to
+# tell people to run report.sh --agentic afterwards to fill the gap.
+# Curve-shape producer, not a TPS number: single-prompt bench.sh cannot see the
+# incremental-prefill cost that dominates every agent turn past ~5.
+URL="$URL" MODEL="$MODEL" \
+  SESSIONS="${AGENTIC_SESSIONS:-1}" TURNS="${AGENTIC_TURNS:-12}" \
+  run_step bench-agentic "$OUT_DIR/bench-agentic.log" \
+    bash "$ROOT_DIR/scripts/bench-agentic.sh" || true
+
+# --- step 1c: concurrency probe ---------------------------------------------
+# #805 (scope addition): the rung that catches a regime split — a config can
+# look fine at N=1 and collapse at N=4 (the 60.2-vs-16.3 case). ENGINE-AWARE and
+# reboot-free: the server's own slot count is the ceiling, we probe what is
+# served rather than re-launching it. Rungs above the served slot count would
+# measure QUEUE WAIT and report it as concurrency (the #818 mislabeling), so
+# they are dropped with the reason stated.
+concurrency_rungs() {
+  local slots="" src="" cmd="" rungs=(1) n
+  if [[ "${CONTAINER:-}" != "none" ]] && command -v docker >/dev/null 2>&1 \
+     && [[ -n "${CONTAINER_NAME:-}" ]]; then
+    cmd="$(docker inspect "$CONTAINER_NAME" --format '{{join .Config.Cmd " "}}' 2>/dev/null || true)"
+    slots="$(command grep -oE 'max-num-seqs [0-9]+' <<<"$cmd" | command grep -oE '[0-9]+' | head -1 || true)"
+    [[ -n "$slots" ]] && src="container max-num-seqs"
+    if [[ -z "$slots" ]]; then
+      slots="$(command grep -oE '\-np +[0-9]+' <<<"$cmd" | command grep -oE '[0-9]+' | head -1 || true)"
+      [[ -n "$slots" ]] && src="container -np"
+    fi
+  fi
+  if [[ -z "$slots" ]]; then
+    slots="$(curl -s -m 3 "${URL}/props" 2>/dev/null \
+      | python3 -c 'import json,sys; v=json.load(sys.stdin).get("total_slots",""); print(v if isinstance(v,int) else "")' 2>/dev/null || true)"
+    [[ -n "$slots" ]] && src="server /props total_slots"
+  fi
+
+  if [[ -z "$slots" ]]; then
+    # Not fatal here (unlike concurrency-probe.sh's own detection, which gates a
+    # validation verdict) — but we will not INVENT rungs the server may not have.
+    echo "[concurrency] served slot count undetected (no container cmd, no /props total_slots)."
+    echo "[concurrency] running the N=1 control only — pass CONCURRENCY_RUNGS='1 2 4' to override."
+    slots=1; src="undetected"
+  else
+    echo "[concurrency] served slots: ${slots} (detected: ${src})"
+  fi
+
+  for n in 2 4; do
+    if [[ "$n" -le "${slots:-1}" ]]; then rungs+=("$n"); else
+      echo "[concurrency] rung N=${n} dropped — above the served slot count (${slots}); it would measure queue wait, not concurrency."
+    fi
+  done
+  # Explicit override wins over detection, for a server whose slots we can't read.
+  if [[ -n "${CONCURRENCY_RUNGS:-}" ]]; then
+    read -ra rungs <<<"$CONCURRENCY_RUNGS"
+    echo "[concurrency] rungs overridden: ${rungs[*]}"
+  fi
+
+  local rc=0
+  for n in "${rungs[@]}"; do
+    echo
+    echo "───────────────── concurrency rung N=${n} ─────────────────"
+    URL="$URL" MODEL="$MODEL" CONCURRENCY="$n" \
+      PROMPT_TOKENS="${CONCURRENCY_PROMPT_TOKENS:-256}" \
+      GEN_TOKENS="${CONCURRENCY_GEN_TOKENS:-256}" \
+      ROUNDS="${CONCURRENCY_ROUNDS:-3}" \
+      bash "$ROOT_DIR/scripts/concurrency-probe.sh" || rc=$?
+  done
+  # The mixed-regime rung: N=4 x 10K prompts. OFF by default — it is slow, and
+  # it is the one that caught the 60.2-vs-16.3 split, so it is worth the opt-in.
+  if [[ "$WITH_CONCURRENCY_DEEP" == "1" ]]; then
+    echo
+    echo "───────────────── concurrency DEEP rung (N=4 × 10K prompts) ─────────────────"
+    URL="$URL" MODEL="$MODEL" CONCURRENCY=4 \
+      PROMPT_TOKENS=10000 GEN_TOKENS="${CONCURRENCY_GEN_TOKENS:-256}" \
+      ROUNDS="${CONCURRENCY_ROUNDS:-3}" \
+      bash "$ROOT_DIR/scripts/concurrency-probe.sh" || rc=$?
+  fi
+  return 0   # a rung that misses a gate is DATA, not a pipeline failure
+}
+run_step concurrency "$OUT_DIR/concurrency.log" concurrency_rungs || true
 
 # --- step 2: verify-stress --------------------------------------------------
 URL="$URL" MODEL="$MODEL" \

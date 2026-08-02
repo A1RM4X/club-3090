@@ -826,4 +826,36 @@ command grep -q 'QUICK MODE' <<<"$out" \
   && fail "BENCH_MOCK output must stay byte-identical even under --quick (two shipped tests parse it)"
 echo "  ✓ --quick is additive: default runs and BENCH_MOCK output are untouched"
 
+# --- 21. interconnect: all three layers land in the artifact (#805) ---------
+# report.sh has reported the three-layer P2P state since #789; bench.sh did not,
+# so every BENCHMARKS Rig cell's field 4 (resolved custom-AR state) was
+# hand-transcribed from a different run and went stale silently.
+#
+# The healthy run above is CONTAINER=none against a host-mode fake llama-server
+# — i.e. exactly the degradation case the issue calls out: there is no engine
+# all-reduce to report, and saying "off" would read as a misconfiguration.
+command grep -q '=== Interconnect (three layers) ===' "$H" \
+  || { command grep -n 'GPU state' "$H" >&2; fail "the bench artifact must self-document its interconnect state (#805)"; }
+for layer in 'layer 1  driver P2P grant :' 'layer 2  NCCL use         :' 'layer 3  engine custom-AR :'; do
+  command grep -qF "$layer" "$H" || fail "interconnect block is missing '$layer' — all THREE layers are the point"
+done
+# Layer 3 must degrade cleanly in host-mode / llama.cpp, per the issue's spec.
+command grep -qE 'layer 3  engine custom-AR : .*custom-AR n/a' "$H" \
+  || { command grep -F 'layer 3' "$H" >&2; fail "a host-mode/llama.cpp run must read 'custom-AR n/a', never 'off' (there is no AR kernel to disable)"; }
+# ...and layers 1-2 must still report on that same run — degrading layer 3 must
+# not take the whole block down with it.
+command grep -qE 'layer 1  driver P2P grant : (GRANTED|REFUSED|NVLink|n/a)' "$H" \
+  || fail "layer 1 must still report in host mode"
+# The block is a FOOTER fact, not a measurement: BENCH_MOCK output is parsed by
+# two shipped tests and must stay byte-identical.
+out=$(PREFLIGHT_NO_AUTODETECT=1 CONTAINER=none BENCH_MOCK=1 bash "$BENCH" 2>/dev/null)
+command grep -q 'Interconnect' <<<"$out" \
+  && fail "BENCH_MOCK output must not grow the interconnect block (test-submit-bench parses it)"
+# A CAPTURE=0 run keeps it too — the block is not part of the capture layer, and
+# a harness that turned capture off still wants to know what it ran under.
+run_bench healthy "$((PORT_BASE+20))" "$TMP/icap0.out" CAPTURE=0
+command grep -q '=== Interconnect (three layers) ===' "$TMP/icap0.out" \
+  || fail "CAPTURE=0 must keep the interconnect block (it is a footer fact, not a capture)"
+echo "  ✓ interconnect: three layers reported, layer 3 degrades to n/a in host mode, BENCH_MOCK untouched"
+
 echo "test-bench-capture: ok"

@@ -275,6 +275,13 @@ fi
 # The measurement heredoc shells out to the lib for the #817 PP plausibility gate,
 # so it needs the path even when the capture layer itself is off (CAPTURE=0).
 export BENCH_CAPTURE_LIB="${ROOT_DIR}/scripts/lib/capture.sh"
+# Interconnect state (#805). The SAME lib report.sh sources — the two surfaces
+# must never disagree about whether P2P was engaged for a given run, and a
+# second copy of the classifier here is exactly how they would drift.
+if [[ -f "${ROOT_DIR}/scripts/lib/p2p-state.sh" ]]; then
+  # shellcheck source=lib/p2p-state.sh
+  source "${ROOT_DIR}/scripts/lib/p2p-state.sh"
+fi
 URL="${URL:-http://localhost:8020}"
 # Resolve the served model from /v1/models when MODEL is unset (#372). The qwen
 # literal below is only a last resort if detection no-ops (endpoint unreachable).
@@ -1757,6 +1764,112 @@ if command -v nvidia-smi >/dev/null 2>&1; then
   nvidia-smi --query-gpu=index,utilization.gpu,memory.used,memory.total,power.draw,temperature.gpu \
              --format=csv,noheader
 fi
+
+# ===========================================================================
+# Interconnect state — all three layers (#805)
+# ===========================================================================
+# report.sh has reported this since #789; bench.sh did not — so every
+# BENCHMARKS.md Rig cell's field 4 (resolved custom-AR state) was transcribed by
+# hand from a DIFFERENT run's report, and went stale silently. The three layers
+# are genuinely independent and a rig can sit in any combination of them:
+#
+#   layer 1  driver P2P GRANT   — did the kernel module grant peer access at all
+#                                 (`topo -p2p`)? A closed GeForce module refuses
+#                                 it outright; the open modules can grant it.
+#   layer 2  NCCL USE           — is the collective library configured to use
+#                                 P2P (NCCL_P2P_*/NVLINK_MODE), or told not to?
+#   layer 3  engine custom-AR   — did the ENGINE engage its own all-reduce
+#                                 kernel? vLLM vetoes its custom AR at world>2
+#                                 without NVLink even when layers 1-2 are ON
+#                                 (#786) — P2P is still live via NCCL there, so
+#                                 this is a third state, not "off".
+#
+# Degrades cleanly: host-mode / llama.cpp runs (CONTAINER=none) have no engine
+# all-reduce at all, so layer 3 says so and layers 1-2 still report.
+bench_interconnect_block() {
+  declare -F p2p_gpu_count >/dev/null || return 0
+  command -v nvidia-smi >/dev/null 2>&1 || return 0
+
+  local ngpu cap flavor eng_text nccl_line l3 verdict
+  ngpu="$(p2p_gpu_count 2>/dev/null || echo 0)"
+
+  echo ""
+  echo "=== Interconnect (three layers) ==="
+
+  if [[ "${ngpu:-0}" -lt 2 ]]; then
+    # Not silent: a BENCHMARKS row for a single-card run should SAY it was
+    # single-card rather than leave the reader to infer it from an absent block.
+    echo "  layer 1  driver P2P grant : n/a — ${ngpu:-0} GPU(s) visible (single-card run)"
+    echo "  layer 2  NCCL use         : n/a — no multi-GPU communicator"
+    echo "  layer 3  engine custom-AR : n/a — no multi-GPU communicator"
+    return 0
+  fi
+
+  # ---- layer 1: driver grant -----------------------------------------------
+  cap="$(p2p_host_capability "$ngpu" 2>/dev/null || echo none)"
+  flavor="$(p2p_driver_flavor 2>/dev/null || echo unknown)"
+  case "$cap" in
+    nvlink)   echo "  layer 1  driver P2P grant : NVLink bridge present (topo -m reports NV#); kernel module: ${flavor}" ;;
+    pcie_p2p) echo "  layer 1  driver P2P grant : GRANTED over PCIe — topo -p2p reports OK on every pair; kernel module: ${flavor}" ;;
+    *)        echo "  layer 1  driver P2P grant : REFUSED — topo -p2p reports no all-pairs OK; kernel module: ${flavor}" ;;
+  esac
+
+  # ---- layer 2: NCCL use ---------------------------------------------------
+  # Container env first (the serving process's RESOLVED value, post-entrypoint),
+  # then the bare-metal server's /proc environ, then our own.
+  nccl_line=""
+  if [[ "${CONTAINER:-}" != "none" ]] && command -v docker >/dev/null 2>&1 \
+     && docker inspect "${CONTAINER}" >/dev/null 2>&1; then
+    nccl_line="$(docker exec "$CONTAINER" env 2>/dev/null \
+      | command grep -E '^(NCCL_P2P|NVLINK_MODE|NCCL_CUMEM)=' | sort | paste -sd' ' - || true)"
+  fi
+  # cap_proc_env lives in capture.sh, which is only sourced when CAPTURE=1 —
+  # a CAPTURE=0 run still gets layers 1 and 3, just not the /proc fallback.
+  if [[ -z "$nccl_line" && -n "${SERVER_PID:-}" && "${SERVER_PID}" != "none" ]] \
+     && declare -F cap_proc_env >/dev/null; then
+    local v got
+    for v in NCCL_P2P_DISABLE NCCL_P2P_LEVEL NVLINK_MODE NCCL_CUMEM_ENABLE; do
+      got="$(cap_proc_env "$v" "$SERVER_PID" 2>/dev/null || true)"
+      [[ -n "$got" ]] && nccl_line="${nccl_line}${nccl_line:+ }${v}=${got}"
+    done
+  fi
+  if [[ -n "$nccl_line" ]]; then
+    echo "  layer 2  NCCL use         : ${nccl_line}"
+  else
+    echo "  layer 2  NCCL use         : no NCCL_P2P*/NVLINK_MODE in the serving environment (engine default)"
+  fi
+
+  # ---- layer 3: engine custom-AR -------------------------------------------
+  # The classifier wants the same text report.sh feeds it: the [nvlink] decision
+  # trail + vLLM's own gate line + the resolved env.
+  eng_text=""
+  if [[ "${CONTAINER:-}" != "none" ]] && command -v docker >/dev/null 2>&1 \
+     && docker inspect "${CONTAINER}" >/dev/null 2>&1; then
+    eng_text="$(docker logs "$CONTAINER" 2>&1 | command grep -E '\[nvlink\]|Custom allreduce is disabled' | head -8 || true)"
+  fi
+  if [[ "$ENGINE_KIND" == "llamacpp" || "${CONTAINER:-}" == "none" ]]; then
+    # llama.cpp/ik-llama split layers across cards with plain copies — there is
+    # no custom all-reduce kernel to engage or veto. Saying "off" would read as
+    # a misconfiguration; it is a property of the engine.
+    l3="engine: ${ENGINE_KIND/llamacpp/llama.cpp} — custom-AR n/a"
+  else
+    case "$(printf '%s\n%s' "$eng_text" "$nccl_line" | p2p_classify_engagement 2>/dev/null || echo unknown)" in
+      on)        l3="ENGAGED — engine reports its custom all-reduce ON" ;;
+      nccl_only) l3="engine-VETOED — vLLM disabled its custom all-reduce (NVLink-only gate at world>2, #786); P2P still live via NCCL peer transfers" ;;
+      off)       l3="OFF — the serving container resolved to PCIe/no-P2P mode" ;;
+      requested) l3="REQUESTED but UNVERIFIED — P2P forced on without a driver grant (#688)" ;;
+      *)         l3="unknown — no [nvlink] boot line and no engine gate line in the log" ;;
+    esac
+  fi
+  echo "  layer 3  engine custom-AR : ${l3}"
+
+  # ---- the cross-referenced verdict (same matrix report.sh renders) ---------
+  verdict="$(p2p_verdict "$ngpu" "$cap" \
+    "$(printf '%s\n%s' "$eng_text" "$nccl_line" | p2p_classify_engagement 2>/dev/null || echo unknown)" 2>/dev/null || true)"
+  [[ -n "$verdict" ]] && echo "  verdict  : ${verdict}"
+  return 0
+}
+bench_interconnect_block || true
 
 # MTP / spec-decode stats — only when running against a Docker container we own.
 # Skipped silently in endpoint-first mode (CONTAINER=none).
