@@ -274,6 +274,13 @@ classify it, or `=token` to suppress the classification on a model you know is a
 per-run `n/a` guard is **not** overridable — a zero-width window has no decode rate whatever the
 label says.
 
+`bench-agentic.sh` carries the identical guard and the identical two knobs: a turn with no
+measurable decode window prints `n/a` with `(decode window 0 — single-block emission; wall N tok/s)`,
+degenerate turns are excluded from the per-turn `Decode TPS` column with the exclusion stated, and
+the ramp closes with the same `⚠ CANVAS GRANULARITY` verdict. **The TTFT curve is unaffected** —
+TTFT is measured, not derived — so an agentic run against a dLLM still produces its reason for
+existing, just without a decode-rate column.
+
 Two numbers on the card need their provenance stated, because both are easy to quote wrongly:
 
 - **Cache hit rate — quote the MARGINAL one.** Cumulative rates embed the cold-fill phase, so a
