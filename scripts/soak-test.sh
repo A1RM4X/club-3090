@@ -77,10 +77,21 @@
 #   results/<run>/gpu-log.csv
 #   results/<run>/summary.md
 #
+# VRAM baseline semantics (#829):
+#   The warm VRAM baseline is captured at the END of the first session that
+#   completed with ZERO errored turns — not unconditionally at the end of
+#   session 1. A session that errored (engine death, non-200, stream error)
+#   would baseline a failing engine, and every later reading would then read as
+#   multi-GB growth: #827 reported "VRAM grew 32053 MiB" on a run whose only
+#   fault was an engine crash. Rows recorded BEFORE the anchor session are
+#   excluded from the growth + oscillation analysis. If no session runs clean,
+#   VRAM growth is reported as UNMEASURABLE and the verdict is INCONCLUSIVE —
+#   never a phantom number.
+#
 # Exit codes:
 #   0 pass
 #   1 fail
-#   2 inconclusive / timeout / preflight could not run
+#   2 inconclusive / timeout / no warm VRAM baseline / preflight could not run
 
 # Force Python's UTF-8 mode (PEP 540) for every python3 this script runs.
 # Repo sources are full of unicode (— × → ⚠), and without this a rig on a real
@@ -339,10 +350,16 @@ log "output=${SOAK_OUTPUT}"
 
 START_SECONDS="$SECONDS"
 BOOT_VRAM_MIB=""
+# Session the warm VRAM baseline was anchored at the END of; 0 = never anchored
+# (no error-free session), which makes VRAM growth UNMEASURABLE rather than a
+# phantom number (#829).
+BASELINE_SESSION=0
+TURNS_RUN=0
 TIMED_OUT=0
 
 for session in $(seq 1 "$SOAK_SESSIONS"); do
   log "session ${session}/${SOAK_SESSIONS}"
+  session_errors=0
   state_file="${STATE_DIR}/state-s${session}.json"
   if [[ "$SOAK_MODE" == "continuous" ]]; then
     python3 "$HELPER" init-session "$state_file" "$session"
@@ -370,32 +387,57 @@ for session in $(seq 1 "$SOAK_SESSIONS"); do
     append_gpu_snapshot "$session" "$turn"
     python3 "$HELPER" append-log "$TURN_LOG" "$session" "$turn" "$vram" "$metrics_file"
 
-    read -r status t_ms ttft_ms decode_tps < <(python3 "$HELPER" metric "$metrics_file")
+    read -r status t_ms ttft_ms decode_tps err_flag < <(python3 "$HELPER" metric "$metrics_file")
+    TURNS_RUN=$((TURNS_RUN + 1))
+    [[ "${err_flag:-0}" == "1" ]] && session_errors=$((session_errors + 1))
     log "  turn ${turn}/${SOAK_TURNS}: status=${status} wall=${t_ms}ms ttft=${ttft_ms}ms decode_tps=${decode_tps} vram=${vram}MiB"
   done
 
-  # Capture warm baseline at END of session 1 — after all 5 turn shapes have
-  # run once and prefix cache has filled. Real accretion is measured FROM
-  # this baseline across sessions 2-N, so cache-fill (typically +500-1500
-  # MiB on the first 12K-char tool-result paste) doesn't false-positive.
+  # Capture warm baseline at END of the first CLEAN session — after all 5 turn
+  # shapes have run once and prefix cache has filled. Real accretion is measured
+  # FROM this baseline across the remaining sessions, so cache-fill (typically
+  # +500-1500 MiB on the first 12K-char tool-result paste) doesn't false-positive.
   # Calibration validated 2026-05-03 on long-text @ 0.93 + 180K — sessions
   # 2-10 stayed flat at session-1-end VRAM, confirming the test discriminates
   # cache fill from accretion correctly.
+  #
+  # CLEAN is load-bearing (#829). Anchoring unconditionally at the end of
+  # session 1 is correct only when session 1 succeeded: if the engine died
+  # mid-session, vram_mib() samples a corpse and every later reading reads as
+  # multi-GB growth. #827 printed "VRAM grew 32053 MiB" and "oscillation
+  # 63866 MiB" on a run whose only real fault was an engine crash — the loudest
+  # FAIL in the report, pointing at a leak that did not exist. So we re-anchor
+  # on the first error-free session instead, and if none exists the summary
+  # reports VRAM as UNMEASURABLE rather than inventing a figure.
   if [[ -z "$BOOT_VRAM_MIB" ]]; then
-    BOOT_VRAM_MIB="$(vram_mib)"
-    log "warm baseline after session 1: ${BOOT_VRAM_MIB} MiB"
+    if (( session_errors == 0 )); then
+      BOOT_VRAM_MIB="$(vram_mib)"
+      BASELINE_SESSION="$session"
+      log "warm baseline after session ${session}: ${BOOT_VRAM_MIB} MiB"
+    else
+      log "session ${session} had ${session_errors} errored turn(s) — NOT anchoring the warm VRAM baseline here (would baseline a failing engine); re-anchoring on the first clean session"
+    fi
   fi
 done
 
 if [[ -z "$BOOT_VRAM_MIB" ]]; then
-  BOOT_VRAM_MIB="$(vram_mib)"
-  TIMED_OUT=1
-  log "no completed turns; writing inconclusive summary"
+  # Deliberately do NOT sample vram_mib() here: with no clean session the engine
+  # is by definition unhealthy, and a reading taken now is exactly the corpse
+  # baseline #829 is about. Pass 0 + BASELINE_SESSION=0 so the summary reports
+  # VRAM as UNMEASURABLE.
+  BOOT_VRAM_MIB=0
+  BASELINE_SESSION=0
+  if (( TURNS_RUN == 0 )); then
+    TIMED_OUT=1
+    log "no completed turns; writing inconclusive summary"
+  else
+    log "no error-free session completed — VRAM growth + oscillation are UNMEASURABLE (no warm baseline)"
+  fi
 fi
 
 set +e
 python3 "$HELPER" summary "$TURN_LOG" "$SUMMARY_MD" "$BOOT_VRAM_MIB" \
-  "$SOAK_MAX_GROWTH_MIB" "$TIMED_OUT" "$SOAK_SESSIONS"
+  "$SOAK_MAX_GROWTH_MIB" "$TIMED_OUT" "$SOAK_SESSIONS" "$BASELINE_SESSION"
 rc=$?
 set -e
 exit "$rc"

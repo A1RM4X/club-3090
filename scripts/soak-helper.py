@@ -662,7 +662,12 @@ def cmd_append_log(log_path, session, turn, vram, metrics_path):
 
 def cmd_metric(metrics_path):
     m = json.loads(pathlib.Path(metrics_path).read_text())
-    print(m.get("status", 0), m.get("t_ms", 0), m.get("ttft_ms", 0), m.get("decode_tps", 0))
+    # Field 5 (err_flag) lets soak-test.sh decide in bash whether a session ran
+    # CLEAN — without re-parsing the metrics JSON. The condition mirrors
+    # cmd_summary's errors[] exactly: non-200 status OR a stream error payload.
+    # Used to pick the session the warm VRAM baseline anchors on (#829).
+    err_flag = 1 if (int(m.get("status", 0)) != 200 or m.get("error")) else 0
+    print(m.get("status", 0), m.get("t_ms", 0), m.get("ttft_ms", 0), m.get("decode_tps", 0), err_flag)
 
 
 def percentile(xs, p):
@@ -679,11 +684,18 @@ def med(xs):
     return statistics.median(xs) if xs else 0.0
 
 
-def cmd_summary(turn_log, summary_path, boot_vram, growth_limit, timed_out, expected_sessions):
+def cmd_summary(turn_log, summary_path, boot_vram, growth_limit, timed_out,
+                expected_sessions, baseline_session="1"):
     boot_vram = int(boot_vram)
     growth_limit = int(growth_limit)
     timed_out = int(timed_out) == 1
     expected_sessions = int(expected_sessions)
+    # Which session the warm VRAM baseline was anchored at the END of, or 0 when
+    # NO session completed error-free and therefore no warm baseline exists
+    # (#829). Defaulted to 1 so older callers / replayed CSVs keep the historical
+    # "baseline == end of session 1, compare against every row" behaviour.
+    baseline_session = int(baseline_session)
+    vram_unmeasurable = baseline_session <= 0
     rows = []
     with open(turn_log) as f:
         reader = csv.DictReader(f)
@@ -715,8 +727,27 @@ def cmd_summary(turn_log, summary_path, boot_vram, growth_limit, timed_out, expe
     last_tps = [r["decode_tps"] for r in rows if r["session_id"] in last and realistic(r["decode_tps"])]
     first_ttft = [r["ttft_ms"] for r in rows if r["session_id"] in first and r["ttft_ms"] > 0]
     last_ttft = [r["ttft_ms"] for r in rows if r["session_id"] in last and r["ttft_ms"] > 0]
-    max_vram = max([r["vram_mib"] for r in rows] + [boot_vram])
-    growth = max_vram - boot_vram
+    # VRAM accretion is only meaningful FROM the warm baseline forward, and the
+    # baseline is only meaningful if the session it was taken at the end of ran
+    # clean (#829). Two consequences, both of which the pre-#829 code got wrong
+    # when session 1 died:
+    #   1. Rows recorded BEFORE the baseline was captured must not feed the peak.
+    #      They pre-date the comparison point, so a pre-baseline reading can only
+    #      manufacture growth that was never accretion.
+    #   2. If NO session ran clean there is no warm baseline at all — sampling
+    #      nvidia-smi anyway reads a dying/dead engine and every later comparison
+    #      lands multi-GB high. #827: a 31823 MiB corpse baseline against the
+    #      healthy 63876 MiB peak printed "VRAM grew 32053 MiB" + "oscillation
+    #      63866 MiB" — the loudest FAIL in the report, pointing at a memory leak
+    #      that did not exist, on a run whose actual fault was an engine crash.
+    vram_rows = [] if vram_unmeasurable else [r for r in rows if r["session_id"] >= baseline_session]
+    vram_sessions = sorted({r["session_id"] for r in vram_rows})
+    if vram_unmeasurable:
+        max_vram = 0
+        growth = 0
+    else:
+        max_vram = max([r["vram_mib"] for r in vram_rows] + [boot_vram])
+        growth = max_vram - boot_vram
     errors = [r for r in rows if r["status"] != 200 or r["error"]]
     # Silent-empty turns: HTTP 200 + no transport error + the model produced
     # NO observable output despite t_ms ≥ 1s. These slip past errors[] — the
@@ -745,7 +776,7 @@ def cmd_summary(turn_log, summary_path, boot_vram, growth_limit, timed_out, expe
     last_med = med(last_tps)
     tps_retention = last_med / first_med if first_med > 0 else 0.0
     ttft_ratio = med(last_ttft) / med(first_ttft) if med(first_ttft) > 0 else 0.0
-    session_max = [max(r["vram_mib"] for r in rows if r["session_id"] == s) for s in sessions]
+    session_max = [max(r["vram_mib"] for r in vram_rows if r["session_id"] == s) for s in vram_sessions]
     oscillation = max([abs(b - a) for a, b in zip(session_max, session_max[1:])] or [0])
     slow_turns = [r for r in rows if r["t_ms"] > 30000]
 
@@ -753,7 +784,17 @@ def cmd_summary(turn_log, summary_path, boot_vram, growth_limit, timed_out, expe
     failures = []
     if errors:
         failures.append(f"{len(errors)} request(s) returned non-200 status or stream error.")
-    if growth > growth_limit:
+    if vram_unmeasurable:
+        # Loud, and deliberately NOT a number (#829). A numeric growth figure
+        # here would be an artifact of baselining a dead engine, and it is the
+        # single most misdirecting line a soak report can carry.
+        warnings.append(
+            f"VRAM growth + oscillation: UNMEASURABLE — no session completed without errors "
+            f"({len(errors)} errored turn(s)), so no warm baseline could be anchored. "
+            f"These metrics are NOT reported rather than reported wrong; fix the errors "
+            f"above and re-run before reading anything into VRAM."
+        )
+    elif growth > growth_limit:
         failures.append(f"VRAM grew {growth} MiB > {growth_limit} MiB threshold.")
     if first_med > 0 and tps_retention < 0.80:
         failures.append(f"Decode TPS retention was {tps_retention * 100:.1f}% < 80%.")
@@ -763,7 +804,7 @@ def cmd_summary(turn_log, summary_path, boot_vram, growth_limit, timed_out, expe
         warnings.append(f"TTFT grew {ttft_ratio:.2f}x from first sessions to last sessions.")
     if slow_turns:
         warnings.append(f"{len(slow_turns)} turn(s) exceeded 30s.")
-    if oscillation > 500:
+    if not vram_unmeasurable and oscillation > 500:
         warnings.append(f"VRAM session-to-session oscillation reached {oscillation} MiB.")
     if sessions and sessions[-1] < expected_sessions:
         warnings.append(f"Only {sessions[-1]} of {expected_sessions} sessions completed.")
@@ -782,15 +823,34 @@ def cmd_summary(turn_log, summary_path, boot_vram, growth_limit, timed_out, expe
         else:
             warnings.append(msg)
 
-    verdict = "INCONCLUSIVE" if timed_out else ("FAIL" if failures else "PASS")
-    exit_code = 2 if timed_out else (1 if failures else 0)
+    # A run with no warm baseline can never be a PASS: the VRAM-accretion class
+    # this test exists to detect went unmeasured (#829).
+    verdict = "INCONCLUSIVE" if timed_out else (
+        "FAIL" if failures else ("INCONCLUSIVE" if vram_unmeasurable else "PASS"))
+    exit_code = 2 if timed_out else (1 if failures else (2 if vram_unmeasurable else 0))
+    if vram_unmeasurable:
+        vram_lines = [
+            "- Boot VRAM baseline: **UNMEASURABLE** — no error-free session to anchor on",
+            "- Max VRAM observed: n/a (no warm baseline to compare against)",
+            "- Max growth observed: **INCONCLUSIVE** — see Warnings",
+        ]
+    else:
+        vram_lines = [
+            f"- Boot VRAM baseline: {boot_vram} MiB",
+            f"- Max VRAM observed: {max_vram} MiB",
+            f"- Max growth observed: {growth} MiB",
+        ]
+        if baseline_session > 1:
+            vram_lines.append(
+                f"- Warm baseline anchored at END of session {baseline_session} "
+                f"(sessions 1-{baseline_session - 1} had errored turns; their rows are "
+                f"excluded from growth + oscillation)"
+            )
     lines = [
         "# Soak test summary",
         "",
         f"- Verdict: **{verdict}**",
-        f"- Boot VRAM baseline: {boot_vram} MiB",
-        f"- Max VRAM observed: {max_vram} MiB",
-        f"- Max growth observed: {growth} MiB",
+        *vram_lines,
         f"- Sessions completed: {len(sessions)}",
         f"- Request errors: {len(errors)}",
         f"- Silent-empty turns (HTTP 200 + 0 completion tokens): {len(silent_empty)} / {len(rows)} ({silent_empty_pct:.1f}%)",
@@ -805,7 +865,8 @@ def cmd_summary(turn_log, summary_path, boot_vram, growth_limit, timed_out, expe
         f"| p50 TTFT | {percentile(ttft, 0.50):.0f} ms |",
         f"| p95 TTFT | {percentile(ttft, 0.95):.0f} ms |",
         f"| TTFT first/last ratio | {ttft_ratio:.2f}x |",
-        f"| VRAM oscillation | {oscillation} MiB |",
+        (f"| VRAM oscillation | INCONCLUSIVE |" if vram_unmeasurable
+         else f"| VRAM oscillation | {oscillation} MiB |"),
         "",
     ]
     if failures:
@@ -821,15 +882,26 @@ def cmd_summary(turn_log, summary_path, boot_vram, growth_limit, timed_out, expe
         rec = "Inspect docker logs and compare turn-log.csv against GPU snapshots to identify the accreting path."
     elif verdict == "INCONCLUSIVE":
         rec = "Re-run with a larger SOAK_TIMEOUT_S or fewer/lighter sessions before treating this config as soak-clean."
+    if vram_unmeasurable:
+        rec = ("Every session errored, so VRAM accretion was never measured. Diagnose the "
+               "request errors first (`docker logs <container> 2>&1 | tail -50`) — a mid-run "
+               "engine death is the common cause — then re-run the soak.")
     lines += ["## Recommendation", "", f"- {rec}"]
     pathlib.Path(summary_path).write_text("\n".join(lines) + "\n")
 
     print("")
     print("[soak] summary")
     print(f"[soak]   verdict              {verdict}")
-    print(f"[soak]   boot_vram_mib        {boot_vram}")
-    print(f"[soak]   max_vram_mib         {max_vram}")
-    print(f"[soak]   max_growth_mib       {growth} / {growth_limit}")
+    if vram_unmeasurable:
+        print(f"[soak]   boot_vram_mib        UNMEASURABLE (no error-free session)")
+        print(f"[soak]   max_vram_mib         n/a")
+        print(f"[soak]   max_growth_mib       INCONCLUSIVE / {growth_limit}")
+    else:
+        print(f"[soak]   boot_vram_mib        {boot_vram}")
+        print(f"[soak]   max_vram_mib         {max_vram}")
+        print(f"[soak]   max_growth_mib       {growth} / {growth_limit}")
+        if baseline_session > 1:
+            print(f"[soak]   baseline_session     {baseline_session} (sessions 1-{baseline_session - 1} errored; excluded)")
     print(f"[soak]   errors               {len(errors)}")
     print(f"[soak]   silent_empty         {len(silent_empty)} / {len(rows)} ({silent_empty_pct:.1f}%)")
     print(f"[soak]   p50_decode_tps       {percentile(tps, 0.50):.2f}")
