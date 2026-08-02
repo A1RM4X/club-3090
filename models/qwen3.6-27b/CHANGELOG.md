@@ -2,6 +2,30 @@
 
 Dated history for Qwen3.6-27B configs in this repo. Combines the single-card and dual-card timelines (both were previously separate repos; consolidated here 2026-04-28).
 
+## 2026-08-02 — dual-NVFP4: first native-FP4 validation, and an envelope correction
+
+`vllm/qwen-27b-dual-nvfp4` was authored blind and had never had a clean boot on the hardware it targets. [#849](https://github.com/noonghunna/club-3090/issues/849) (@paulp83, 2× RTX 5090 sm_120, no power cap) is that boot, and it is a full gate.
+
+**Measured:** verify-full 8/8 · verify-stress 7/7 (NIAH 240,636 = 91% of 262K, free margin 1,545 MB, **Δ −18 MB across the entire ladder**) · soak-continuous PASS (VRAM flat) · decode **168.0 narr / 215.7 code** TPS (CV ~1%) · TTFT 69/77 ms · prefill 4,545 @10K / 3,919 @90K · **MTP accept-len 4.0 at 100% per-position** · peak 30,576 / 32,607 MiB per card (93.8%) · KV pool 14.68 GiB / 841,541 tok.
+
+**Quality — the arc's longest-standing open question is closed.** 8-pack **117/150 think-off · 116/150 think-on** (benchlocal v0.9.8; pass@3 117 / 125). ⚠️ This is **not** "+7 over" the 110/150 measured on the Ampere Marlin-fallback path in 2026-07-11 — those were scored on materially different benchlocal versions. The like-for-like modern control is @henrykrinkle01's v0.9.9 FP8 run, which also lands **117 think-off**. Read together: **native-FP4 activations cost nothing measurable** on this model, which is exactly what the compose header had been carrying as unmeasured since the slug was authored.
+
+**Envelope correction (supersedes the 2026-08-01 derate).** [#847](https://github.com/noonghunna/club-3090/pull/847) responded to #838's OOM by setting `util 0.92 → 0.85` **and** `batched-tokens 8192 → 2048`, both desk-derived from a crash log. #849 ran util 0.85 with batched left at 8192 and passed the full gate, which separates the two:
+
+| | card 32,607 MiB |
+|---|---|
+| util 0.85 → vLLM budget 27,716 MiB | physical headroom **4,891 MiB** |
+| util 0.92 → vLLM budget 29,998 MiB | physical headroom **2,609 MiB** |
+| actually held | 30,576 MiB = **2,860 MiB above its own budget** |
+
+That ~2.9 GB overshoot is the un-profiled GDN activation peak (vllm#44209). It fits in 0.85's headroom and does not fit in 0.92's — so **util was the binding knob and the batched-token cut was not**. The GDN prefill scratch is still real and still linear in batched tokens (8192 → exactly the 96.00 MiB that appeared in #838's traceback), but at 0.85 that 96 MiB is noise: it was the straw, not the load.
+
+**Changed:** `MAX_NUM_BATCHED_TOKENS` restored 2048 → **8192** (the derate was costing prefill — 3,919 tok/s @90K is measured at 8192); `GPU_MEMORY_UTILIZATION` stays **0.85**; compose header, registry `status_note` and BENCHMARKS updated with the measured envelope. The "no clean community boot on target hardware" caveat is **retired**.
+
+**Unchanged — deliberately.** Status stays **⚠️ Production w/ caveats** and the vllm#50021 MTP exposure caveat stays. A passing gate does not retire a *probabilistic* crash: the same reporter hit #50021 at **n=3** in [#838](https://github.com/noonghunna/club-3090/issues/838), and [#758](https://github.com/noonghunna/club-3090/issues/758)'s gradient shows n=3 surviving "many sessions in a day" rather than being safe. `SPEC=off` remains the reliability setting until the fix is inherited via a pin bump (v0.26.0 predates it).
+
+**Method note worth keeping:** the derate that #849 corrected was explicitly labelled desk-derived in the compose header, which named a 2× 5090 owner as the validator and asked for a confirm-or-correct. That is the labelling paying for itself — the correction took hours, not a release cycle.
+
 ## 2026-07-06 — dual-max KV switch: int8_per_token_head → fp8
 
 Switches `vllm/qwen-27b-dual-max` (compose: `dual/fp8/mtp.yml`) from `int8_per_token_head` KV cache to `fp8`.
