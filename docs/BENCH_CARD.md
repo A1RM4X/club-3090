@@ -261,6 +261,26 @@ Two numbers on the card need their provenance stated, because both are easy to q
 - **Draft acceptance — never without its fire rate.** A drafter measured at 0.992 acceptance that
   fired on 5 of ~20 requests contributes almost nothing end-to-end. The run prints both.
 
+### `PP tok/s` — which prefill number belongs on a card
+
+Two different things have carried this label, and only one of them is a measurement:
+
+| Line | What it is | Card-worthy |
+|---|---|---|
+| `prefill tok/s` (in a `[prefill-<N>k]` summary) | **Client-side**: `prompt_tokens / TTFT` over a cache-busted haystack at a stated depth. CV 0.3–1.5%. | **Yes — this is the prefill number.** |
+| `PP tok/s` / `PP tok/s (engine log, windowed …)` | **Scraped** from the engine's own stats log — vLLM's `Avg prompt throughput`, averaged over its ~10 s logging window. | Only with its depth and the "indicative only" label, and only when the run printed it. |
+
+On the canonical bench prompts (~15 tokens) the windowed average is mostly idle time, and it renders
+as `PP tok/s mean=2.00 CV=55.9%` — shaped exactly like a measurement. Three community reports pasted
+it as one (#817, #769, #822). The run now prints it only when it could be a rate at all — prompt
+≥ 1000 tok **and** mean ≥ 50 tok/s **and** CV ≤ 100% — and otherwise says
+`n/a (engine-log scrape suppressed: <reason>)` and points at the client-side line. All three
+conditions are load-bearing: the windowed variant inside a prefill section clears the first two at
+`mean=1127.30 CV=171.9%` (min 13 / max 8044) and is still not a rate.
+
+Thresholds: `CAP_PP_MIN_PROMPT_TOKS` / `CAP_PP_MIN_TPS` / `CAP_PP_MAX_CV` (defined in
+`scripts/lib/capture.sh`; raise them, don't remove the gate).
+
 ### Knobs worth setting
 
 | Env | Why |

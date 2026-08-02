@@ -1031,6 +1031,68 @@ cap_status_classify() {   # $1=tokens $2=tps $3=req_errors $4=cache_requested $5
   echo "$status"
 }
 
+# ---------------------------------------------------------------------------
+# Prompt-processing plausibility gate (#817)
+# ---------------------------------------------------------------------------
+# The `PP tok/s` line in bench.sh's summaries is SCRAPED from the engine's own
+# stats log — vLLM's `Avg prompt throughput`, which is averaged over its ~10 s
+# logging window (llama.cpp's `prompt eval time` equivalent goes through the same
+# path). That is a windowed figure over whatever the engine happened to be doing,
+# and on the canonical bench prompts — ~15 tokens — most of the window contains no
+# prefill at all. It renders as `PP tok/s  mean=2.00  CV=55.9%` (#769) or
+# `mean=6.88  CV=19.7%` (#822): shaped exactly like a measurement, and not one.
+# Three community reports have now pasted it as data.
+#
+# The trustworthy prefill number is the CLIENT-side one bench.sh already prints by
+# default: prompt_tokens / TTFT over a cache-busted haystack (`prefill tok/s`,
+# CV 0.3-1.5% on the very same runs).
+#
+# So the scrape only prints when it could be a prefill rate at all. Three
+# conditions, each one an observed failure shape rather than a guess:
+#   prompt >= 1000 tok   a ~15-token prompt cannot fill a 10 s window (#769, #822)
+#   mean   >= 50 tok/s   below that it is window dilution, not prefill compute
+#   CV     <= 100%       the windowed variant inside the prefill sections reads
+#                        `mean=1127.30 CV=171.9%`, min 13 / max 8044 — a sample
+#                        straddling idle and busy windows is not a rate
+# ALL THREE must hold. The CV condition is load-bearing on its own: the prefill-
+# section variant passes the first two and is still garbage.
+#
+# The caller prints the reason whenever the gate refuses — a number that vanishes
+# without explanation is its own defect, and the next report would just ask where
+# `PP tok/s` went.
+#
+# ONE DEFINITION, ON PURPOSE. bench.sh has two print sites and shells out to this
+# function for both rather than reimplementing the thresholds; two copies of a
+# rule is how the two callers of a shared scrape drifted apart before (see the
+# pool-LINE-count vs DEVICES-with-a-pool split at the top of this file).
+CAP_PP_MIN_PROMPT_TOKS="${CAP_PP_MIN_PROMPT_TOKS:-1000}"
+CAP_PP_MIN_TPS="${CAP_PP_MIN_TPS:-50}"
+CAP_PP_MAX_CV="${CAP_PP_MAX_CV:-100}"
+
+# cap_pp_plausible <mean_tok_s> <cv_pct> <prompt_tokens>
+#   exit 0 — plausible; prints nothing
+#   exit 1 — suppress; prints the reason on stdout
+cap_pp_plausible() {
+  awk -v m="${1:-0}" -v cv="${2:-0}" -v pt="${3:-0}" \
+      -v minpt="${CAP_PP_MIN_PROMPT_TOKS:-1000}" \
+      -v mintps="${CAP_PP_MIN_TPS:-50}" \
+      -v maxcv="${CAP_PP_MAX_CV:-100}" 'BEGIN{
+    if (pt + 0 < minpt + 0) {
+      printf "prompt is %d tok (< %d) - the engine averages prompt throughput over a ~10 s window, and a prompt this short cannot fill one\n", pt, minpt
+      exit 1
+    }
+    if (m + 0 < mintps + 0) {
+      printf "scraped mean %.2f tok/s (< %d) - window dilution, not prefill compute\n", m, mintps
+      exit 1
+    }
+    if (cv + 0 > maxcv + 0) {
+      printf "scraped CV %.1f%% (> %d%%) - the sample straddles idle and busy windows, which is not a rate\n", cv, maxcv
+      exit 1
+    }
+    exit 0
+  }'
+}
+
 # cap_divergence_pct <a> <b> — |a-b| / max(a,b) as a percentage; the engine-side
 # vs client-observed cross-check (item 1b). Anything over 5% means one of the two
 # numbers is not measuring what its label says.

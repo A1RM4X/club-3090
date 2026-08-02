@@ -105,6 +105,19 @@ command grep -q 'DEGEN_WINDOW_FRAC' "$BENCH" \
   || fail "bench.sh must guard the decode window by RATIO (#809)"
 echo "  ✓ no divide-by-epsilon decode window (#809)"
 
+# #817: bench.sh has TWO print sites for the engine-log PP scrape. Both must go
+# through the lib's gate — a copy of the thresholds in the python heredoc is
+# exactly how the two callers of a shared scrape drifted apart before.
+command grep -q 'cap_pp_plausible' "$LIB" || fail "capture.sh must define the PP plausibility gate (#817)"
+command grep -q 'cap_pp_plausible' "$BENCH" || fail "bench.sh must CALL the lib gate, not reimplement it (#817)"
+for thresh in CAP_PP_MIN_PROMPT_TOKS CAP_PP_MIN_TPS CAP_PP_MAX_CV; do
+  command grep -q "$thresh" "$BENCH" \
+    && fail "bench.sh carries a copy of the PP threshold $thresh — it must live only in the lib"
+done
+[[ "$(command grep -c '^cap_pp_plausible()' "$LIB")" == "1" ]] \
+  || fail "cap_pp_plausible must be defined exactly once"
+echo "  ✓ PP plausibility policy defined once, in the lib (#817)"
+
 # grep is shimmed to ugrep in interactive shells on some rigs, which breaks exact
 # output matching. Every scrape in the lib must use `command grep`.
 bare=$(command grep -nE '(^|[|;&(]|\$\()\s*grep ' "$LIB" || true)
@@ -329,6 +342,34 @@ cap_ram_rd_mbps 0 4352 60 >/dev/null 2>&1 && fail "ram_rd must refuse to invent 
 [[ "$(cap_status_classify 0 0 3 1 0 5)"     == REQ_ERRORS ]]     || fail "REQ_ERRORS must outrank everything"
 [[ "$(cap_divergence_pct 30 32)" == "6.2" ]] || fail "divergence arithmetic changed"
 echo "  ✓ status enum precedence, derived-demand arithmetic, divergence"
+
+# --- PP plausibility gate against the REAL reported samples (#817) -----------
+# Every row below is a figure a human actually pasted into an issue as data.
+pp_case() {   # $1=expect(plausible|suppress) $2=mean $3=cv $4=prompt_toks $5=source
+  local out rc
+  # `set -e` aborts on a failing command substitution in an assignment, and this
+  # gate signals "suppress" with a non-zero exit BY DESIGN.
+  out="$(cap_pp_plausible "$2" "$3" "$4")" && rc=0 || rc=$?
+  if [[ "$1" == "plausible" ]]; then
+    (( rc == 0 )) || fail "$5: mean=$2 CV=$3% prompt=$4 should PRINT, gate said: $out"
+    [[ -z "$out" ]] || fail "$5: a plausible sample must print no reason, got: $out"
+  else
+    (( rc == 1 )) || fail "$5: mean=$2 CV=$3% prompt=$4 must be SUPPRESSED — it was printed as data"
+    [[ -n "$out" ]] || fail "$5: a suppressed sample must say WHY (a number that vanishes silently is its own defect)"
+  fi
+}
+pp_case suppress  2.00    55.9  15     "#769 — 65-char prompt"
+pp_case suppress  6.88    19.7  15     "#822 [code] shape"
+pp_case suppress  7.60    40.9  15     "#822 [narrative] shape"
+pp_case suppress  6.07    49.5  10000  "#822 prefill-10k windowed — long prompt, absurd rate"
+pp_case suppress  1127.30 171.9 90000  "#817 windowed-in-prefill — passes mean AND depth, CV is the only tell"
+pp_case plausible 9968.67 14.0  90000  "#822 prefill-90k windowed — the one that IS a rate"
+pp_case plausible 3950.40 0.0   9876   "PP fallback shape"
+# ...and the CV condition must be load-bearing on its own, or the #817 case above
+# would print: it clears both the depth and the rate floor.
+[[ "$(CAP_PP_MAX_CV=1000 cap_pp_plausible 1127.30 171.9 90000; echo rc=$?)" == "rc=0" ]] \
+  || fail "the CV condition is not what suppresses the windowed-in-prefill sample"
+echo "  ✓ PP gate: every figure pasted as data in #769/#822 is suppressed, with a reason"
 
 # ===========================================================================
 # TIER 1b — end-to-end bench.sh against the fake server
@@ -644,5 +685,66 @@ assert_no_absurd_decode "$TMP/forced.out" "canvas run with DECODE_GRANULARITY=to
 command grep -q 'CANVAS GRANULARITY' "$TMP/forced.out" \
   && fail "DECODE_GRANULARITY=token must suppress the canvas classification"
 echo "  ✓ DECODE_GRANULARITY declares the class, and cannot re-enable the epsilon divide"
+
+# --- 15. PP scrape end-to-end: suppressed where meaningless (#817) ----------
+# The canonical narrative prompt is ~11 tokens on this fixture. The engine's
+# windowed prompt-throughput average over it is not a prefill rate and must not
+# render as one — `PP tok/s mean=2.00 CV=55.9%` reached three community reports.
+run_bench healthy "$((PORT_BASE+14))" "$TMP/pp.out" ONLY=narr RUNS=2 WARMUPS=1 \
+  PREFILL_PROBE=1 PREFILL_DEPTHS=2000 PREFILL_RUNS=2
+P="$TMP/pp.out"
+command grep -q 'PP tok/s       n/a (engine-log scrape suppressed:' "$P" \
+  || { command grep -n 'PP tok/s' "$P" >&2; fail "the short-prompt PP scrape must be suppressed (#817)"; }
+command grep -q 'a prompt this short cannot fill one' "$P" \
+  || fail "the suppression must state WHY, not just vanish"
+command grep -q 'client-side `prefill tok/s`' "$P" \
+  || fail "the suppression must point at the number that IS trustworthy"
+# The short-prompt shape must not print a numeric PP line at all.
+python3 - "$P" <<'PY' || fail "a short-prompt shape still printed a numeric PP tok/s"
+import re, sys
+blocks = re.split(r"^=== summary \[([^\]]+)\] \(n=\d+\) ===$", open(sys.argv[1], encoding="utf-8").read(), flags=re.M)
+for name, body in zip(blocks[1::2], blocks[2::2]):
+    if name.startswith("prefill-"):
+        continue
+    bad = re.search(r"^\s+PP tok/s\s+mean=", body, re.M)
+    assert not bad, f"shape [{name}] printed a numeric PP tok/s line: {bad.group(0)}"
+PY
+# ...while the DEEP probe, where the figure can be a rate, still prints — labelled.
+command grep -q 'PP tok/s (engine log, windowed — indicative only) mean=' "$P" \
+  || { command grep -n 'windowed' "$P" >&2; fail "a plausible windowed scrape must still print, labelled indicative"; }
+echo "  ✓ PP scrape: suppressed with a reason on short prompts, printed+labelled at depth"
+
+# --- 16. the CV condition fires at depth too (#817's second named case) -----
+# min 13 / max 8044 across the sampled windows: passes the depth and rate floors,
+# and is still not a rate.
+# Exported, not passed through run_bench: this one configures the SERVER, which
+# start_server launches from the ambient environment.
+export FAKE_PP_JITTER=13,8044,13,8044
+run_bench healthy "$((PORT_BASE+15))" "$TMP/ppcv.out" ONLY=narr RUNS=1 WARMUPS=1 \
+  PREFILL_PROBE=1 PREFILL_DEPTHS=2000 PREFILL_RUNS=2
+unset FAKE_PP_JITTER
+command grep -q 'PP tok/s (engine log, windowed) n/a (suppressed: scraped CV' "$TMP/ppcv.out" \
+  || { command grep -n 'windowed' "$TMP/ppcv.out" >&2; fail "a CV>100% windowed sample must be suppressed at depth (#817)"; }
+command grep -q 'is the client-side measurement for this depth' "$TMP/ppcv.out" \
+  || fail "the depth suppression must point at the client-side prefill line"
+echo "  ✓ windowed-in-prefill scrape suppressed on CV, pointing at the client-side number"
+
+# --- 17. a PLAUSIBLE short-shape scrape keeps the parseable line shape -------
+# measurement_record.py and rebench-report.py both key on `^\s+PP tok/s\s+mean=`.
+# The `(engine log, windowed — indicative only)` label is appended as a SUFFIX so
+# the number stays where the parsers look for it.
+LONGP="$(python3 -c 'print("calibration filler sentence with stable token shape. " * 200)')"
+run_bench healthy "$((PORT_BASE+16))" "$TMP/pplong.out" ONLY=narr RUNS=1 WARMUPS=1 \
+  PREFILL_PROBE=0 "PROMPT_NARR=$LONGP"
+python3 - "$TMP/pplong.out" <<'PY' || fail "a plausible PP line no longer matches the shipped parsers"
+import re, sys
+txt = open(sys.argv[1], encoding="utf-8").read()
+m = re.search(r"^\s+PP tok/s\s+mean=\s*([0-9.]+)\s+std=\s*([0-9.]+)\s+CV=\s*([0-9.]+)%", txt, re.M)
+assert m, "no parseable PP tok/s line on a long-prompt shape:\n" + "\n".join(
+    l for l in txt.splitlines() if "PP tok/s" in l)
+assert "indicative only" in m.string[m.start():m.string.find("\n", m.start())], \
+    "the plausible line must still carry its 'indicative only' qualifier"
+PY
+echo "  ✓ a plausible PP line keeps the shape measurement_record/rebench-report parse"
 
 echo "test-bench-capture: ok"

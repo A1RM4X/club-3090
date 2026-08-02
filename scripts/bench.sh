@@ -39,6 +39,18 @@
 #   QUIET              Set to 1 to skip per-run lines (just print summary)
 #   PP                 Set to 1 to add the long-prompt PP fallback probe.
 #                      llama.cpp containers enable this automatically.
+#                      NOTE (#817): the `PP tok/s` line scraped from the ENGINE
+#                      LOG is a ~10 s window average, and on the canonical ~15-tok
+#                      prompts it is not a prefill rate at all — it rendered as
+#                      `mean=2.00 CV=55.9%` and three community reports pasted it
+#                      as data. It now prints only when it could be a rate
+#                      (prompt >= 1000 tok, mean >= 50 tok/s, CV <= 100%) and is
+#                      labelled `(engine log, windowed — indicative only)` when it
+#                      does; otherwise it says n/a WITH THE REASON and points at
+#                      the client-side `prefill tok/s`, which is trustworthy at
+#                      CV 0.3-1.5%. Thresholds live in scripts/lib/capture.sh and
+#                      are overridable via CAP_PP_MIN_PROMPT_TOKS /
+#                      CAP_PP_MIN_TPS / CAP_PP_MAX_CV.
 #   PP_FALLBACK_TOKENS Approximate filler-token target for PP=1. Default: 10000
 #   PP_MAX_TOKENS      Completion cap for the PP fallback request. Default: 16
 #   PREFILL_PROBE      Set to 0 to skip the canonical two-depth prefill/TTFT
@@ -162,6 +174,9 @@ if [[ -f "${ROOT_DIR}/scripts/preflight.sh" ]]; then
   source "${ROOT_DIR}/scripts/preflight.sh"
   preflight_autodetect_endpoint || true
 fi
+# The measurement heredoc shells out to the lib for the #817 PP plausibility gate,
+# so it needs the path even when the capture layer itself is off (CAPTURE=0).
+export BENCH_CAPTURE_LIB="${ROOT_DIR}/scripts/lib/capture.sh"
 URL="${URL:-http://localhost:8020}"
 # Resolve the served model from /v1/models when MODEL is unset (#372). The qwen
 # literal below is only a last resort if detection no-ops (endpoint unreachable).
@@ -700,6 +715,43 @@ def fmt(label, wall, ttft, toks):
     line = f"  {label:<10s} wall={wall:6.2f}s  ttft={ttft*1000:6.0f}ms  toks={toks:>4d}  wall_TPS={wtps:6.2f}  {dcol}"
     return wtps, dtps, ttft, line
 
+# --- prompt-processing plausibility gate (#817) -----------------------------
+# The policy and its three thresholds live in ONE place — capture.sh's
+# cap_pp_plausible. Shelling out to it is deliberate: bench.sh has two print
+# sites for this scrape, and a second copy of the rule in python is exactly how
+# two callers of a shared scrape drift apart.
+CAPTURE_LIB = os.environ.get("BENCH_CAPTURE_LIB", "")
+
+
+def pp_pointer():
+    if os.environ.get("PREFILL_PROBE", "1") == "1":
+        return ("the trustworthy prefill number is the client-side `prefill tok/s` "
+                "summary (prompt_tokens/TTFT, cache-busted)")
+    return ("run with PREFILL_PROBE=1 (the default) or PP=1 for a client-side "
+            "prefill measurement")
+
+
+def pp_verdict(vals, prompt_tokens):
+    """(plausible?, reason) for a scraped PP sample. Fails CLOSED."""
+    if not vals:
+        return False, "no values scraped"
+    m = s.mean(vals)
+    cv = (s.stdev(vals) / m * 100) if len(vals) > 1 and m > 0 else 0.0
+    if not CAPTURE_LIB or not os.path.exists(CAPTURE_LIB):
+        # Without the gate we cannot tell a measurement from an artifact, and the
+        # artifact is the one that gets pasted into an issue. Refuse to print.
+        return False, "plausibility gate unavailable (scripts/lib/capture.sh not found)"
+    try:
+        p = subprocess.run(
+            ["bash", "-c", 'source "$1"; cap_pp_plausible "$2" "$3" "$4"', "_",
+             CAPTURE_LIB, f"{m:.4f}", f"{cv:.4f}", str(int(prompt_tokens))],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            text=True, timeout=20, check=False)
+    except Exception as e:
+        return False, f"plausibility gate failed to run ({e})"
+    return (p.returncode == 0), p.stdout.strip()
+
+
 def fmt_pp(label, wall, ttft, prompt_tokens):
     pp = prompt_tokens / max(ttft, 1e-6)
     line = f"  {label:<10s} wall={wall:6.2f}s  ttft={ttft*1000:6.0f}ms  prompt_toks={prompt_tokens:>6d}  PP_tok/s={pp:7.2f}"
@@ -867,8 +919,16 @@ def run_set(label, prompt, max_tokens):
                      f"(short EOS) — see the summary block")
         if PP_MODE == "log":
             pp_vals = scrape_prompt_throughput(CONTAINER, len(walls))
-            if pp_vals:
-                print(stats("PP tok/s", pp_vals))
+            # #817: the canonical narrative/code prompts are ~15 tokens, and the
+            # engine's windowed prompt-throughput average over them is not a
+            # prefill rate. Print it only when it could be one.
+            pp_prompt = int(s.mean(ptoks_seen)) if ptoks_seen else 0
+            pp_ok, pp_why = pp_verdict(pp_vals, pp_prompt)
+            if pp_vals and pp_ok:
+                print(stats("PP tok/s", pp_vals) + "   (engine log, windowed — indicative only)")
+            elif pp_vals:
+                print(f"  PP tok/s       n/a (engine-log scrape suppressed: {pp_why})")
+                print(f"                 {pp_pointer()}")
             else:
                 print("  PP tok/s       n/a (engine log scrape unavailable; use PP=1 for the "
                       "long-prompt fallback, or SERVER_LOG=<path> on bare metal)")
@@ -976,7 +1036,7 @@ def run_prefill_probe():
                 continue
             print(f"  warm-1     FAIL: {e}")
         print(f"\n=== measured ({n}) ===")
-        pps, ttfts = [], []
+        pps, ttfts, ptoks_seen = [], [], []
         phase_t0 = phase_start()
         for i in range(n):
             try:
@@ -988,6 +1048,7 @@ def run_prefill_probe():
                          f"{pp:.1f} prefill tok/s, ttft {ttft*1000:.0f}ms")
                 pps.append(pp)
                 ttfts.append(ttft)
+                ptoks_seen.append(ptoks)
             except Exception as e:
                 print(f"  run-{i+1}    FAIL: {e}")
                 progress(f"[bench] {label} run {i+1}/{n}: FAIL: {e}")
@@ -1009,8 +1070,17 @@ def run_prefill_probe():
             if PP_MODE == "log":
                 vals = scrape_prompt_throughput(CONTAINER, len(pps) * 2)
                 vals = [v for v in vals if v > 0][-len(pps):]
-                if vals:
-                    print(stats("PP tok/s (engine log, windowed)", vals))
+                # #817: the prompt IS long here, so the depth condition passes —
+                # but this variant still renders `mean=1127.30 CV=171.9%` (min 13
+                # / max 8044) when the sampled windows straddle idle and busy.
+                # Same gate, same single definition.
+                w_ok, w_why = pp_verdict(vals, int(s.mean(ptoks_seen)) if ptoks_seen else 0)
+                if vals and w_ok:
+                    print(stats("PP tok/s (engine log, windowed — indicative only)", vals))
+                elif vals:
+                    print(f"  PP tok/s (engine log, windowed) n/a (suppressed: {w_why})")
+                    print("                 the `prefill tok/s` line above is the client-side "
+                          "measurement for this depth")
             _pm = s.mean(pps)
             SUMMARY["shapes"][label] = {
                 "n": len(pps), "n_usable": len(pps), "errors": 0,

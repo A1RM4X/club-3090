@@ -91,6 +91,12 @@ TOK_DELAY    = float(os.environ.get("FAKE_TOKEN_DELAY", "0.002"))
 # Per-canvas denoise cost for the canvas/canvas_mixed scenarios. Spent BEFORE the
 # block becomes visible, which is what collapses the decode window to zero width.
 CANVAS_DELAY = float(os.environ.get("FAKE_CANVAS_DELAY", "0.05"))
+# #817: the engine-log prompt-throughput scrape is a ~10 s WINDOW average. On a
+# rig where those windows straddle idle and busy the sample reads min 13 / max
+# 8044 (CV 137-221%) while looking exactly like a rate, and three community
+# reports pasted it as one. A CSV here cycles the logged rate through such a
+# sample so the plausibility gate can be driven end to end.
+PP_JITTER    = [float(x) for x in os.environ.get("FAKE_PP_JITTER", "").split(",") if x.strip()]
 _req_n       = [0]
 
 
@@ -337,8 +343,9 @@ class H(BaseHTTPRequestHandler):
             pass
         # per-request timings the sweep scrapes for server-side decode TPS
         ptoks = fake_tokens(str(prompt_text or ""))
+        pp_rate = PP_JITTER[(_req_n[0] - 1) % len(PP_JITTER)] if PP_JITTER else ptoks * 1.0
         log(f"print_timing: prompt eval time = 1000.00 ms / {ptoks} tokens "
-            f"( 1.00 ms per token, {ptoks * 1.0:.2f} tokens per second)")
+            f"( 1.00 ms per token, {pp_rate:.2f} tokens per second)")
         log(f"print_timing: eval time = 1000.00 ms / {max(emit,1)} tokens "
             f"( 1.00 ms per token, {max(emit,1)*2.5:.2f} tokens per second)")
         # low_fire: HIGH acceptance, but the drafter only fires on a minority of
