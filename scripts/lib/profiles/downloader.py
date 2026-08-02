@@ -20,10 +20,14 @@ Public API (stable for E3/E4)
     #                                   HF API lfs.sha256)
     #     .failure      -> None | "no-etag" | "sha-mismatch" | "gated-401"
     #                          | "disk" | "hf-cli-missing" | "in-progress"
-    #     .detail       -> str  (actionable message for "hf-cli-missing", or
-    #                            the adoption summary on a #812 skip)
+    #                          | "fallback-failed" | "fallback-unavailable"
+    #     .detail       -> str  (actionable message for "hf-cli-missing",
+    #                            the ladder's reason for a fallback-* failure,
+    #                            or the adoption summary on a #812 skip)
     #     .adopted      -> list[str]  (#812 — files verified in place and NOT
     #                                  re-downloaded)
+    #     .rung         -> str  (#804 — which ladder rung delivered the bytes:
+    #                            "classic" | "xet" | "raw-resolve")
     #     .local_dir    -> str         (the CONTRACT-2 host --model dir, or
     #                                   the .incomplete path on failure)
 
@@ -74,7 +78,17 @@ CONTRACT-3 invariants enforced here
   recorded-fixture fetcher / mocked subprocess; NO live multi-GB network
   in CI).
 
-Later addition, implemented in `hf_fetch.py` (see its docstring) and wired here:
+Two later additions, both in `hf_fetch.py` (see its docstring for the full
+rationale) and both wired here:
+
+* **#804 — the download resilience ladder.** The classic `hf download` above
+  is rung 1 and stays FIRST and unchanged. When (and only when) it exits with
+  huggingface_hub's client-side too-large refusal — a hard policy wall for
+  files over 50 GB, not flakiness — `HubFetcher.snapshot` escalates: rung 2
+  (Xet) if the operator opted in AND `hf_xet` is already importable, else
+  rung 3 (single-stream resumable `curl` against the resolve endpoint). Both
+  fallback rungs run a mandatory independent sha256 gate and DELETE a
+  mismatching artifact. No parallel-chunk downloader is ever used.
 
 * **#812 — verify-in-place + announce WHY.** Before any bytes move,
   `_download_model_impl` announces, per already-present file, what was found
@@ -119,6 +133,7 @@ class DownloadResult:
     sha_verified: bool = False
     # None | "no-etag" | "sha-mismatch" | "gated-401" | "disk"
     #      | "hf-cli-missing" | "in-progress"
+    #      | "fallback-failed" | "fallback-unavailable"   (#804 ladder)
     failure: Optional[str] = None
     local_dir: str = ""
     # Actionable detail (populated for "hf-cli-missing"; the canonical
@@ -128,6 +143,9 @@ class DownloadResult:
     # #812 — files that were already on disk, verified in place, and NOT
     # re-downloaded. Empty on every pre-existing path.
     adopted: list[str] = field(default_factory=list)
+    # #804 — which ladder rung delivered the bytes ("classic" unless the
+    # too-large refusal forced an escalation). "" when nothing was fetched.
+    rung: str = ""
 
 
 # The canonical actionable message when NEITHER `hf` nor `huggingface-cli`
@@ -284,6 +302,26 @@ class HubFetcher:
 
     timeout = _NET_TIMEOUT
 
+    def __init__(self, api: Optional[dict] = None, *,
+                 log: Optional[Any] = None):
+        # `api` = the deriver's already-fetched /api/models?blobs=true payload.
+        # The #804 ladder prefers it for sha256/size (free + redirect-immune)
+        # and only hits the repo-tree API when it is absent.
+        self.api = api or {}
+        self.log = log or HF.default_log
+        # Filenames the fallback ladder ALREADY sha256-verified, so
+        # download_model doesn't re-read a 96 GB file to compute the same hash
+        # against the same source.
+        self.ladder_verified: set = set()
+        self.rung = "classic"
+        # Injection seams for the #804 ladder, so its rungs are testable with
+        # NO network and NO multi-GB transfer (same discipline as the fixture
+        # fetcher). Production leaves every one of them None.
+        self.xet_runner = None        # (repo, dir, includes, xet) -> (rc, blob)
+        self.curl_runner = None       # (argv, dest_path) -> rc
+        self.xet_available = None     # () -> bool
+        self.tree_fn = None           # () -> repo-tree payload
+
     def snapshot(
         self, repo_id: str, local_dir: str, allow_patterns: list[str]
     ) -> list[str]:
@@ -308,7 +346,35 @@ class HubFetcher:
             text=True,
         )
         if proc.returncode != 0:
-            blob = f"{proc.stdout or ''}\n{proc.stderr or ''}".lower()
+            raw = f"{proc.stdout or ''}\n{proc.stderr or ''}"
+            blob = raw.lower()
+            # --- #804 rung 1 -> rung 2/3 escalation -----------------------
+            # ONLY on huggingface_hub's client-side too-large refusal. That is
+            # a hard policy wall (files over 50 GB on the plain HTTP path), so
+            # retrying rung 1 cannot succeed; every OTHER non-zero exit keeps
+            # its pre-existing mapping below, byte-unchanged.
+            if HF.is_xet_refusal(raw):
+                try:
+                    res = HF.escalate(
+                        repo_id, Path(local_dir), list(allow_patterns),
+                        classic_error=raw,
+                        meta=HF.api_meta(self.api) if self.api else None,
+                        log=self.log,
+                        xet_runner=self.xet_runner,
+                        curl_runner=self.curl_runner,
+                        xet_available=self.xet_available,
+                        tree_fn=self.tree_fn,
+                    )
+                except HF.LadderError as exc:
+                    raise LadderFailure(exc.token, exc.detail) from exc
+                self.ladder_verified = set(res.verified)
+                self.rung = res.rung
+                out: list[str] = []
+                root = Path(local_dir)
+                for p in sorted(root.rglob("*")):
+                    if p.is_file():
+                        out.append(str(p.relative_to(root)))
+                return out
             # Map non-zero exit to the EXISTING structured failure tokens,
             # exactly as the fixture fetcher would have raised.
             if (
@@ -459,8 +525,18 @@ class DiskError(RuntimeError):
     """Out-of-space / staging IO failure surfaced by the fetcher."""
 
 
-# ---------------------------------------------------------------------------
-# THE download stage.
+class LadderFailure(RuntimeError):
+    """#804: rung 1 hit the too-large refusal AND the escalation could not
+    deliver a verified artifact. `.token` is the structured failure the
+    DownloadResult carries ("sha-mismatch" / "no-etag" / "fallback-failed" /
+    "fallback-unavailable"); `.detail` is the operator-facing reason. Raised
+    (never swallowed) so `.incomplete` cleanup runs on the way out."""
+
+    def __init__(self, token: str, detail: str = ""):
+        super().__init__(detail or token)
+        self.token = token
+        self.detail = detail
+
 
 # ---------------------------------------------------------------------------
 # THE download stage.
@@ -554,6 +630,12 @@ def _download_model_impl(einput, *, fetcher: Optional[Any] = None) -> DownloadRe
                                        -> failure="hf-cli-missing"
         (STRUCTURED, with actionable .detail — NEVER a bare
         ModuleNotFoundError; the on-rig E5 regression this closes)
+      * #804 ladder exhausted           -> failure="fallback-failed" /
+                                           "fallback-unavailable" (or the
+                                           existing "sha-mismatch"/"no-etag"
+                                           when a fallback artifact fails the
+                                           mandatory hash gate — the artifact
+                                           is deleted either way)
 
     #812 — BEFORE any of that, the already-present contents of the final dir
     are announced file-by-file and (with VERIFY_IN_PLACE=1) sha256-checked
@@ -566,7 +648,9 @@ def _download_model_impl(einput, *, fetcher: Optional[Any] = None) -> DownloadRe
     allow = D.download_set(api)
 
     if fetcher is None:
-        fetcher = HubFetcher()
+        # Hand the deriver's already-fetched API payload to the fetcher so the
+        # #804 ladder can price/verify files without a second network round.
+        fetcher = HubFetcher(api)
 
     hf_home = Path(einput.hf_home)
     final_dir = pull_dir(hf_home, slug)
@@ -611,7 +695,7 @@ def _download_model_impl(einput, *, fetcher: Optional[Any] = None) -> DownloadRe
                 ok=True, files=list(allow), bytes=total,
                 # honest: only a computed hash counts as verification here.
                 sha_verified=bool(hashed) and len(hashed) == len(allow),
-                local_dir=str(final_dir), adopted=adopted,
+                local_dir=str(final_dir), adopted=adopted, rung="",
                 detail=f"adopted {len(adopted)} file(s) in place",
             )
 
@@ -624,6 +708,16 @@ def _download_model_impl(einput, *, fetcher: Optional[Any] = None) -> DownloadRe
         f"({len(allow)} file(s); reason: {', '.join(reasons)}"
         + (f"; {len(adopted)} already verified and kept" if adopted else "")
         + ")")
+
+    # #804 preflight: say up front when the classic path CANNOT serve this
+    # repo, instead of letting the operator watch a doomed rung-1 attempt.
+    try:
+        verdict, note = HF.preflight_transport(
+            [n for n in allow if n not in adopted], HF.api_meta(api))
+        if verdict == "needs-fallback":
+            log(f"[download] preflight: {note}")
+    except Exception:                    # pragma: no cover - advisory only
+        pass
 
     # Fresh staging tree (never reuse a prior partial — aria2c lesson).
     _rmtree(staging)
@@ -682,6 +776,15 @@ def _download_model_impl(einput, *, fetcher: Optional[Any] = None) -> DownloadRe
         return DownloadResult(
             ok=False, failure="disk", local_dir=str(staging), files=[]
         )
+    except LadderFailure as exc:
+        # #804: the too-large refusal was real and the escalation could not
+        # deliver a VERIFIED artifact. Same cleanup discipline as every other
+        # failure — no corrupt residue for anyone to serve.
+        _rmtree(staging)
+        return DownloadResult(
+            ok=False, failure=exc.token, local_dir=str(staging), files=[],
+            detail=exc.detail,
+        )
 
     written_set = sorted(set(written) | set(pre_staged))
 
@@ -701,7 +804,13 @@ def _download_model_impl(einput, *, fetcher: Optional[Any] = None) -> DownloadRe
     # longer a failure by itself: verifiability is decided by the API hash.
     sha_ok = True
     lfs_sha = _lfs_sha_map(api)
-    safetensors = [n for n in written_set if n.endswith(".safetensors")]
+    # #804: files the fallback ladder ALREADY hashed against the SAME published
+    # sha256 are not re-read here — re-hashing a 96 GB artifact to recompute an
+    # identical comparison is pure cost, not extra assurance. Anything the
+    # ladder did NOT verify still goes through the loop below.
+    ladder_verified = set(getattr(fetcher, "ladder_verified", ()) or ())
+    safetensors = [n for n in written_set
+                   if n.endswith(".safetensors") and n not in ladder_verified]
     for name in safetensors:
         # HEAD retained ONLY to surface HF gated-401 mid-verify (the
         # injectable-fetcher seam; its hash value is intentionally ignored).
@@ -775,6 +884,11 @@ def _download_model_impl(einput, *, fetcher: Optional[Any] = None) -> DownloadRe
             files=written_set,
         )
 
+    rung = str(getattr(fetcher, "rung", "") or "")
+    if rung and rung != "classic":
+        log(f"[download] delivered via the #804 fallback ladder "
+            f"(rung={rung}) — every fetched file sha256-verified against the "
+            f"hub's published hashes.")
     return DownloadResult(
         ok=True,
         files=written_set,
@@ -783,4 +897,5 @@ def _download_model_impl(einput, *, fetcher: Optional[Any] = None) -> DownloadRe
         failure=None,
         local_dir=str(final_dir),
         adopted=pre_staged,
+        rung=rung,
     )
