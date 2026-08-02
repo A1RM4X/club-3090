@@ -16,6 +16,7 @@
 # If they drift, an A/B silently compares two different measurements.
 set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+export PYTHONUTF8="${PYTHONUTF8:-1}"   # repo rule: locale must not decide python decoding
 BENCH="$ROOT_DIR/scripts/bench.sh"
 CARDLIB="$ROOT_DIR/scripts/lib/card.sh"
 FIX="$ROOT_DIR/scripts/tests/fixtures/offload-matrix"

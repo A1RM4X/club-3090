@@ -23,6 +23,7 @@
 #   PREFLIGHT_NO_AUTODETECT=1  bench.sh otherwise adopts whatever container is up.
 set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+export PYTHONUTF8="${PYTHONUTF8:-1}"   # repo rule: locale must not decide python decoding
 BENCH="$ROOT_DIR/scripts/bench.sh"
 LIB="$ROOT_DIR/scripts/lib/capture.sh"
 FIX="$ROOT_DIR/scripts/tests/fixtures/offload-matrix"
