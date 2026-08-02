@@ -18,49 +18,49 @@
 #              no decode cost on this checkpoint (#619 @seanyourhighness).
 #              Re-test when #46329 lands in the pin; fp8/e4m3 until then.
 #   Vision:    yes (full VLM — vision tower + preprocessors ship in the repo)
-#   Max ctx:   262K RETAINED, but DERATED around it (2026-08-01, #838) — util
-#              0.85 + batched-tokens 2048 on 2× 32 GB. The old "~22.1 GB/card
-#              @ util 0.92 = 75% of budget, comfortable" reading was AUTHORED
-#              BLIND and the first native 2× 5090 boot falsified it: the process
-#              reached 31.08 / 31.37 GiB and OOMed allocating 96.00 MiB in
-#              `chunk_gated_delta_rule_fwd_h` mid-request, ~2-3 GiB past what
-#              memory profiling had accounted for (upstream vllm#44209 — the
-#              planner under-counts the GDN activation peak; capture/serve can
-#              OOM AFTER /health already returned 200).
-#              ⤷ WHY THESE TWO KNOBS, and why NOT a ctx cut:
-#                • --max-num-batched-tokens is the real lever. The GDN prefill
-#                  scratch is linear in BATCHED tokens, not in max_ctx:
-#                  h = k.new_empty(B, NT, H, V, K) = batched × 12 KiB at TP=2
-#                  on this model (48 v-heads / 2 ranks × 128 × 128 × 2 B,
-#                  FLA chunk 64), plus v_new and o at ~6 KiB/token each. At
-#                  8192 that is exactly the 96.00 MiB that failed; at 2048 it
-#                  is 24 MiB. Cost is TTFT on long prefills — NOT context.
-#                • util 0.92 → 0.85 gives back ~2.2 GiB/card for the transients
-#                  profiling missed. Mirrors the single-card sibling's #613
-#                  derate (which pinned 65K + util 0.85 for this same class:
-#                  "KV reservation left no room for draft head + cudagraphs +
-#                  GDN prefill scratch").
-#                • Cutting MAX_MODEL_LEN would NOT have helped: vLLM sizes the
-#                  KV pool from FREE MEMORY, not from max_model_len × seqs. On
-#                  that boot the pool was 968,145 tokens while only 262,144 × 2
-#                  = 524,288 are addressable — 1.85× over-provisioned, ~7.7 GiB
-#                  per card that config could never reach. To reclaim it, pin
-#                  the pool: KV_CACHE_MEMORY_BYTES=10737418240 (10 GiB/card;
-#                  ~9.1 GiB is the arithmetic need at 18,710 B/token measured).
-#              ⚠️ THESE NUMBERS ARE DESK-DERIVED, NOT MEASURED. They come from
-#                 the #838 boot log plus the kernel source — this rig is 2× 24 GB
-#                 sm_86 and cannot boot the 32 GB envelope. @paulp83 (2× 5090)
-#                 is the validator; a confirm-or-correct from that rig replaces
-#                 this block. Report either way.
+#   Max ctx:   262K at util 0.85 + batched-tokens 8192 — ✅ MEASURED on 2× 5090
+#              (2026-08-02, #849 @paulp83). Full gate at this exact envelope:
+#              verify-full 8/8 · verify-stress 7/7 (NIAH 240,636 = 91% of 262K,
+#              free margin 1,545 MB, Δ −18 MB across the whole ladder) ·
+#              soak-continuous PASS (VRAM flat). Peak 30,576 / 32,607 MiB/card
+#              = 93.8%. KV pool 14.68 GiB / 841,541 tok (3.21× concurrency).
+#              ⤷ THE BINDING KNOB IS util, NOT batched-tokens — corrected
+#                2026-08-02. The 2026-08-01 derate (#838/#847) set util 0.85
+#                AND cut batched 8192 → 2048. #849 measured the same rig class
+#                and shows **only the util half was load-bearing**:
+#                  card 32,607 MiB
+#                  util 0.85 → vLLM budget 27,716, physical headroom 4,891 MiB
+#                  util 0.92 → vLLM budget 29,998, physical headroom 2,609 MiB
+#                  actually held 30,576 MiB = 2,860 MiB ABOVE the 0.85 budget
+#                That ~2.9 GB overshoot is the un-profiled GDN activation peak
+#                (vllm#44209 — the planner under-counts it, and serve can OOM
+#                after /health has returned 200). It FITS in 0.85's 4,891 MiB of
+#                headroom and does NOT fit in 0.92's 2,609 MiB. That is the
+#                whole #838 crash, and it is a util problem end to end.
+#              ⤷ batched 8192 RESTORED (was 2048). The GDN prefill scratch is
+#                still real and still linear in batched tokens —
+#                h = batched × 12 KiB/card at TP=2 (48 v-heads / 2 ranks ×
+#                128 × 128 × 2 B, FLA chunk 64), so 8192 → exactly the 96.00 MiB
+#                that appeared in #838's traceback. But at 0.85 there are
+#                4,891 MiB of headroom, so 96 MiB is noise: it was the *straw*,
+#                not the load. The 2048 value was DESK-DERIVED from #838's log
+#                and is SUPERSEDED by measurement. Restoring 8192 buys back the
+#                prefill it was costing — #849 measures 4,545 tok/s @10K and
+#                3,919 tok/s @90K at 8192.
+#              ⤷ Cutting MAX_MODEL_LEN still would not help: vLLM sizes the KV
+#                pool from FREE MEMORY, not max_model_len × seqs. Pin the pool
+#                with KV_CACHE_MEMORY_BYTES if you need the space back.
 #              ~11 GB/card weights vs dual-max's 14.5.
 #   Genesis:   none — intentionally Genesis-free
 #   Status:    ⚠️ Production w/ caveats
 #   Caveats:   MTP drafter exposed to OPEN vllm#50021 (GDN spec-decode crash
 #              class, quant-independent). Mitigate: SPEC=off. v0.26.0 predates
 #              the fix. Detail: Upstream-risk below + docs/UPSTREAM.md row.
-#              Carried from 🧪: no clean community boot on target hardware yet
-#              (first attempt = #838 = this crash class); the #847 envelope
-#              derate is desk-derived — 32 GB validator wanted.
+#              ✅ The "no clean community boot" caveat is RETIRED (2026-08-02,
+#              #849 @paulp83): full gate PASS on 2× 5090 at 262K. The #50021
+#              exposure above is the ONLY remaining caveat — it is a
+#              probabilistic upstream crash, so a passing gate does not clear
+#              it (#838 crashed at n=3 on this same hardware class).
 #   Upstream-risk:  • ⚠️ MTP × hybrid-GDN wild write — vllm#50021, OPEN and LIVE IN THIS PIN.
 #                The GDN spec-decode path builds a state-block index from an UNBOUNDED
 #                accepted-token count; a zero/stale count dereferences a wild address →
@@ -78,14 +78,27 @@
 #                required `Caveats:` line above. Reverts to the prior status
 #                when a fix-carrying pin bump lands (trigger on the
 #                docs/UPSTREAM.md row).
-#   Best for:  max-ctx Qwen on Blackwell/Hopper pairs at 2.5× less weight
-#              memory than bf16 — pending first community validation
+#   Best for:  ⭐ max-ctx Qwen on Blackwell/Hopper pairs — 168.0 narr /
+#              215.7 code decode TPS at full 262K on 2× 5090 (#849), at
+#              2.5× less weight memory than bf16
 # ---------------------------------------------------------------------------
-# ⚠️ AUTHORED BLIND — READ THIS FIRST.
-# FIRST BOOT: the maintainer rig (2× RTX 3090 sm_86) via the Marlin W4A16
-# fallback, 2026-07-11 — 262K + fp8 KV + MTP n=3 (accept 97%+), 69.7/85.5
-# decode TPS, 23.77 GB/card, 8-pack think-off 110/150 (ties the fp8 tier's
-# 109). Native-FP4 (sm_90+) validation still wanted. It mirrors the production-validated
+# ✅ COMMUNITY-VALIDATED ON TARGET HARDWARE — 2026-08-02, #849 (@paulp83).
+# FIRST FULL GATE ON NATIVE FP4 (2× RTX 5090, sm_120, no power cap):
+# verify-full 8/8 · verify-stress 7/7 (NIAH 240,636 = 91% of 262K) ·
+# soak-continuous PASS · decode 168.0 narr / 215.7 code TPS (CV ~1%) ·
+# TTFT 69/77 ms · prefill 4,545 @10K / 3,919 @90K · MTP AL 4.0 ·
+# peak 30,576/32,607 MiB per card. 8-pack 117/150 think-off · 116/150
+# think-on (benchlocal v0.9.8; pass@3 117 / 125).
+# ⤷ This slug was AUTHORED BLIND. Retained for the trail: FIRST BOOT was the
+#   maintainer rig (2× RTX 3090 sm_86) via the Marlin W4A16 fallback,
+#   2026-07-11 — 262K + fp8 KV + MTP n=3 (accept 97%+), 69.7/85.5 decode TPS,
+#   23.77 GB/card, 8-pack think-off 110/150 (ties the fp8 tier's 109).
+#   ⚠️ Do NOT read #849's 117 as "+7 over that 110" — the two were scored on
+#   materially different benchlocal versions (grader fidelity has moved). The
+#   like-for-like modern comparison is @henrykrinkle01's v0.9.9 FP8 run in
+#   BENCHMARKS ("cross-rig, thinking ON vs OFF"), which lands 117 think-off
+#   as well — i.e. native-FP4 activations cost nothing measurable.
+# It mirrors the production-validated
 # vllm/qwen-27b-dual-max shape (TP=2 + MTP n=3 + fp8/e4m3 KV + vision @262K)
 # with the weights swapped to nvidia/Qwen3.6-27B-NVFP4 per NVIDIA's own model
 # card recipe (--quantization modelopt). If you have 2× Hopper/Blackwell
@@ -106,7 +119,11 @@
 #     ✅ CONFIRMED-ISH ON BLACKWELL 2026-08-01 (#838): a 2× 5090 boot did OOM in
 #     the GDN activation path — but as a hard `torch.OutOfMemoryError` inside
 #     `chunk_gated_delta_rule_fwd_h`, NOT as the mid-generation hang this note
-#     predicted, and it is driven by BATCHED tokens rather than prompt depth.
+#     predicted. ⚠️ CORRECTED 2026-08-02 (#849): the 2026-08-01 reading
+#     ("driven by BATCHED tokens rather than prompt depth") was wrong on the
+#     lever — the same rig class runs 8192 batched cleanly at util 0.85. It is
+#     driven by UTIL leaving too little physical headroom for the un-profiled
+#     GDN activation peak. Depth was never the driver either way.
 #     Envelope derated accordingly (see Max ctx). Prediction kept, not deleted,
 #     so the reasoning trail stays intact — but read it with that correction.
 #   - froggeric chat-template: fixes 7 upstream Qwen3.6 template bugs; the
@@ -285,11 +302,17 @@ services:
       # 8192 → 2048 (2026-08-01, #838). THE lever for this failure: the GDN
       # chunked-prefill scratch is linear in BATCHED tokens, not max_ctx —
       # h = batched × 12 KiB/card at TP=2 here, so 8192 → 96.00 MiB (exactly
-      # the allocation that failed) and 2048 → 24 MiB. Full 262K is unaffected;
-      # the only cost is TTFT on long prefills. Raise it back only on a rig
-      # you have measured. See docs/KV_MATH.md → "GDN chunked-prefill scratch".
+      # the allocation that failed in #838) and 2048 → 24 MiB.
+      # ⤷ RESTORED to 8192 on 2026-08-02 (#849). The 2048 derate was
+      #   DESK-DERIVED from #838's traceback and is superseded by measurement:
+      #   a 2× 5090 full gate at util 0.85 + batched 8192 passes with 4,891 MiB
+      #   of physical headroom, so the 96 MiB scratch is noise at that util —
+      #   #838 was a util problem, not a batch problem. Keeping 8192 preserves
+      #   prefill (4,545 tok/s @10K, 3,919 @90K measured on that rig).
+      #   Lower it only if you are memory-bound at a HIGHER util than 0.85.
+      #   See docs/KV_MATH.md → "GDN chunked-prefill scratch".
       - --max-num-batched-tokens
-      - "${MAX_NUM_BATCHED_TOKENS:-2048}"
+      - "${MAX_NUM_BATCHED_TOKENS:-8192}"
       # fp8 (= e4m3) at scale=1.0. hf_quant_config DECLARES FP8 KV
       # (kv_cache_quant_algo=FP8) but the checkpoint ships NO k_scale/v_scale
       # tensors (safetensors-index-verified 2026-07-06), and Qwen3-Next hybrid
