@@ -375,28 +375,41 @@ show_status() {
     sudo docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}" 2>/dev/null
     echo ""
     echo -e "${CYAN}═══ Active Model(s) ═══${NC}"
+    # Single source of truth for "is anything serving?" (#865). Each probe
+    # below sets this on success; the closing guard reads it instead of
+    # keeping a SECOND hardcoded port list. The two lists had drifted:
+    # :8020 / :8051 / :8090 could print a live scene line AND
+    # "(no inference endpoint responding)" in the same breath. A list cannot
+    # disagree with itself. Also drops up to 9 redundant 2s-timeout curls on
+    # a rig where nothing is serving (the guard used to re-probe everything).
+    local _endpoint_up=0
     # Check ports in priority order: 8010, 8012, 8020, 11434, 4000
     if curl -sf -m 2 http://localhost:8010/v1/models >/dev/null 2>&1; then
+        _endpoint_up=1
         local m
         m=$(curl -sf -m 2 http://localhost:8010/v1/models | python3 -c "import sys,json;d=json.load(sys.stdin);print(', '.join(x['id'] for x in d.get('data',[])))" 2>/dev/null)
         echo -e "  ${GREEN}▶${NC} 27b-dual-mtp @ :8010    → ${m:-unknown} (MTP n=3 + fp8 + 262K + vision)"
     fi
     if curl -sf -m 2 http://localhost:8051/v1/models >/dev/null 2>&1; then
+        _endpoint_up=1
         local m
         m=$(curl -sf -m 2 http://localhost:8051/v1/models | python3 -c "import sys,json;d=json.load(sys.stdin);print(', '.join(x['id'] for x in d.get('data',[])))" 2>/dev/null)
         echo -e "  ${GREEN}▶${NC} 35b-a3b-dual @ :8051    → ${m:-unknown} (MoE 3B/35B + fp8 + 262K + vision)"
     fi
     if curl -sf -m 2 http://localhost:8012/v1/models >/dev/null 2>&1; then
+        _endpoint_up=1
         local m
         m=$(curl -sf -m 2 http://localhost:8012/v1/models | python3 -c "import sys,json;d=json.load(sys.stdin);print(', '.join(x['id'] for x in d.get('data',[])))" 2>/dev/null)
         echo -e "  ${GREEN}▶${NC} 27b-dflash @ :8012      → ${m:-unknown} (DFlash N=5 + 185K + vision)"
     fi
     if curl -sf -m 2 http://localhost:8013/v1/models >/dev/null 2>&1; then
+        _endpoint_up=1
         local m
         m=$(curl -sf -m 2 http://localhost:8013/v1/models | python3 -c "import sys,json;d=json.load(sys.stdin);print(', '.join(x['id'] for x in d.get('data',[])))" 2>/dev/null)
         echo -e "  ${GREEN}▶${NC} 27b-dflash-noviz @ :8013 → ${m:-unknown} (DFlash N=5 + 200K, no vision)"
     fi
     if curl -sf -m 2 http://localhost:8011/v1/models >/dev/null 2>&1; then
+        _endpoint_up=1
         local m
         m=$(curl -sf -m 2 http://localhost:8011/v1/models | python3 -c "import sys,json;d=json.load(sys.stdin);print(', '.join(x['id'] for x in d.get('data',[])))" 2>/dev/null)
         echo -e "  ${GREEN}▶${NC} 27b-turbo @ :8011       → ${m:-unknown} (TurboQuant_3bit_nc + MTP n=3 + v7.14, 4-stream concurrency)"
@@ -406,11 +419,13 @@ show_status() {
     # llamacpp/mtp-vision now defaults to llama-cpp-qwen36-27b-vision (#169).
     # All still match the llama-cpp-* prefix used for detection below.
     if curl -sf -m 2 http://localhost:8020/v1/models >/dev/null 2>&1; then
+        _endpoint_up=1
         local m
         m=$(curl -sf -m 2 http://localhost:8020/v1/models | python3 -c "import sys,json;d=json.load(sys.stdin);print(', '.join(x['id'] for x in d.get('data',[])))" 2>/dev/null)
         echo -e "  ${GREEN}▶${NC} llamacpp/single @ :8020 → ${m:-unknown} (llama.cpp single-card)"
     fi
     if curl -sf -m 2 http://localhost:8030/v1/models >/dev/null 2>&1; then
+        _endpoint_up=1
         local m container engine_tag
         m=$(curl -sf -m 2 http://localhost:8030/v1/models | python3 -c "import sys,json;d=json.load(sys.stdin);print(', '.join(x['id'] for x in d.get('data',[])))" 2>/dev/null)
         # Detect engine via container name on the port (was hardcoded to "gemma-mtp"
@@ -424,35 +439,33 @@ show_status() {
         echo -e "  ${GREEN}▶${NC} $engine_tag"
     fi
     if curl -sf -m 2 http://localhost:8032/v1/models >/dev/null 2>&1; then
+        _endpoint_up=1
         local m
         m=$(curl -sf -m 2 http://localhost:8032/v1/models | python3 -c "import sys,json;d=json.load(sys.stdin);print(', '.join(x['id'] for x in d.get('data',[])))" 2>/dev/null)
         echo -e "  ${GREEN}▶${NC} gemma-int8 @ :8032        → ${m:-unknown} (INT8 PTH KV)"
     fi
     if curl -sf -m 2 http://localhost:8038/v1/models >/dev/null 2>&1; then
+        _endpoint_up=1
         local m
         m=$(curl -sf -m 2 http://localhost:8038/v1/models | python3 -c "import sys,json;d=json.load(sys.stdin);print(', '.join(x['id'] for x in d.get('data',[])))" 2>/dev/null)
         echo -e "  ${GREEN}▶${NC} gemma-12b @ :8038        → ${m:-unknown} (gemma4_unified, INT8 + bf16 KV + MTP, single card)"
     fi
     if curl -sf -m 2 http://localhost:8090/v1/models >/dev/null 2>&1; then
+        _endpoint_up=1
         echo -e "  ${GREEN}▶${NC} studio director @ :8090  → qwen3.5-4b-uncensored (prompt crafter, GPU0, llama.cpp)"
     fi
     if curl -sf -m 2 http://localhost:8188/ >/dev/null 2>&1; then
+        # NOT an inference endpoint — ComfyUI is image/video gen and must not
+        # suppress the "no inference endpoint" warning on an LLM-idle rig.
         echo -e "  ${GREEN}▶${NC} ComfyUI @ :8188          → image/video generation (GPU-bound, mutex with LLM)"
     fi
     if curl -sf -m 2 -H "Authorization: Bearer sk-litellm-master-key" http://localhost:4000/v1/models >/dev/null 2>&1; then
+        _endpoint_up=1
         local m
         m=$(curl -sf -m 2 -H "Authorization: Bearer sk-litellm-master-key" http://localhost:4000/v1/models | python3 -c "import sys,json;d=json.load(sys.stdin);print(', '.join(x['id'] for x in d.get('data',[])))" 2>/dev/null)
         echo -e "  ${GREEN}▶${NC} LiteLLM @ :4000         → ${m:-unknown}"
     fi
-    if ! curl -sf -m 2 http://localhost:8010/v1/models >/dev/null 2>&1 \
-      && ! curl -sf -m 2 http://localhost:8011/v1/models >/dev/null 2>&1 \
-      && ! curl -sf -m 2 http://localhost:8012/v1/models >/dev/null 2>&1 \
-      && ! curl -sf -m 2 http://localhost:8013/v1/models >/dev/null 2>&1 \
-      && ! curl -sf -m 2 http://localhost:8030/v1/models >/dev/null 2>&1 \
-      && ! curl -sf -m 2 http://localhost:8032/v1/models >/dev/null 2>&1 \
-      && ! curl -sf -m 2 http://localhost:8033/v1/models >/dev/null 2>&1 \
-      && ! curl -sf -m 2 http://localhost:8038/v1/models >/dev/null 2>&1 \
-      && ! curl -sf -m 2 http://localhost:11434/api/tags >/dev/null 2>&1; then
+    if [ "$_endpoint_up" -eq 0 ]; then
         echo -e "  ${YELLOW}(no inference endpoint responding)${NC}"
     fi
     echo ""
