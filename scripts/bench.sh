@@ -146,8 +146,22 @@
 #     CARD=snapshot bash scripts/bench.sh | tee run-A.log
 #     CARD=ab BASELINE=run-A.log KNOB=moe-cache bash scripts/bench.sh
 #
+# Presets (#832 — `--help` prints the same text):
+#   --quick / QUICK=1  WARMUPS=1 RUNS=1 ONLY=narr PREFILL_PROBE=0 QUIET=1
+#                      A preset over existing knobs; no new measurement code. For
+#                      A/B sweeps where the canonical protocol dominates wall-clock
+#                      and only a direction is needed. NOT CANONICAL: no CV, no code
+#                      shape, no prefill anchor, not a BENCHMARKS.md row, and CARD
+#                      rendering is refused. An explicitly-set env var wins over the
+#                      preset and the banner says which.
+#                      ⚠ It removes WITHIN-boot samples only. Any comparison that
+#                      requires a reboot still needs >=2 BOOTS per arm — pool
+#                      allocation on the CPU-offload MoE path swings ~20% between
+#                      boots of a byte-identical config.
+#
 # Usage:
 #   bash scripts/bench.sh
+#   bash scripts/bench.sh --quick             # directional A/B arm (non-canonical)
 #   ONLY=code bash scripts/bench.sh
 #   PP=1 bash scripts/bench.sh
 #   RUNS=10 bash scripts/bench.sh
@@ -165,6 +179,90 @@ set -euo pipefail
 # case it does NOT: a genuine non-UTF-8, non-C locale. Exported, so child
 # processes and nested scripts inherit it. Guarded by test-locale-utf8.sh.
 export PYTHONUTF8="${PYTHONUTF8:-1}"
+
+# ===========================================================================
+# CLI arguments (#832)
+# ===========================================================================
+# Everything else about this script is env-driven. `--quick` is a PRESET over
+# those same knobs and adds NO measurement code — the point of the issue was
+# discoverability, not capability: composing `WARMUPS=1 RUNS=1 ONLY=narr
+# PREFILL_PROBE=0 QUIET=1` by hand requires reading ~40 lines of the env block
+# and knowing that PREFILL_PROBE defaults to 1 and silently adds two long-prompt
+# requests (10K and 90K), the 90K of which is plausibly the single largest term
+# in a "quick" run.
+#
+# Parsed HERE, before the env defaults below, so "was this knob set explicitly?"
+# is still answerable — and before preflight.sh is sourced, since a sourced
+# script inherits our positional parameters.
+QUICK="${QUICK:-0}"
+# The documented expansion. This array IS the contract: --help prints it, the
+# banner prints it, and the suite asserts the run behaves as exactly this set.
+QUICK_PRESET=(WARMUPS=1 RUNS=1 ONLY=narr PREFILL_PROBE=0 QUIET=1)
+
+bench_usage() {
+  cat <<USAGE
+Usage: bash scripts/bench.sh [--quick] [--help]
+
+bench.sh is env-driven; see the header block of this file for the full knob list.
+
+  --quick    ${QUICK_PRESET[*]}
+             1 warmup + 1 measured run, narrative only, no prefill probe.
+             Directional signal for A/B sweeps. Equivalent to QUICK=1.
+
+             NOT CANONICAL. It gives up:
+               * the 4 other measured runs, so there is NO CV and no way to tell
+                 a real delta from noise within the arm;
+               * the code shape (MTP/drafter acceptance differs sharply between
+                 prose and code — one half is not the pair);
+               * both prefill depths, so no prefill/TTFT anchor at all.
+             Single-run TPS is NOT comparable across boots, and the output is
+             not a BENCHMARKS.md row. CARD rendering is refused under --quick.
+
+             --quick removes WITHIN-boot samples. It does NOT remove the need
+             for >=2 BOOTS per arm on any comparison that requires a reboot
+             (-ub, -b, KV type, offload layout). Pool allocation on the
+             CPU-offload MoE path swings ~20% between boots of a byte-identical
+             config (4949 vs 3942 slots) and throughput tracked it (-12%); that
+             flipped "22L is the best no-spec config" from first to last once
+             the arm was confirmed at 2 reps.
+
+  -h, --help Print this and exit.
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --quick)   QUICK=1 ;;
+    -h|--help) bench_usage; exit 0 ;;
+    --)        shift; break ;;
+    *) echo "ERROR: unknown argument '$1'. bench.sh is env-driven — see --help." >&2; exit 2 ;;
+  esac
+  shift
+done
+
+QUICK_APPLIED=(); QUICK_KEPT=()
+if [[ "$QUICK" == "1" ]]; then
+  for _kv in "${QUICK_PRESET[@]}"; do
+    _k="${_kv%%=*}"; _v="${_kv#*=}"
+    # An explicit env var wins over the preset, and the banner says so — silently
+    # overriding what the operator typed is how a "quick" run turns into a
+    # different protocol than either of them intended.
+    if [[ -n "${!_k+x}" ]]; then
+      QUICK_KEPT+=("${_k}=${!_k} (preset wanted ${_v})")
+    else
+      printf -v "$_k" '%s' "$_v"
+      export "${_k?}"
+      QUICK_APPLIED+=("$_kv")
+    fi
+  done
+  if [[ -n "${CARD:-}" ]]; then
+    echo "ERROR: --quick and CARD=${CARD} are incompatible." >&2
+    echo "  A --quick run is n=1, so it has no CV — and the A/B card's noise band" >&2
+    echo "  DEFAULTS to 2x the worst decode CV across both arms, which is then zero." >&2
+    echo "  Every delta would render as significant. Render cards from canonical runs." >&2
+    exit 2
+  fi
+fi
 
 # Auto-detect running container + port (URL/CONTAINER env vars still win).
 # See scripts/preflight.sh::preflight_autodetect_endpoint.
@@ -280,6 +378,36 @@ if ! curl -sf "${URL}/v1/models" >/dev/null; then
   echo "  Start with: cd compose && docker compose up -d" >&2
   exit 1
 fi
+
+# --- --quick banner (#832) --------------------------------------------------
+# Deliberately AFTER the BENCH_MOCK branch, so mock output stays byte-identical
+# for the harnesses that parse it. On stdout, so it lands in a tee'd log next to
+# the numbers it qualifies — a caveat that only exists in the operator's terminal
+# is a caveat that does not survive being pasted into an issue.
+quick_banner() {
+  echo "=============================================================================="
+  echo "⚠ QUICK MODE — NOT CANONICAL. Directional signal only."
+  if (( ${#QUICK_APPLIED[@]} )); then
+    echo "  preset applied : ${QUICK_APPLIED[*]}"
+  else
+    echo "  preset applied : (none — every knob was already set explicitly)"
+  fi
+  if (( ${#QUICK_KEPT[@]} )); then
+    echo "  your env kept  : ${QUICK_KEPT[*]}"
+  fi
+  echo "  gives up       : 4 measured runs (so NO CV — a single-run delta cannot be"
+  echo "                   told from noise), the code shape, both prefill depths."
+  echo "  ⚠⚠ --quick removes WITHIN-boot samples. It does NOT remove the need for"
+  echo "     >=2 BOOTS per arm on any reboot-requiring comparison (-ub, -b, KV type,"
+  echo "     offload layout). Pool allocation on the CPU-offload MoE path swings ~20%"
+  echo "     between boots of a byte-identical config (4949 vs 3942 slots) and"
+  echo "     throughput tracked it (-12%) — that flipped a same-day \"22L is the best"
+  echo "     no-spec config\" from first to last once the arm was confirmed at 2 reps."
+  echo "  Single-run TPS is NOT comparable across boots. This output is NOT a"
+  echo "  BENCHMARKS.md row — do not paste it into one."
+  echo "=============================================================================="
+}
+if [[ "$QUICK" == "1" ]]; then quick_banner; fi
 
 server_reasoning_on() {
   if curl -sf -m 3 "${URL}/props" 2>/dev/null | python3 -c '
@@ -1637,4 +1765,14 @@ if [[ "${CONTAINER:-}" != "none" ]] && command -v docker >/dev/null 2>&1 \
   echo ""
   echo "=== Last 3 SpecDecoding metrics ==="
   docker logs "${CONTAINER}" 2>&1 | grep "SpecDecoding metrics" | tail -3 || true
+fi
+
+# Repeated at the END on purpose (#832): a reader who tails the log, or who
+# scrolls to the summary and copies it, never sees the opening banner.
+if [[ "$QUICK" == "1" ]]; then
+  echo ""
+  echo "⚠ QUICK MODE — the numbers above are NOT canonical: n=1, no CV, narrative only,"
+  echo "  no prefill anchor. Not a BENCHMARKS.md row. For any comparison that needed a"
+  echo "  reboot, run >=2 BOOTS per arm — --quick cut the within-boot samples, not the"
+  echo "  between-boot variance. Drop --quick for the canonical protocol."
 fi

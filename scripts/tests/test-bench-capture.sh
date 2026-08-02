@@ -110,8 +110,10 @@ echo "  ✓ no divide-by-epsilon decode window (#809)"
 # exactly how the two callers of a shared scrape drifted apart before.
 command grep -q 'cap_pp_plausible' "$LIB" || fail "capture.sh must define the PP plausibility gate (#817)"
 command grep -q 'cap_pp_plausible' "$BENCH" || fail "bench.sh must CALL the lib gate, not reimplement it (#817)"
+# `^[^#]*` keeps this to CODE — the header block names the three knobs so an
+# operator can find them, which is documentation, not a second implementation.
 for thresh in CAP_PP_MIN_PROMPT_TOKS CAP_PP_MIN_TPS CAP_PP_MAX_CV; do
-  command grep -q "$thresh" "$BENCH" \
+  command grep -qE "^[^#]*${thresh}" "$BENCH" \
     && fail "bench.sh carries a copy of the PP threshold $thresh — it must live only in the lib"
 done
 [[ "$(command grep -c '^cap_pp_plausible()' "$LIB")" == "1" ]] \
@@ -746,5 +748,81 @@ assert "indicative only" in m.string[m.start():m.string.find("\n", m.start())], 
     "the plausible line must still carry its 'indicative only' qualifier"
 PY
 echo "  ✓ a plausible PP line keeps the shape measurement_record/rebench-report parse"
+
+# --- 18. --quick is a PRESET over existing knobs, and nothing more (#832) ----
+# Deliberately NOT run through run_bench: that helper exports RUNS/WARMUPS/
+# PREFILL_PROBE itself, which the preset would (correctly) refuse to overwrite,
+# so the test would prove nothing. This one sets only what hermeticity needs.
+QUICK_EXPANSION='WARMUPS=1 RUNS=1 ONLY=narr PREFILL_PROBE=0 QUIET=1'
+command grep -qF "QUICK_PRESET=($QUICK_EXPANSION)" "$BENCH" \
+  || fail "the --quick preset array drifted from the documented expansion (#832)"
+bash "$BENCH" --help > "$TMP/help.out" 2>&1 || fail "--help must exit 0"
+command grep -qF "$QUICK_EXPANSION" "$TMP/help.out" \
+  || fail "--help must print the exact knob set --quick expands to"
+for want in "NOT CANONICAL" "NO CV" "comparable across boots" "BENCHMARKS.md row" \
+            ">=2 BOOTS per arm"; do
+  command grep -qF "$want" "$TMP/help.out" \
+    || fail "--help is missing the guardrail text: $want"
+done
+echo "  ✓ --help documents --quick and every guardrail the issue asks for"
+
+run_bench_bare() {   # $1=scenario $2=port $3=outfile $4=script args (may be "") [VAR=VAL ...]
+  local scen="$1" port="$2" out="$3" argstr="$4"; shift 4
+  local -a bargs=(); read -r -a bargs <<< "$argstr"
+  start_server "$scen" "$port"
+  PATH="$TMP/bin:$PATH" PREFLIGHT_NO_AUTODETECT=1 CONTAINER=none \
+    SERVER_LOG="$SRV_LOG" SERVER_PID="$SRV_PID" \
+    URL="http://127.0.0.1:$port" MODEL=fake-model \
+    env "$@" timeout 300 bash "$BENCH" ${bargs[@]+"${bargs[@]}"} > "$out" 2>"${out}.err" || true
+  kill "$SRV_PID" 2>/dev/null || true; wait "$SRV_PID" 2>/dev/null || true; SRV_PID=""
+}
+
+run_bench_bare healthy "$((PORT_BASE+17))" "$TMP/quick.out" "--quick"
+Q="$TMP/quick.out"
+command grep -q '⚠ QUICK MODE — NOT CANONICAL' "$Q" || fail "--quick must print a non-canonical banner"
+command grep -qF "preset applied : $QUICK_EXPANSION" "$Q" \
+  || { command grep -n 'preset applied' "$Q" >&2; fail "--quick did not expand to exactly the documented knob set"; }
+# ...and each knob must actually have taken effect, not merely been announced.
+command grep -q '=== warmups (1) ===' "$Q"  || fail "--quick did not set WARMUPS=1"
+command grep -q '=== measured (1) ===' "$Q" || fail "--quick did not set RUNS=1"
+command grep -q 'summary \[narrative\]' "$Q" || fail "--quick lost the narrative shape"
+command grep -q 'summary \[code\]' "$Q"      && fail "--quick did not set ONLY=narr"
+command grep -q 'PREFILL-' "$Q"              && fail "--quick did not set PREFILL_PROBE=0"
+command grep -qE '^  (run|warm)-[0-9]+ ' "$Q" && fail "--quick did not set QUIET=1 (per-run lines printed)"
+# The banner must survive a tail: a reader who scrolls to the summary and copies
+# it never sees the opening one.
+tail -8 "$Q" | command grep -q 'QUICK MODE' \
+  || fail "the non-canonical warning must be repeated at the END of the run"
+echo "  ✓ --quick expands to exactly the documented set, and every knob took effect"
+
+# --- 19. --quick guardrails: no card, explicit env wins, QUICK=1 parity -----
+if out="$(CARD=snapshot bash "$BENCH" --quick 2>&1)"; then
+  fail "CARD under --quick must be refused (a card from n=1 data has a zero noise band)"
+fi
+command grep -q 'incompatible' <<<"$out" || fail "the CARD refusal must say why: $out"
+command grep -q 'noise band' <<<"$out" \
+  || fail "the CARD refusal must name the degenerate-noise-band reason"
+# An explicitly-set knob wins over the preset AND is reported — silently
+# overriding what the operator typed makes the run a third protocol.
+run_bench_bare healthy "$((PORT_BASE+18))" "$TMP/quickov.out" "--quick" RUNS=3
+command grep -q 'your env kept  : RUNS=3 (preset wanted 1)' "$TMP/quickov.out" \
+  || { command grep -n 'preset\|env kept' "$TMP/quickov.out" >&2; fail "an explicit knob must win over the preset and be REPORTED"; }
+command grep -q '=== measured (3) ===' "$TMP/quickov.out" || fail "the explicit RUNS=3 did not take effect"
+# QUICK=1 must be the same thing as --quick (the issue offers both spellings).
+run_bench_bare healthy "$((PORT_BASE+19))" "$TMP/quickenv.out" "" QUICK=1
+command grep -qF "preset applied : $QUICK_EXPANSION" "$TMP/quickenv.out" \
+  || fail "QUICK=1 must behave exactly like --quick"
+# Unknown arguments are rejected rather than silently ignored.
+bash "$BENCH" --not-a-flag >/dev/null 2>&1 && fail "an unknown argument must be rejected"
+echo "  ✓ --quick guardrails: card refused, explicit env wins + reported, QUICK=1 parity"
+
+# --- 20. --quick is additive: a default run carries none of it --------------
+for unwanted in 'QUICK MODE' 'preset applied'; do
+  command grep -qF "$unwanted" "$H" && fail "a default run grew --quick output: $unwanted"
+done
+out=$(PREFLIGHT_NO_AUTODETECT=1 CONTAINER=none BENCH_MOCK=1 bash "$BENCH" --quick 2>/dev/null)
+command grep -q 'QUICK MODE' <<<"$out" \
+  && fail "BENCH_MOCK output must stay byte-identical even under --quick (two shipped tests parse it)"
+echo "  ✓ --quick is additive: default runs and BENCH_MOCK output are untouched"
 
 echo "test-bench-capture: ok"

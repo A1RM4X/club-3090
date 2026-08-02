@@ -183,6 +183,19 @@ The baseline is any previously saved `bench.sh` log. Parsing is strict: a log th
 fingerprint or summary blocks fails with `baseline unparseable: <why>` rather than rendering half a
 delta — and the run's own measurements are still printed.
 
+**`--quick` runs cannot be carded.** `bash scripts/bench.sh --quick` is a preset over existing knobs
+(`WARMUPS=1 RUNS=1 ONLY=narr PREFILL_PROBE=0 QUIET=1`) for A/B sweeps where the canonical protocol
+dominates wall-clock and only a direction is needed. It is n=1, so it has **no CV** — and the A/B
+card's noise band *defaults to 2× the worst decode CV across both arms*, which would then be zero and
+render every delta as significant. `CARD=` under `--quick` is refused for that reason. Card the arms
+you intend to publish; use `--quick` to find out which ones those are.
+
+And the caveat that outlives the flag: **`--quick` removes *within-boot* samples, not the need for
+≥2 boots.** Pool allocation on the CPU-offload MoE path swings ~20% between boots of a
+byte-identical config (4949 vs 3942 slots) and throughput tracked it (−12%) — enough to flip a
+same-day "22L is the best no-spec config" from first to last once the arm was confirmed at 2 reps.
+A cheaper arm makes that mistake easier to make, not harder.
+
 ## What `bench.sh` now fills in for you
 
 `bench.sh` carries a capture layer (`scripts/lib/capture.sh`) that auto-fills most of the
