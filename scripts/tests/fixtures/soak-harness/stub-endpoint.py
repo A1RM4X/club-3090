@@ -8,7 +8,11 @@ death, canvas-granularity single-chunk responses, and normal autoregressive
 streaming without a GPU, a container, or a real engine.
 
 Usage:
-  stub-endpoint.py <port-file> <plan-file> <vram-file>
+  stub-endpoint.py <port-file> <plan-file> <vram-file> [alive-file]
+
+When <alive-file> is given, /v1/models answers 200 only while that path exists.
+Deleting it makes the endpoint stop answering without stopping the process —
+which is how the report tests simulate an engine that crashed mid-run.
 
 Plan directive syntax (one per line, '#' comments and blanks ignored):
 
@@ -45,6 +49,7 @@ PLAN = []
 PLAN_IDX = [0]
 PLAN_LOCK = threading.Lock()
 VRAM_FILE = [""]
+ALIVE_FILE = [""]
 
 
 def next_directive():
@@ -89,6 +94,10 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.path.rstrip("/").endswith("/v1/models"):
+            if ALIVE_FILE[0] and not pathlib.Path(ALIVE_FILE[0]).exists():
+                # The "engine" has crashed: still listening, no longer serving.
+                self.send_error(503, "engine down")
+                return
             payload = json.dumps({"data": [{"id": "stub-model", "object": "model"}]}).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
@@ -170,6 +179,7 @@ class Handler(BaseHTTPRequestHandler):
 def main():
     port_file, plan_file, vram_file = sys.argv[1], sys.argv[2], sys.argv[3]
     VRAM_FILE[0] = vram_file
+    ALIVE_FILE[0] = sys.argv[4] if len(sys.argv) > 4 else ""
     for raw in pathlib.Path(plan_file).read_text(encoding="utf-8").splitlines():
         line = raw.split("#", 1)[0].strip()
         if not line:
