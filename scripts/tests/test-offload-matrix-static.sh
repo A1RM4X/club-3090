@@ -9,6 +9,7 @@
 # is not a crash — it is a plausible wrong number. So these assert structure, never
 # throughput values. See issue #824.
 set -euo pipefail
+export PYTHONUTF8="${PYTHONUTF8:-1}"   # repo rule: locale must not decide python decoding
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 SWEEP="$ROOT_DIR/scripts/offload-matrix.sh"
 REND="$ROOT_DIR/scripts/offload-matrix-render.py"
