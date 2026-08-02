@@ -183,6 +183,19 @@ The baseline is any previously saved `bench.sh` log. Parsing is strict: a log th
 fingerprint or summary blocks fails with `baseline unparseable: <why>` rather than rendering half a
 delta — and the run's own measurements are still printed.
 
+**`--quick` runs cannot be carded.** `bash scripts/bench.sh --quick` is a preset over existing knobs
+(`WARMUPS=1 RUNS=1 ONLY=narr PREFILL_PROBE=0 QUIET=1`) for A/B sweeps where the canonical protocol
+dominates wall-clock and only a direction is needed. It is n=1, so it has **no CV** — and the A/B
+card's noise band *defaults to 2× the worst decode CV across both arms*, which would then be zero and
+render every delta as significant. `CARD=` under `--quick` is refused for that reason. Card the arms
+you intend to publish; use `--quick` to find out which ones those are.
+
+And the caveat that outlives the flag: **`--quick` removes *within-boot* samples, not the need for
+≥2 boots.** Pool allocation on the CPU-offload MoE path swings ~20% between boots of a
+byte-identical config (4949 vs 3942 slots) and throughput tracked it (−12%) — enough to flip a
+same-day "22L is the best no-spec config" from first to last once the arm was confirmed at 2 reps.
+A cheaper arm makes that mistake easier to make, not harder.
+
 ## What `bench.sh` now fills in for you
 
 `bench.sh` carries a capture layer (`scripts/lib/capture.sh`) that auto-fills most of the
@@ -221,6 +234,36 @@ Add these four lines to the checklist in both templates. Each is printed by the 
 - [ ] **VRAM growth / leak delta** — labelled *growth* when an expert cache is active (its pool and
       graphs allocate lazily on first inference, so one run grows VRAM by design) and *leak*
       otherwise. Only a monotonic rise across REPEATED runs is evidence of a leak.
+- [ ] **no `⚠ decode-win` line** — a run carrying one measured at least one **zero-width decode
+      window**, so `decode_TPS` for that shape is over fewer runs than `n` says (or, when *every*
+      run was zero-width, is `wall_TPS` under a `decode_TPS` label). See below.
+
+### Canvas-granularity models: quote `wall_TPS`, not `decode_TPS`
+
+`decode_TPS = tokens / (wall − TTFT)` assumes token-by-token autoregressive streaming. A
+**block-diffusion (dLLM) model denoises a whole canvas in parallel** and the SSE endpoint emits
+roughly one chunk per completed canvas — so any response that fits in one canvas arrives as a single
+chunk, `TTFT == wall`, and the decode window is zero-width. Dividing by it produced
+`decode_TPS=690000000.00` and a shape summary reading `mean=2728143.37 CV=223.6%`, which three
+community reports pasted as measurements (#809, #822).
+
+The run now handles this itself:
+
+| Situation | What the run prints |
+|---|---|
+| One run's decode window is zero-width | `decode_TPS=   n/a  (decode window … % of wall — single-block emission …)`. Never a number. |
+| Some runs degenerate, some not | The degenerate runs are **excluded** from `decode_TPS`, and the exclusion is stated: `decode-window  unmeasurable on 1/5 run(s) …`. |
+| Every run degenerate | `decode_TPS` is **derived** as completion/wall — which *is* `wall_TPS` by construction — and is labelled `DERIVED, NOT MEASURED` on the next line. It includes prefill. |
+| The shape reads canvas-granularity | `⚠ CANVAS GRANULARITY` names the class and points at `wall_TPS` as the headline. |
+
+**On a card for one of these models, put `wall_TPS` in the throughput row and say `decode: n/a
+(canvas granularity)`.** A `decode_TPS` copied off such a run is either a divide-by-noise artifact or
+`wall_TPS` wearing the wrong label; neither is comparable to an autoregressive row.
+
+Set `DECODE_GRANULARITY=canvas` to declare the class up front rather than waiting for the run to
+classify it, or `=token` to suppress the classification on a model you know is autoregressive. The
+per-run `n/a` guard is **not** overridable — a zero-width window has no decode rate whatever the
+label says.
 
 Two numbers on the card need their provenance stated, because both are easy to quote wrongly:
 
@@ -231,6 +274,26 @@ Two numbers on the card need their provenance stated, because both are easy to q
 - **Draft acceptance — never without its fire rate.** A drafter measured at 0.992 acceptance that
   fired on 5 of ~20 requests contributes almost nothing end-to-end. The run prints both.
 
+### `PP tok/s` — which prefill number belongs on a card
+
+Two different things have carried this label, and only one of them is a measurement:
+
+| Line | What it is | Card-worthy |
+|---|---|---|
+| `prefill tok/s` (in a `[prefill-<N>k]` summary) | **Client-side**: `prompt_tokens / TTFT` over a cache-busted haystack at a stated depth. CV 0.3–1.5%. | **Yes — this is the prefill number.** |
+| `PP tok/s` / `PP tok/s (engine log, windowed …)` | **Scraped** from the engine's own stats log — vLLM's `Avg prompt throughput`, averaged over its ~10 s logging window. | Only with its depth and the "indicative only" label, and only when the run printed it. |
+
+On the canonical bench prompts (~15 tokens) the windowed average is mostly idle time, and it renders
+as `PP tok/s mean=2.00 CV=55.9%` — shaped exactly like a measurement. Three community reports pasted
+it as one (#817, #769, #822). The run now prints it only when it could be a rate at all — prompt
+≥ 1000 tok **and** mean ≥ 50 tok/s **and** CV ≤ 100% — and otherwise says
+`n/a (engine-log scrape suppressed: <reason>)` and points at the client-side line. All three
+conditions are load-bearing: the windowed variant inside a prefill section clears the first two at
+`mean=1127.30 CV=171.9%` (min 13 / max 8044) and is still not a rate.
+
+Thresholds: `CAP_PP_MIN_PROMPT_TOKS` / `CAP_PP_MIN_TPS` / `CAP_PP_MAX_CV` (defined in
+`scripts/lib/capture.sh`; raise them, don't remove the gate).
+
 ### Knobs worth setting
 
 | Env | Why |
@@ -239,4 +302,5 @@ Two numbers on the card need their provenance stated, because both are easy to q
 | `ENDPOINT=chat` \| `completion` | `chat` (default) applies the model's template — the historical behaviour, so numbers stay comparable. `completion` drives raw `/v1/completions` with no template, for base models. Numbers are **not** comparable across modes. |
 | `STREAM_CALIB=1` | ~3 s STREAM-triad ceiling on the host, so the derived miss-path RAM demand can be stated as a fraction ("~29 of ~99 GB/s"). Off by default. The *contention* probe (co-running STREAM during decode) is deliberately not included — it perturbs the run by construction. |
 | `FORCE_TOKENS=<n>` | The fix when `n-usable < n`. |
+| `DECODE_GRANULARITY=canvas` \| `token` \| `auto` | Declares whether `decode_TPS` means anything for this model (see above). `auto` (default) classifies from the measured runs. |
 | `CAPTURE=0` | Suppress the capture layer entirely (for a harness parsing the older output shape). |

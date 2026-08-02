@@ -39,6 +39,18 @@
 #   QUIET              Set to 1 to skip per-run lines (just print summary)
 #   PP                 Set to 1 to add the long-prompt PP fallback probe.
 #                      llama.cpp containers enable this automatically.
+#                      NOTE (#817): the `PP tok/s` line scraped from the ENGINE
+#                      LOG is a ~10 s window average, and on the canonical ~15-tok
+#                      prompts it is not a prefill rate at all — it rendered as
+#                      `mean=2.00 CV=55.9%` and three community reports pasted it
+#                      as data. It now prints only when it could be a rate
+#                      (prompt >= 1000 tok, mean >= 50 tok/s, CV <= 100%) and is
+#                      labelled `(engine log, windowed — indicative only)` when it
+#                      does; otherwise it says n/a WITH THE REASON and points at
+#                      the client-side `prefill tok/s`, which is trustworthy at
+#                      CV 0.3-1.5%. Thresholds live in scripts/lib/capture.sh and
+#                      are overridable via CAP_PP_MIN_PROMPT_TOKS /
+#                      CAP_PP_MIN_TPS / CAP_PP_MAX_CV.
 #   PP_FALLBACK_TOKENS Approximate filler-token target for PP=1. Default: 10000
 #   PP_MAX_TOKENS      Completion cap for the PP fallback request. Default: 16
 #   PREFILL_PROBE      Set to 0 to skip the canonical two-depth prefill/TTFT
@@ -62,6 +74,22 @@
 #                      generation — you must force the length to measure sustained
 #                      throughput. vLLM-oriented (ignore_eos/min_tokens). 0 = off
 #                      (model decides length). Default: 0.
+#   DECODE_GRANULARITY How this model emits tokens, which decides whether
+#                      `decode_TPS` means anything at all (#809).
+#                        auto   (default) classify from the measured runs
+#                        token  autoregressive — decode_TPS is a decode rate
+#                        canvas block diffusion (dLLM): the model denoises a whole
+#                               canvas in parallel and the SSE endpoint emits ~one
+#                               chunk per canvas, so TTFT == wall on any response
+#                               that fits in one block and the decode window is
+#                               zero-width. decode_TPS is NOT a decode rate for
+#                               this class; the headline number is wall_TPS.
+#   BENCH_DEGEN_WINDOW_FRAC
+#                      A run whose decode window is below this fraction of its own
+#                      wall time has no measurable decode rate and prints n/a
+#                      rather than a number. Default: 0.05 — an AR decode window
+#                      is ~the whole wall, so this sits ~20x away from any AR run
+#                      and cannot fire on one.
 #
 # Capture knobs (the always-on capture layer — scripts/lib/capture.sh):
 #   SERVER_LOG         Path to a BARE-METAL server log. CONTAINER=none runs used to
@@ -118,8 +146,22 @@
 #     CARD=snapshot bash scripts/bench.sh | tee run-A.log
 #     CARD=ab BASELINE=run-A.log KNOB=moe-cache bash scripts/bench.sh
 #
+# Presets (#832 — `--help` prints the same text):
+#   --quick / QUICK=1  WARMUPS=1 RUNS=1 ONLY=narr PREFILL_PROBE=0 QUIET=1
+#                      A preset over existing knobs; no new measurement code. For
+#                      A/B sweeps where the canonical protocol dominates wall-clock
+#                      and only a direction is needed. NOT CANONICAL: no CV, no code
+#                      shape, no prefill anchor, not a BENCHMARKS.md row, and CARD
+#                      rendering is refused. An explicitly-set env var wins over the
+#                      preset and the banner says which.
+#                      ⚠ It removes WITHIN-boot samples only. Any comparison that
+#                      requires a reboot still needs >=2 BOOTS per arm — pool
+#                      allocation on the CPU-offload MoE path swings ~20% between
+#                      boots of a byte-identical config.
+#
 # Usage:
 #   bash scripts/bench.sh
+#   bash scripts/bench.sh --quick             # directional A/B arm (non-canonical)
 #   ONLY=code bash scripts/bench.sh
 #   PP=1 bash scripts/bench.sh
 #   RUNS=10 bash scripts/bench.sh
@@ -138,6 +180,90 @@ set -euo pipefail
 # processes and nested scripts inherit it. Guarded by test-locale-utf8.sh.
 export PYTHONUTF8="${PYTHONUTF8:-1}"
 
+# ===========================================================================
+# CLI arguments (#832)
+# ===========================================================================
+# Everything else about this script is env-driven. `--quick` is a PRESET over
+# those same knobs and adds NO measurement code — the point of the issue was
+# discoverability, not capability: composing `WARMUPS=1 RUNS=1 ONLY=narr
+# PREFILL_PROBE=0 QUIET=1` by hand requires reading ~40 lines of the env block
+# and knowing that PREFILL_PROBE defaults to 1 and silently adds two long-prompt
+# requests (10K and 90K), the 90K of which is plausibly the single largest term
+# in a "quick" run.
+#
+# Parsed HERE, before the env defaults below, so "was this knob set explicitly?"
+# is still answerable — and before preflight.sh is sourced, since a sourced
+# script inherits our positional parameters.
+QUICK="${QUICK:-0}"
+# The documented expansion. This array IS the contract: --help prints it, the
+# banner prints it, and the suite asserts the run behaves as exactly this set.
+QUICK_PRESET=(WARMUPS=1 RUNS=1 ONLY=narr PREFILL_PROBE=0 QUIET=1)
+
+bench_usage() {
+  cat <<USAGE
+Usage: bash scripts/bench.sh [--quick] [--help]
+
+bench.sh is env-driven; see the header block of this file for the full knob list.
+
+  --quick    ${QUICK_PRESET[*]}
+             1 warmup + 1 measured run, narrative only, no prefill probe.
+             Directional signal for A/B sweeps. Equivalent to QUICK=1.
+
+             NOT CANONICAL. It gives up:
+               * the 4 other measured runs, so there is NO CV and no way to tell
+                 a real delta from noise within the arm;
+               * the code shape (MTP/drafter acceptance differs sharply between
+                 prose and code — one half is not the pair);
+               * both prefill depths, so no prefill/TTFT anchor at all.
+             Single-run TPS is NOT comparable across boots, and the output is
+             not a BENCHMARKS.md row. CARD rendering is refused under --quick.
+
+             --quick removes WITHIN-boot samples. It does NOT remove the need
+             for >=2 BOOTS per arm on any comparison that requires a reboot
+             (-ub, -b, KV type, offload layout). Pool allocation on the
+             CPU-offload MoE path swings ~20% between boots of a byte-identical
+             config (4949 vs 3942 slots) and throughput tracked it (-12%); that
+             flipped "22L is the best no-spec config" from first to last once
+             the arm was confirmed at 2 reps.
+
+  -h, --help Print this and exit.
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --quick)   QUICK=1 ;;
+    -h|--help) bench_usage; exit 0 ;;
+    --)        shift; break ;;
+    *) echo "ERROR: unknown argument '$1'. bench.sh is env-driven — see --help." >&2; exit 2 ;;
+  esac
+  shift
+done
+
+QUICK_APPLIED=(); QUICK_KEPT=()
+if [[ "$QUICK" == "1" ]]; then
+  for _kv in "${QUICK_PRESET[@]}"; do
+    _k="${_kv%%=*}"; _v="${_kv#*=}"
+    # An explicit env var wins over the preset, and the banner says so — silently
+    # overriding what the operator typed is how a "quick" run turns into a
+    # different protocol than either of them intended.
+    if [[ -n "${!_k+x}" ]]; then
+      QUICK_KEPT+=("${_k}=${!_k} (preset wanted ${_v})")
+    else
+      printf -v "$_k" '%s' "$_v"
+      export "${_k?}"
+      QUICK_APPLIED+=("$_kv")
+    fi
+  done
+  if [[ -n "${CARD:-}" ]]; then
+    echo "ERROR: --quick and CARD=${CARD} are incompatible." >&2
+    echo "  A --quick run is n=1, so it has no CV — and the A/B card's noise band" >&2
+    echo "  DEFAULTS to 2x the worst decode CV across both arms, which is then zero." >&2
+    echo "  Every delta would render as significant. Render cards from canonical runs." >&2
+    exit 2
+  fi
+fi
+
 # Auto-detect running container + port (URL/CONTAINER env vars still win).
 # See scripts/preflight.sh::preflight_autodetect_endpoint.
 ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -146,6 +272,9 @@ if [[ -f "${ROOT_DIR}/scripts/preflight.sh" ]]; then
   source "${ROOT_DIR}/scripts/preflight.sh"
   preflight_autodetect_endpoint || true
 fi
+# The measurement heredoc shells out to the lib for the #817 PP plausibility gate,
+# so it needs the path even when the capture layer itself is off (CAPTURE=0).
+export BENCH_CAPTURE_LIB="${ROOT_DIR}/scripts/lib/capture.sh"
 URL="${URL:-http://localhost:8020}"
 # Resolve the served model from /v1/models when MODEL is unset (#372). The qwen
 # literal below is only a last resort if detection no-ops (endpoint unreachable).
@@ -171,6 +300,14 @@ PREFILL_RUNS="${PREFILL_RUNS:-3}"
 export PREFILL_PROBE PREFILL_DEPTHS PREFILL_RUNS
 ENABLE_THINKING="${ENABLE_THINKING:-0}"
 FORCE_TOKENS="${FORCE_TOKENS:-0}"
+# --- decode-granularity knobs (#809) ----------------------------------------
+DECODE_GRANULARITY="${DECODE_GRANULARITY:-auto}"
+case "$DECODE_GRANULARITY" in
+  auto|token|canvas) : ;;
+  *) echo "ERROR: DECODE_GRANULARITY must be 'auto', 'token' or 'canvas' (got '$DECODE_GRANULARITY')" >&2; exit 1 ;;
+esac
+BENCH_DEGEN_WINDOW_FRAC="${BENCH_DEGEN_WINDOW_FRAC:-0.05}"
+export DECODE_GRANULARITY BENCH_DEGEN_WINDOW_FRAC
 # --- capture layer knobs (see the header block) -----------------------------
 CAPTURE="${CAPTURE:-1}"
 ENDPOINT="${ENDPOINT:-chat}"
@@ -241,6 +378,36 @@ if ! curl -sf "${URL}/v1/models" >/dev/null; then
   echo "  Start with: cd compose && docker compose up -d" >&2
   exit 1
 fi
+
+# --- --quick banner (#832) --------------------------------------------------
+# Deliberately AFTER the BENCH_MOCK branch, so mock output stays byte-identical
+# for the harnesses that parse it. On stdout, so it lands in a tee'd log next to
+# the numbers it qualifies — a caveat that only exists in the operator's terminal
+# is a caveat that does not survive being pasted into an issue.
+quick_banner() {
+  echo "=============================================================================="
+  echo "⚠ QUICK MODE — NOT CANONICAL. Directional signal only."
+  if (( ${#QUICK_APPLIED[@]} )); then
+    echo "  preset applied : ${QUICK_APPLIED[*]}"
+  else
+    echo "  preset applied : (none — every knob was already set explicitly)"
+  fi
+  if (( ${#QUICK_KEPT[@]} )); then
+    echo "  your env kept  : ${QUICK_KEPT[*]}"
+  fi
+  echo "  gives up       : 4 measured runs (so NO CV — a single-run delta cannot be"
+  echo "                   told from noise), the code shape, both prefill depths."
+  echo "  ⚠⚠ --quick removes WITHIN-boot samples. It does NOT remove the need for"
+  echo "     >=2 BOOTS per arm on any reboot-requiring comparison (-ub, -b, KV type,"
+  echo "     offload layout). Pool allocation on the CPU-offload MoE path swings ~20%"
+  echo "     between boots of a byte-identical config (4949 vs 3942 slots) and"
+  echo "     throughput tracked it (-12%) — that flipped a same-day \"22L is the best"
+  echo "     no-spec config\" from first to last once the arm was confirmed at 2 reps."
+  echo "  Single-run TPS is NOT comparable across boots. This output is NOT a"
+  echo "  BENCHMARKS.md row — do not paste it into one."
+  echo "=============================================================================="
+}
+if [[ "$QUICK" == "1" ]]; then quick_banner; fi
 
 server_reasoning_on() {
   if curl -sf -m 3 "${URL}/props" 2>/dev/null | python3 -c '
@@ -619,12 +786,99 @@ def run_once(prompt, max_tokens):
         prompt_tokens = max(1, len(prompt.split()))
     return wall, ttft, completion_tokens, prompt_tokens
 
+# --- decode-window guard (#809) ---------------------------------------------
+# `decode_TPS = toks / (wall - TTFT)` assumes token-by-token AR streaming. A
+# canvas-granularity (block-diffusion) model denoises a whole canvas in parallel
+# and the SSE endpoint emits roughly ONE chunk per completed canvas: any response
+# that fits in a single canvas arrives as one chunk, TTFT == wall, and the decode
+# window is zero-width. The old `max(wall - ttft, 1e-6)` then divided by an
+# epsilon and printed `decode_TPS=690000000.00` as though it were a throughput
+# (#822, real output from a 2x5090 diffusiongemma run).
+#
+# The guard is a RATIO, not an absolute threshold, and that is what makes it safe
+# for AR models: a real AR decode window IS essentially the whole wall (TTFT is a
+# few percent of it), so 5% sits ~20x away from any autoregressive run and cannot
+# fire on one. When it does fire there is no decode rate to report — not a small
+# one, not a large one — so the column prints n/a and the run is excluded from the
+# decode statistics. wall_TPS is the honest number for such a run.
+try:
+    DEGEN_WINDOW_FRAC = float(os.environ.get("BENCH_DEGEN_WINDOW_FRAC", "0.05"))
+except ValueError:
+    DEGEN_WINDOW_FRAC = 0.05
+GRANULARITY = (os.environ.get("DECODE_GRANULARITY", "auto") or "auto").strip().lower()
+if GRANULARITY not in ("auto", "token", "canvas"):
+    GRANULARITY = "auto"
+
+
+def decode_window(wall, ttft):
+    """(decode_seconds, degenerate?). Degenerate means UNMEASURABLE, not slow."""
+    dt = wall - ttft
+    return dt, (wall <= 0 or dt <= 0 or dt < DEGEN_WINDOW_FRAC * wall)
+
+
+def classify_granularity(n_runs, degen_runs):
+    """(granularity, why). Declared wins; otherwise classify from the runs."""
+    if GRANULARITY in ("token", "canvas"):
+        return GRANULARITY, f"declared: DECODE_GRANULARITY={GRANULARITY}"
+    # A single degenerate run can be a fluke (a scheduler hiccup, an EOS on the
+    # first chunk). A MAJORITY of them across a shape is a property of the model.
+    if n_runs >= 2 and degen_runs * 2 >= n_runs:
+        return "canvas", (f"auto-detected: {degen_runs}/{n_runs} runs emitted their whole "
+                          f"completion inside one block, TTFT == wall")
+    return "token", ""
+
+
 def fmt(label, wall, ttft, toks):
-    decode_t = max(wall - ttft, 1e-6)
+    dt, degen = decode_window(wall, ttft)
     wtps = toks / wall if wall > 0 else 0
-    dtps = toks / decode_t
-    line = f"  {label:<10s} wall={wall:6.2f}s  ttft={ttft*1000:6.0f}ms  toks={toks:>4d}  wall_TPS={wtps:6.2f}  decode_TPS={dtps:6.2f}"
+    if degen:
+        # Never a number here. The historical divide-by-1e-6 is the defect (#809).
+        dtps = None
+        pct = (dt / wall * 100) if wall > 0 else 0.0
+        dcol = (f"decode_TPS={'n/a':>6s}  (decode window {max(dt, 0.0):.3f}s = {pct:.1f}% of wall "
+                f"— single-block emission, no measurable decode rate; quote wall_TPS)")
+    else:
+        dtps = toks / dt
+        dcol = f"decode_TPS={dtps:6.2f}"
+    line = f"  {label:<10s} wall={wall:6.2f}s  ttft={ttft*1000:6.0f}ms  toks={toks:>4d}  wall_TPS={wtps:6.2f}  {dcol}"
     return wtps, dtps, ttft, line
+
+# --- prompt-processing plausibility gate (#817) -----------------------------
+# The policy and its three thresholds live in ONE place — capture.sh's
+# cap_pp_plausible. Shelling out to it is deliberate: bench.sh has two print
+# sites for this scrape, and a second copy of the rule in python is exactly how
+# two callers of a shared scrape drift apart.
+CAPTURE_LIB = os.environ.get("BENCH_CAPTURE_LIB", "")
+
+
+def pp_pointer():
+    if os.environ.get("PREFILL_PROBE", "1") == "1":
+        return ("the trustworthy prefill number is the client-side `prefill tok/s` "
+                "summary (prompt_tokens/TTFT, cache-busted)")
+    return ("run with PREFILL_PROBE=1 (the default) or PP=1 for a client-side "
+            "prefill measurement")
+
+
+def pp_verdict(vals, prompt_tokens):
+    """(plausible?, reason) for a scraped PP sample. Fails CLOSED."""
+    if not vals:
+        return False, "no values scraped"
+    m = s.mean(vals)
+    cv = (s.stdev(vals) / m * 100) if len(vals) > 1 and m > 0 else 0.0
+    if not CAPTURE_LIB or not os.path.exists(CAPTURE_LIB):
+        # Without the gate we cannot tell a measurement from an artifact, and the
+        # artifact is the one that gets pasted into an issue. Refuse to print.
+        return False, "plausibility gate unavailable (scripts/lib/capture.sh not found)"
+    try:
+        p = subprocess.run(
+            ["bash", "-c", 'source "$1"; cap_pp_plausible "$2" "$3" "$4"', "_",
+             CAPTURE_LIB, f"{m:.4f}", f"{cv:.4f}", str(int(prompt_tokens))],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            text=True, timeout=20, check=False)
+    except Exception as e:
+        return False, f"plausibility gate failed to run ({e})"
+    return (p.returncode == 0), p.stdout.strip()
+
 
 def fmt_pp(label, wall, ttft, prompt_tokens):
     pp = prompt_tokens / max(ttft, 1e-6)
@@ -694,19 +948,29 @@ def run_set(label, prompt, max_tokens):
             print(f"  warm-{i+1}  FAIL: {e}")
     print(f"\n=== measured ({RUNS}) ===")
     walls, decodes, ttfts, toks_seen = [], [], [], []
+    ptoks_seen = []          # prompt size per run — the #817 plausibility gate needs it
+    degen_runs = 0           # runs with a zero-width decode window (#809)
     errors = 0
     mt = FORCE if FORCE > 0 else max_tokens
     phase_t0 = phase_start()
     for i in range(RUNS):
         try:
-            w, t, k, _ = run_once(prompt, max_tokens)
+            w, t, k, ptk = run_once(prompt, max_tokens)
             wtps, dtps, ttft, line = fmt(f"run-{i+1}", w, t, k)
             if not QUIET:
                 print(line)
+            rate = f"{dtps:.2f} decode TPS" if dtps is not None else f"{wtps:.2f} wall TPS (no decode window)"
             progress(f"[bench] {label} run {i+1}/{RUNS}: {k} tok in {w:.1f}s "
-                     f"({dtps:.2f} decode TPS, ttft {ttft*1000:.0f}ms)")
-            walls.append(wtps); decodes.append(dtps); ttfts.append(ttft)
-            toks_seen.append(k)
+                     f"({rate}, ttft {ttft*1000:.0f}ms)")
+            walls.append(wtps); ttfts.append(ttft)
+            # A degenerate run contributes NO decode value. Averaging in a
+            # divide-by-epsilon is how `decode_TPS mean=2728143.37 CV=223.6%`
+            # reached three community reports (#809).
+            if dtps is None:
+                degen_runs += 1
+            else:
+                decodes.append(dtps)
+            toks_seen.append(k); ptoks_seen.append(ptk)
         except Exception as e:
             errors += 1
             print(f"  run-{i+1}  FAIL: {e}")
@@ -724,21 +988,51 @@ def run_set(label, prompt, max_tokens):
         m = s.mean(xs)
         return (s.stdev(xs) / m * 100) if m > 0 else 0.0
 
+    gran, gran_why = classify_granularity(len(walls), degen_runs)
+    # Derived == "every run had a zero-width decode window", so the only rate
+    # available is completion/wall, which IS wall_TPS by construction.
+    derived = bool(walls) and not decodes
     SUMMARY["shapes"][label] = {
         "n": len(walls), "n_usable": len(usable), "errors": errors,
         "max_tokens": mt, "short_eos_floor": floor,
         "tokens": toks_seen,
         "wall_tps_mean": (s.mean(walls) if walls else 0.0),
         "wall_tps_cv": _cv(walls),
-        "decode_tps_mean": (s.mean(decodes) if decodes else 0.0),
-        "decode_tps_cv": _cv(decodes),
+        "decode_tps_mean": (s.mean(decodes) if decodes else (s.mean(walls) if walls else 0.0)),
+        "decode_tps_cv": (_cv(decodes) if decodes else _cv(walls)),
+        "decode_degenerate": degen_runs,
+        "decode_derived": derived,
+        "decode_granularity": gran,
         "ttft_mean_ms": (s.mean(ttfts) * 1000 if ttfts else 0.0),
         "ttft_std_ms": (s.stdev(ttfts) * 1000 if len(ttfts) > 1 else 0.0),
     }
     if walls:
         print(f"\n=== summary [{label}] (n={len(walls)}) ===")
         print(stats("wall_TPS",   walls))
-        print(stats("decode_TPS", decodes))
+        if decodes:
+            print(stats("decode_TPS", decodes))
+        else:
+            # #809 proposal item 1: DERIVE, don't zero — and never present the
+            # derived value bare. Printing nothing here would also strand the
+            # measurement-record producer, which keys off a `decode_TPS mean=`
+            # line and refuses to write a record without one.
+            print(stats("decode_TPS", walls))
+            print(f"  ⚠ decode_TPS above is DERIVED, NOT MEASURED: all {len(walls)} run(s) had a "
+                  f"zero-width decode")
+            print("    window, so it is completion/wall = wall_TPS by construction. It INCLUDES "
+                  "prefill and")
+            print("    must never be quoted as a decode rate (#809).")
+        if degen_runs and decodes:
+            print(f"  decode-window  unmeasurable on {degen_runs}/{len(walls)} run(s) "
+                  f"(decode window < {DEGEN_WINDOW_FRAC:.0%} of wall); "
+                  f"decode_TPS above is over the {len(decodes)} measured run(s)")
+        if gran == "canvas":
+            print(f"  ⚠ CANVAS GRANULARITY ({gran_why})")
+            print("    dLLM: block emission, decode window undefined. decode_TPS is NOT a decode "
+                  "rate for")
+            print("    this model class — the HEADLINE number is wall_TPS (#809).")
+            if GRANULARITY == "auto":
+                print("    Set DECODE_GRANULARITY=token if this model really is autoregressive.")
         print(f"  TTFT          mean={s.mean(ttfts)*1000:6.0f}ms  std={s.stdev(ttfts)*1000 if len(ttfts) > 1 else 0:5.0f}ms  min={min(ttfts)*1000:.0f}ms  max={max(ttfts)*1000:.0f}ms")
         print(f"  n-usable      {len(usable)}/{len(walls)}  (runs with >= {floor} tokens, "
               f"{SHORT_EOS_FRAC:.0%} of max_tokens={mt})")
@@ -753,8 +1047,16 @@ def run_set(label, prompt, max_tokens):
                      f"(short EOS) — see the summary block")
         if PP_MODE == "log":
             pp_vals = scrape_prompt_throughput(CONTAINER, len(walls))
-            if pp_vals:
-                print(stats("PP tok/s", pp_vals))
+            # #817: the canonical narrative/code prompts are ~15 tokens, and the
+            # engine's windowed prompt-throughput average over them is not a
+            # prefill rate. Print it only when it could be one.
+            pp_prompt = int(s.mean(ptoks_seen)) if ptoks_seen else 0
+            pp_ok, pp_why = pp_verdict(pp_vals, pp_prompt)
+            if pp_vals and pp_ok:
+                print(stats("PP tok/s", pp_vals) + "   (engine log, windowed — indicative only)")
+            elif pp_vals:
+                print(f"  PP tok/s       n/a (engine-log scrape suppressed: {pp_why})")
+                print(f"                 {pp_pointer()}")
             else:
                 print("  PP tok/s       n/a (engine log scrape unavailable; use PP=1 for the "
                       "long-prompt fallback, or SERVER_LOG=<path> on bare metal)")
@@ -862,7 +1164,7 @@ def run_prefill_probe():
                 continue
             print(f"  warm-1     FAIL: {e}")
         print(f"\n=== measured ({n}) ===")
-        pps, ttfts = [], []
+        pps, ttfts, ptoks_seen = [], [], []
         phase_t0 = phase_start()
         for i in range(n):
             try:
@@ -874,6 +1176,7 @@ def run_prefill_probe():
                          f"{pp:.1f} prefill tok/s, ttft {ttft*1000:.0f}ms")
                 pps.append(pp)
                 ttfts.append(ttft)
+                ptoks_seen.append(ptoks)
             except Exception as e:
                 print(f"  run-{i+1}    FAIL: {e}")
                 progress(f"[bench] {label} run {i+1}/{n}: FAIL: {e}")
@@ -895,8 +1198,17 @@ def run_prefill_probe():
             if PP_MODE == "log":
                 vals = scrape_prompt_throughput(CONTAINER, len(pps) * 2)
                 vals = [v for v in vals if v > 0][-len(pps):]
-                if vals:
-                    print(stats("PP tok/s (engine log, windowed)", vals))
+                # #817: the prompt IS long here, so the depth condition passes —
+                # but this variant still renders `mean=1127.30 CV=171.9%` (min 13
+                # / max 8044) when the sampled windows straddle idle and busy.
+                # Same gate, same single definition.
+                w_ok, w_why = pp_verdict(vals, int(s.mean(ptoks_seen)) if ptoks_seen else 0)
+                if vals and w_ok:
+                    print(stats("PP tok/s (engine log, windowed — indicative only)", vals))
+                elif vals:
+                    print(f"  PP tok/s (engine log, windowed) n/a (suppressed: {w_why})")
+                    print("                 the `prefill tok/s` line above is the client-side "
+                          "measurement for this depth")
             _pm = s.mean(pps)
             SUMMARY["shapes"][label] = {
                 "n": len(pps), "n_usable": len(pps), "errors": 0,
@@ -1080,7 +1392,9 @@ try:
     d = json.load(open(sys.argv[1], encoding="utf-8"))
 except Exception:
     sys.exit(1)
-xs = [v.get("decode_tps_mean", 0) for v in d.get("shapes", {}).values() if v.get("decode_tps_mean")]
+shapes = d.get("shapes", {}).values()
+xs = [v.get("decode_tps_mean", 0) for v in shapes
+      if v.get("decode_tps_mean") and not v.get("decode_derived")]
 print(f"{sum(xs)/len(xs):.2f}" if xs else "")
 ' "$CAP_WORK/summary.json" 2>/dev/null || true)"
       if [[ -n "$_eng" && -n "$_cli" ]]; then
@@ -1237,7 +1551,25 @@ except Exception:
     sys.exit(1)
 print(d.get("total_errors", 0))
 ' "$CAP_WORK/summary.json" 2>/dev/null || echo 0)"
-  CAP_TPS="${_cli:-0}"
+  # The status enum keys on A tps, and `_cli` only exists when an engine-side log
+  # was available to cross-check against. With no log — CONTAINER=none and no
+  # SERVER_LOG — a perfectly healthy run classified NO_TOKENS purely because the
+  # cross-check had nothing to compare with. Same hole now reachable a second way:
+  # a canvas-granularity run's decode mean is DERIVED and deliberately excluded
+  # from the cross-check (#809), which empties `_cli` on a run that measured fine.
+  # Fall back to the client-measured wall rate, which every successful run has.
+  CAP_TPS="${_cli:-}"
+  if [[ -z "$CAP_TPS" || "$CAP_TPS" == "0" ]]; then
+    CAP_TPS="$(python3 -c '
+import json, sys
+try:
+    d = json.load(open(sys.argv[1], encoding="utf-8"))
+except Exception:
+    sys.exit(1)
+xs = [v.get("wall_tps_mean", 0) for v in d.get("shapes", {}).values() if v.get("wall_tps_mean")]
+print(f"{sum(xs)/len(xs):.2f}" if xs else "0")
+' "$CAP_WORK/summary.json" 2>/dev/null || echo 0)"
+  fi
   CAP_STATUS="$(cap_status_classify "${CAP_TOKENS:-0}" "${CAP_TPS:-0}" "${CAP_ERRS:-0}" \
                   "$CAP_CACHE_WANTED" "${CAP_CACHE_OK:-1}" "${_byp:-0}")"
   echo "  status: ${CAP_STATUS}"
@@ -1278,6 +1610,14 @@ for name, v in d.get("shapes", {}).items():
     if n and u < n:
         print(f"  ⚠ n-usable   : {name} {u}/{n} runs above the short-EOS floor "
               f"({floor} tok) - the CV for this shape is not trustworthy")
+    dg = v.get("decode_degenerate", 0)
+    if n and dg:
+        gran = v.get("decode_granularity", "token")
+        tag = ("canvas granularity - dLLM block emission, decode window undefined"
+               if gran == "canvas" else "zero-width decode window")
+        note = " decode_TPS is DERIVED (= wall_TPS)." if v.get("decode_derived") else ""
+        print(f"  ⚠ decode-win : {name} {dg}/{n} run(s) unmeasurable - {tag}.{note}"
+              f" Quote wall_TPS, not decode_TPS (#809)")
 ' "$CAP_WORK/summary.json" || true
 
   # ---- BENCH CARD (opt-in: CARD=snapshot | ab) ----------------------------
@@ -1425,4 +1765,14 @@ if [[ "${CONTAINER:-}" != "none" ]] && command -v docker >/dev/null 2>&1 \
   echo ""
   echo "=== Last 3 SpecDecoding metrics ==="
   docker logs "${CONTAINER}" 2>&1 | grep "SpecDecoding metrics" | tail -3 || true
+fi
+
+# Repeated at the END on purpose (#832): a reader who tails the log, or who
+# scrolls to the summary and copies it, never sees the opening banner.
+if [[ "$QUICK" == "1" ]]; then
+  echo ""
+  echo "⚠ QUICK MODE — the numbers above are NOT canonical: n=1, no CV, narrative only,"
+  echo "  no prefill anchor. Not a BENCHMARKS.md row. For any comparison that needed a"
+  echo "  reboot, run >=2 BOOTS per arm — --quick cut the within-boot samples, not the"
+  echo "  between-boot variance. Drop --quick for the canonical protocol."
 fi

@@ -93,6 +93,33 @@ for f in "$LIB" "$BENCH"; do
 done
 echo "  ✓ no pgrep/pkill -f (self-match footgun)"
 
+# #809: the decode window must never be floored to an epsilon and divided by.
+# `max(wall - ttft, 1e-6)` is the exact expression that printed
+# `decode_TPS=690000000.00` on a block-diffusion model (#822).
+# `^[^#]*` keeps this to CODE — the defect is quoted verbatim in the comment that
+# explains it, and matching that would make the guard unwritable.
+if command grep -nE '^[^#]*max\(wall ?- ?ttft, ?1e-6\)' "$BENCH"; then
+  fail "bench.sh still floors the decode window to 1e-6 and divides by it (#809)"
+fi
+command grep -q 'DEGEN_WINDOW_FRAC' "$BENCH" \
+  || fail "bench.sh must guard the decode window by RATIO (#809)"
+echo "  ✓ no divide-by-epsilon decode window (#809)"
+
+# #817: bench.sh has TWO print sites for the engine-log PP scrape. Both must go
+# through the lib's gate — a copy of the thresholds in the python heredoc is
+# exactly how the two callers of a shared scrape drifted apart before.
+command grep -q 'cap_pp_plausible' "$LIB" || fail "capture.sh must define the PP plausibility gate (#817)"
+command grep -q 'cap_pp_plausible' "$BENCH" || fail "bench.sh must CALL the lib gate, not reimplement it (#817)"
+# `^[^#]*` keeps this to CODE — the header block names the three knobs so an
+# operator can find them, which is documentation, not a second implementation.
+for thresh in CAP_PP_MIN_PROMPT_TOKS CAP_PP_MIN_TPS CAP_PP_MAX_CV; do
+  command grep -qE "^[^#]*${thresh}" "$BENCH" \
+    && fail "bench.sh carries a copy of the PP threshold $thresh — it must live only in the lib"
+done
+[[ "$(command grep -c '^cap_pp_plausible()' "$LIB")" == "1" ]] \
+  || fail "cap_pp_plausible must be defined exactly once"
+echo "  ✓ PP plausibility policy defined once, in the lib (#817)"
+
 # grep is shimmed to ugrep in interactive shells on some rigs, which breaks exact
 # output matching. Every scrape in the lib must use `command grep`.
 bare=$(command grep -nE '(^|[|;&(]|\$\()\s*grep ' "$LIB" || true)
@@ -318,6 +345,34 @@ cap_ram_rd_mbps 0 4352 60 >/dev/null 2>&1 && fail "ram_rd must refuse to invent 
 [[ "$(cap_divergence_pct 30 32)" == "6.2" ]] || fail "divergence arithmetic changed"
 echo "  ✓ status enum precedence, derived-demand arithmetic, divergence"
 
+# --- PP plausibility gate against the REAL reported samples (#817) -----------
+# Every row below is a figure a human actually pasted into an issue as data.
+pp_case() {   # $1=expect(plausible|suppress) $2=mean $3=cv $4=prompt_toks $5=source
+  local out rc
+  # `set -e` aborts on a failing command substitution in an assignment, and this
+  # gate signals "suppress" with a non-zero exit BY DESIGN.
+  out="$(cap_pp_plausible "$2" "$3" "$4")" && rc=0 || rc=$?
+  if [[ "$1" == "plausible" ]]; then
+    (( rc == 0 )) || fail "$5: mean=$2 CV=$3% prompt=$4 should PRINT, gate said: $out"
+    [[ -z "$out" ]] || fail "$5: a plausible sample must print no reason, got: $out"
+  else
+    (( rc == 1 )) || fail "$5: mean=$2 CV=$3% prompt=$4 must be SUPPRESSED — it was printed as data"
+    [[ -n "$out" ]] || fail "$5: a suppressed sample must say WHY (a number that vanishes silently is its own defect)"
+  fi
+}
+pp_case suppress  2.00    55.9  15     "#769 — 65-char prompt"
+pp_case suppress  6.88    19.7  15     "#822 [code] shape"
+pp_case suppress  7.60    40.9  15     "#822 [narrative] shape"
+pp_case suppress  6.07    49.5  10000  "#822 prefill-10k windowed — long prompt, absurd rate"
+pp_case suppress  1127.30 171.9 90000  "#817 windowed-in-prefill — passes mean AND depth, CV is the only tell"
+pp_case plausible 9968.67 14.0  90000  "#822 prefill-90k windowed — the one that IS a rate"
+pp_case plausible 3950.40 0.0   9876   "PP fallback shape"
+# ...and the CV condition must be load-bearing on its own, or the #817 case above
+# would print: it clears both the depth and the rate floor.
+[[ "$(CAP_PP_MAX_CV=1000 cap_pp_plausible 1127.30 171.9 90000; echo rc=$?)" == "rc=0" ]] \
+  || fail "the CV condition is not what suppresses the windowed-in-prefill sample"
+echo "  ✓ PP gate: every figure pasted as data in #769/#822 is suppressed, with a reason"
+
 # ===========================================================================
 # TIER 1b — end-to-end bench.sh against the fake server
 # ===========================================================================
@@ -537,5 +592,237 @@ else
     || fail "STREAM_CALIB=1 produced neither a ceiling nor a degradation notice"
   echo "  ✓ STREAM_CALIB=1 degrades cleanly where numpy is absent (and is off by default)"
 fi
+
+# --- 12. canvas granularity: no divide-by-epsilon decode rate (#809) --------
+# A block-diffusion model denoises a whole canvas in parallel and the endpoint
+# emits ~one chunk per canvas, so TTFT == wall and the decode window is zero
+# width. master divided by 1e-6 and printed 8- and 9-digit "throughputs"
+# (decode_TPS=690000000.00, shape mean=2728143.37 CV=223.6% — #822, real).
+#
+# The realism bound below is the assertion that matters: NO decode figure
+# anywhere in the output, per-run or aggregate, may exceed it.
+REALISM_BOUND=100000
+
+assert_no_absurd_decode() {   # $1=file $2=context
+  python3 - "$1" "$2" "$REALISM_BOUND" <<'PY' || fail "an absurd decode figure was printed"
+import re, sys
+path, ctx, bound = sys.argv[1], sys.argv[2], float(sys.argv[3])
+bad = []
+for ln in open(path, encoding="utf-8"):
+    for m in re.finditer(r"decode_TPS[= ]\s*(?:mean=\s*)?([0-9]+(?:\.[0-9]+)?)", ln):
+        if float(m.group(1)) > bound:
+            bad.append(ln.rstrip())
+if bad:
+    sys.exit(f"{ctx}: decode figure above the realism bound ({bound:.0f}):\n" + "\n".join(bad))
+PY
+}
+
+run_bench canvas "$((PORT_BASE+10))" "$TMP/canvas.out" ONLY=narr
+C="$TMP/canvas.out"
+assert_no_absurd_decode "$C" "canvas run"
+command grep -q 'decode_TPS=   n/a' "$C" \
+  || { command grep -m2 'run-' "$C" >&2; fail "a zero-width decode window must print n/a, never a number"; }
+command grep -q 'single-block emission' "$C" \
+  || fail "the n/a must name WHY the window is unmeasurable"
+command grep -q '⚠ CANVAS GRANULARITY' "$C" \
+  || fail "an all-degenerate shape must be classified canvas-granularity (#809)"
+command grep -q 'HEADLINE number is wall_TPS' "$C" \
+  || fail "the canvas marker must name wall_TPS as the headline"
+command grep -q 'DERIVED, NOT MEASURED' "$C" \
+  || fail "with no measurable run the decode figure is derived and must say so"
+command grep -q '⚠ decode-win : narrative' "$C" \
+  || fail "the integrity panel must state the unmeasurable-window split"
+# ...and the run must not be mistaken for a failed one. A canvas run's decode mean
+# is DERIVED, so it is excluded from the engine cross-check — which used to leave
+# the status enum with no TPS at all and classify a healthy run NO_TOKENS.
+command grep -q 'status: NO_TOKENS' "$C" \
+  && { command grep -A3 'CAPTURE: INTEGRITY' "$C" >&2; fail "a healthy canvas run must not classify NO_TOKENS"; }
+# The record producer refuses to write a measured record without a parseable
+# `decode_TPS mean=` line, so suppressing the column outright would break it.
+command grep -qE '^\s+decode_TPS\s+mean=' "$C" \
+  || fail "the decode_TPS summary line must stay parseable (measurement_record.py keys off it)"
+echo "  ✓ canvas: n/a per run, derived+labelled aggregate, canvas marker, no absurd figure"
+
+# --- 13. the #822 SHAPE: some runs degenerate, some measurable --------------
+# Four plausible runs and one 690000000.00 is what produced mean=2728143.37.
+# The degenerate run must be EXCLUDED from the statistic, and the exclusion said
+# out loud — a quietly-dropped sample is its own defect.
+run_bench canvas_mixed "$((PORT_BASE+11))" "$TMP/mixed.out" ONLY=narr
+M="$TMP/mixed.out"
+assert_no_absurd_decode "$M" "canvas_mixed run"
+command grep -qE 'decode-window  unmeasurable on [0-9]+/[0-9]+ run\(s\)' "$M" \
+  || fail "excluding a run from decode_TPS must be stated, not silent"
+command grep -q 'decode_TPS above is over the' "$M" \
+  || fail "the summary must say how many runs the decode statistic actually rests on"
+python3 - "$M" <<'PY' || fail "the mixed shape did not produce a finite, interpretable decode CV"
+import re, sys
+txt = open(sys.argv[1], encoding="utf-8").read()
+m = re.search(r"^\s+decode_TPS\s+mean=\s*([\d.]+)\s+std=\s*([\d.]+)\s+CV=\s*([\d.]+)%", txt, re.M)
+assert m, "no decode_TPS summary line"
+mean, cv = float(m.group(1)), float(m.group(3))
+# master on this same scenario: mean=81584.17 CV=140.7%
+assert mean < 100000, f"decode mean {mean} is not interpretable"
+assert cv < 100, f"decode CV {cv}% — the degenerate run is still in the sample"
+PY
+echo "  ✓ canvas_mixed: degenerate run excluded from the statistic, and the exclusion is stated"
+
+# --- 14. AR models are untouched, and the guard is not overridable ----------
+# The healthy (autoregressive) run must carry NONE of the canvas machinery.
+for unwanted in 'decode_TPS=   n/a' 'CANVAS GRANULARITY' 'decode-win :' 'DERIVED, NOT MEASURED'; do
+  command grep -qF "$unwanted" "$H" \
+    && fail "an autoregressive run grew canvas output: $unwanted"
+done
+echo "  ✓ AR run carries none of the canvas machinery (output unchanged)"
+
+# DECODE_GRANULARITY=canvas declares the class on a model whose runs look AR.
+run_bench healthy "$((PORT_BASE+12))" "$TMP/declared.out" ONLY=narr RUNS=1 WARMUPS=0 \
+  DECODE_GRANULARITY=canvas
+command grep -q 'declared: DECODE_GRANULARITY=canvas' "$TMP/declared.out" \
+  || fail "DECODE_GRANULARITY=canvas must declare the class without waiting for auto-detection"
+# ...and declaring `token` must NOT buy back the divide-by-epsilon. The per-run
+# guard is unconditional: there is no decode rate to print, whatever the label.
+run_bench canvas "$((PORT_BASE+13))" "$TMP/forced.out" ONLY=narr RUNS=1 WARMUPS=0 \
+  DECODE_GRANULARITY=token
+assert_no_absurd_decode "$TMP/forced.out" "canvas run with DECODE_GRANULARITY=token"
+command grep -q 'CANVAS GRANULARITY' "$TMP/forced.out" \
+  && fail "DECODE_GRANULARITY=token must suppress the canvas classification"
+echo "  ✓ DECODE_GRANULARITY declares the class, and cannot re-enable the epsilon divide"
+
+# --- 15. PP scrape end-to-end: suppressed where meaningless (#817) ----------
+# The canonical narrative prompt is ~11 tokens on this fixture. The engine's
+# windowed prompt-throughput average over it is not a prefill rate and must not
+# render as one — `PP tok/s mean=2.00 CV=55.9%` reached three community reports.
+run_bench healthy "$((PORT_BASE+14))" "$TMP/pp.out" ONLY=narr RUNS=2 WARMUPS=1 \
+  PREFILL_PROBE=1 PREFILL_DEPTHS=2000 PREFILL_RUNS=2
+P="$TMP/pp.out"
+command grep -q 'PP tok/s       n/a (engine-log scrape suppressed:' "$P" \
+  || { command grep -n 'PP tok/s' "$P" >&2; fail "the short-prompt PP scrape must be suppressed (#817)"; }
+command grep -q 'a prompt this short cannot fill one' "$P" \
+  || fail "the suppression must state WHY, not just vanish"
+command grep -q 'client-side `prefill tok/s`' "$P" \
+  || fail "the suppression must point at the number that IS trustworthy"
+# The short-prompt shape must not print a numeric PP line at all.
+python3 - "$P" <<'PY' || fail "a short-prompt shape still printed a numeric PP tok/s"
+import re, sys
+blocks = re.split(r"^=== summary \[([^\]]+)\] \(n=\d+\) ===$", open(sys.argv[1], encoding="utf-8").read(), flags=re.M)
+for name, body in zip(blocks[1::2], blocks[2::2]):
+    if name.startswith("prefill-"):
+        continue
+    bad = re.search(r"^\s+PP tok/s\s+mean=", body, re.M)
+    assert not bad, f"shape [{name}] printed a numeric PP tok/s line: {bad.group(0)}"
+PY
+# ...while the DEEP probe, where the figure can be a rate, still prints — labelled.
+command grep -q 'PP tok/s (engine log, windowed — indicative only) mean=' "$P" \
+  || { command grep -n 'windowed' "$P" >&2; fail "a plausible windowed scrape must still print, labelled indicative"; }
+echo "  ✓ PP scrape: suppressed with a reason on short prompts, printed+labelled at depth"
+
+# --- 16. the CV condition fires at depth too (#817's second named case) -----
+# min 13 / max 8044 across the sampled windows: passes the depth and rate floors,
+# and is still not a rate.
+# Exported, not passed through run_bench: this one configures the SERVER, which
+# start_server launches from the ambient environment.
+export FAKE_PP_JITTER=13,8044,13,8044
+run_bench healthy "$((PORT_BASE+15))" "$TMP/ppcv.out" ONLY=narr RUNS=1 WARMUPS=1 \
+  PREFILL_PROBE=1 PREFILL_DEPTHS=2000 PREFILL_RUNS=2
+unset FAKE_PP_JITTER
+command grep -q 'PP tok/s (engine log, windowed) n/a (suppressed: scraped CV' "$TMP/ppcv.out" \
+  || { command grep -n 'windowed' "$TMP/ppcv.out" >&2; fail "a CV>100% windowed sample must be suppressed at depth (#817)"; }
+command grep -q 'is the client-side measurement for this depth' "$TMP/ppcv.out" \
+  || fail "the depth suppression must point at the client-side prefill line"
+echo "  ✓ windowed-in-prefill scrape suppressed on CV, pointing at the client-side number"
+
+# --- 17. a PLAUSIBLE short-shape scrape keeps the parseable line shape -------
+# measurement_record.py and rebench-report.py both key on `^\s+PP tok/s\s+mean=`.
+# The `(engine log, windowed — indicative only)` label is appended as a SUFFIX so
+# the number stays where the parsers look for it.
+LONGP="$(python3 -c 'print("calibration filler sentence with stable token shape. " * 200)')"
+run_bench healthy "$((PORT_BASE+16))" "$TMP/pplong.out" ONLY=narr RUNS=1 WARMUPS=1 \
+  PREFILL_PROBE=0 "PROMPT_NARR=$LONGP"
+python3 - "$TMP/pplong.out" <<'PY' || fail "a plausible PP line no longer matches the shipped parsers"
+import re, sys
+txt = open(sys.argv[1], encoding="utf-8").read()
+m = re.search(r"^\s+PP tok/s\s+mean=\s*([0-9.]+)\s+std=\s*([0-9.]+)\s+CV=\s*([0-9.]+)%", txt, re.M)
+assert m, "no parseable PP tok/s line on a long-prompt shape:\n" + "\n".join(
+    l for l in txt.splitlines() if "PP tok/s" in l)
+assert "indicative only" in m.string[m.start():m.string.find("\n", m.start())], \
+    "the plausible line must still carry its 'indicative only' qualifier"
+PY
+echo "  ✓ a plausible PP line keeps the shape measurement_record/rebench-report parse"
+
+# --- 18. --quick is a PRESET over existing knobs, and nothing more (#832) ----
+# Deliberately NOT run through run_bench: that helper exports RUNS/WARMUPS/
+# PREFILL_PROBE itself, which the preset would (correctly) refuse to overwrite,
+# so the test would prove nothing. This one sets only what hermeticity needs.
+QUICK_EXPANSION='WARMUPS=1 RUNS=1 ONLY=narr PREFILL_PROBE=0 QUIET=1'
+command grep -qF "QUICK_PRESET=($QUICK_EXPANSION)" "$BENCH" \
+  || fail "the --quick preset array drifted from the documented expansion (#832)"
+bash "$BENCH" --help > "$TMP/help.out" 2>&1 || fail "--help must exit 0"
+command grep -qF "$QUICK_EXPANSION" "$TMP/help.out" \
+  || fail "--help must print the exact knob set --quick expands to"
+for want in "NOT CANONICAL" "NO CV" "comparable across boots" "BENCHMARKS.md row" \
+            ">=2 BOOTS per arm"; do
+  command grep -qF "$want" "$TMP/help.out" \
+    || fail "--help is missing the guardrail text: $want"
+done
+echo "  ✓ --help documents --quick and every guardrail the issue asks for"
+
+run_bench_bare() {   # $1=scenario $2=port $3=outfile $4=script args (may be "") [VAR=VAL ...]
+  local scen="$1" port="$2" out="$3" argstr="$4"; shift 4
+  local -a bargs=(); read -r -a bargs <<< "$argstr"
+  start_server "$scen" "$port"
+  PATH="$TMP/bin:$PATH" PREFLIGHT_NO_AUTODETECT=1 CONTAINER=none \
+    SERVER_LOG="$SRV_LOG" SERVER_PID="$SRV_PID" \
+    URL="http://127.0.0.1:$port" MODEL=fake-model \
+    env "$@" timeout 300 bash "$BENCH" ${bargs[@]+"${bargs[@]}"} > "$out" 2>"${out}.err" || true
+  kill "$SRV_PID" 2>/dev/null || true; wait "$SRV_PID" 2>/dev/null || true; SRV_PID=""
+}
+
+run_bench_bare healthy "$((PORT_BASE+17))" "$TMP/quick.out" "--quick"
+Q="$TMP/quick.out"
+command grep -q '⚠ QUICK MODE — NOT CANONICAL' "$Q" || fail "--quick must print a non-canonical banner"
+command grep -qF "preset applied : $QUICK_EXPANSION" "$Q" \
+  || { command grep -n 'preset applied' "$Q" >&2; fail "--quick did not expand to exactly the documented knob set"; }
+# ...and each knob must actually have taken effect, not merely been announced.
+command grep -q '=== warmups (1) ===' "$Q"  || fail "--quick did not set WARMUPS=1"
+command grep -q '=== measured (1) ===' "$Q" || fail "--quick did not set RUNS=1"
+command grep -q 'summary \[narrative\]' "$Q" || fail "--quick lost the narrative shape"
+command grep -q 'summary \[code\]' "$Q"      && fail "--quick did not set ONLY=narr"
+command grep -q 'PREFILL-' "$Q"              && fail "--quick did not set PREFILL_PROBE=0"
+command grep -qE '^  (run|warm)-[0-9]+ ' "$Q" && fail "--quick did not set QUIET=1 (per-run lines printed)"
+# The banner must survive a tail: a reader who scrolls to the summary and copies
+# it never sees the opening one.
+tail -8 "$Q" | command grep -q 'QUICK MODE' \
+  || fail "the non-canonical warning must be repeated at the END of the run"
+echo "  ✓ --quick expands to exactly the documented set, and every knob took effect"
+
+# --- 19. --quick guardrails: no card, explicit env wins, QUICK=1 parity -----
+if out="$(CARD=snapshot bash "$BENCH" --quick 2>&1)"; then
+  fail "CARD under --quick must be refused (a card from n=1 data has a zero noise band)"
+fi
+command grep -q 'incompatible' <<<"$out" || fail "the CARD refusal must say why: $out"
+command grep -q 'noise band' <<<"$out" \
+  || fail "the CARD refusal must name the degenerate-noise-band reason"
+# An explicitly-set knob wins over the preset AND is reported — silently
+# overriding what the operator typed makes the run a third protocol.
+run_bench_bare healthy "$((PORT_BASE+18))" "$TMP/quickov.out" "--quick" RUNS=3
+command grep -q 'your env kept  : RUNS=3 (preset wanted 1)' "$TMP/quickov.out" \
+  || { command grep -n 'preset\|env kept' "$TMP/quickov.out" >&2; fail "an explicit knob must win over the preset and be REPORTED"; }
+command grep -q '=== measured (3) ===' "$TMP/quickov.out" || fail "the explicit RUNS=3 did not take effect"
+# QUICK=1 must be the same thing as --quick (the issue offers both spellings).
+run_bench_bare healthy "$((PORT_BASE+19))" "$TMP/quickenv.out" "" QUICK=1
+command grep -qF "preset applied : $QUICK_EXPANSION" "$TMP/quickenv.out" \
+  || fail "QUICK=1 must behave exactly like --quick"
+# Unknown arguments are rejected rather than silently ignored.
+bash "$BENCH" --not-a-flag >/dev/null 2>&1 && fail "an unknown argument must be rejected"
+echo "  ✓ --quick guardrails: card refused, explicit env wins + reported, QUICK=1 parity"
+
+# --- 20. --quick is additive: a default run carries none of it --------------
+for unwanted in 'QUICK MODE' 'preset applied'; do
+  command grep -qF "$unwanted" "$H" && fail "a default run grew --quick output: $unwanted"
+done
+out=$(PREFLIGHT_NO_AUTODETECT=1 CONTAINER=none BENCH_MOCK=1 bash "$BENCH" --quick 2>/dev/null)
+command grep -q 'QUICK MODE' <<<"$out" \
+  && fail "BENCH_MOCK output must stay byte-identical even under --quick (two shipped tests parse it)"
+echo "  ✓ --quick is additive: default runs and BENCH_MOCK output are untouched"
 
 echo "test-bench-capture: ok"
