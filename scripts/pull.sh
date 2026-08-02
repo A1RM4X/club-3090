@@ -32,6 +32,35 @@
 #
 # Opts: --yes  --force-download  --experimental-arch  --trust-remote-code
 #       --hf-home DIR  --out FILE (Path A)  --hardware SM (override nvidia-smi)
+#       --allow-xet  --verify-in-place   (download behaviour — see below)
+#
+# Download behaviour flags (club-3090 #804 / #812)
+# -------------------------------------------------------------------------
+#   --allow-xet         Permit rung 2 of the download ladder. The classic LFS
+#                       path (rung 1) is always tried first; if huggingface_hub
+#                       CLIENT-SIDE refuses it ("The file is too large to be
+#                       downloaded using the regular download method" — a hard
+#                       policy wall for files over 50 GB, not flakiness), this
+#                       flag lets the retry run with Xet enabled, but ONLY if
+#                       `hf_xet` is already importable. Nothing here ever
+#                       installs it. Xet has a stall / restart-from-zero history
+#                       on this stack, so it never engages without this flag,
+#                       and an independent sha256 gate runs afterwards either
+#                       way. Without the flag the ladder falls straight to
+#                       rung 3 (single-stream resumable curl against the
+#                       resolve endpoint) — slower, but universal.
+#                       Env equivalent: ALLOW_XET=1.
+#
+#   --verify-in-place   When a target file is ALREADY at the destination with no
+#                       HF download metadata beside it (hand-placed weights),
+#                       sha256 it against the hub instead of re-downloading, and
+#                       adopt it on a match (0 bytes over the wire). Off by
+#                       default because hashing a 40 GB file costs a full read.
+#                       The *announcement* of what was found and why a download
+#                       is (or isn't) starting is UNCONDITIONAL — this flag only
+#                       controls whether the hash is computed. A size match
+#                       alone is never treated as, or reported as, verification.
+#                       Env equivalent: VERIFY_IN_PLACE=1.
 #
 # All decision logic lives in scripts/lib/profiles/pull.py (this is a thin
 # argv pass-through, matching the generate-compose.sh / diagnose-profile.sh
@@ -75,6 +104,23 @@ set -euo pipefail
 export PYTHONUTF8="${PYTHONUTF8:-1}"
 
 ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# Download-behaviour flags (#804 / #812). Stripped HERE and turned into env, so
+# every downstream path — the gate, --json, --apply-swap — sees an argv it
+# already understands and `pull.py`'s parser is untouched. The bare ALLOW_XET /
+# VERIFY_IN_PLACE env vars from the issues keep working on their own; the flags
+# just set them for one invocation. Both default OFF: Xet is opt-in because of
+# its stall history here, and in-place hashing is opt-in because it costs a full
+# read of a multi-GB file.
+_pull_dlargs=()
+for _a in "$@"; do
+    case "$_a" in
+        --allow-xet)        export CLUB3090_ALLOW_XET=1 ;;
+        --verify-in-place)  export CLUB3090_VERIFY_IN_PLACE=1 ;;
+        *)                  _pull_dlargs+=("$_a") ;;
+    esac
+done
+set -- "${_pull_dlargs[@]+"${_pull_dlargs[@]}"}"
 
 # Intercept --json (strictly additive). Absent -> the original exec path,
 # byte-identical. Present -> strip it and hand the remaining argv to the
