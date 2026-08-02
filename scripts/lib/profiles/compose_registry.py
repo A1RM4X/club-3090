@@ -645,6 +645,16 @@ COMPOSE_REGISTRY = {
         status="caveats",
         status_note="Gemma-4-31B cyankiwi QAT-AWQ-INT4 (compressed-tensors, lm_head bf16), dual TP=2 BF16 KV @224K, stock vLLM v0.24.0 OVERLAY-FREE — the consolidation 31b (folds onto vllm-stable, retires the 31b's vllm-gemma-stable dependence). BF16 (not int8-PTH): on v0.24.0 int8-PTH allocates 262K but SILENTLY craters recall past ~32K (needs #40391, open/conflicting upstream — verified 2026-07-01, both cyankiwi + w4a16 crater identically; the SAME cyankiwi weights on v0.22.0+#40391 recall clean to 112K+). bf16 KV is overlay-free + no cliff. rebench-full VALIDATED 2026-07-02 @0.95/229376: verify-full 9/9 (tools+streaming-tool-calls+reasoning clean, MTP-off), verify-stress ALL 5 ceiling rungs to 210K (91%) with healthy VRAM margin 1162MB>1024 (the 0.97/245K thin-margin flag is resolved at 0.95/224K), bench decode ~59 TPS (CV 0.1%, TTFT 69ms), soak PASS (0 err · 0 MiB growth · 0/100 silent · p50 58.7 · 99.6% retention). tie_weights dodged (lm_head excluded), gemma4 tool+reasoning parsers native (#45588). CAVEATS: (1) MTP DISABLED — Gemma-4 MTP×tool-calling broken on v0.24.0 (vLLM #39043; #42006 closed-unmerged); (2) ~224K ceiling (bf16 ~2×/tok vs int8-PTH's 262K) — int8-PTH+#40391 (262K) returns free when #40391 merges. Supersedes gemma-int8-mtp/gemma-bf16-mtp/qat-w4a16 for v0.24.0. 8-pack deferred (maintainer call).",
     ),
+    "vllm/gemma-31b-multi-google-qat-w4a16": _entry(
+        model="gemma-4-31b", weights_variant="google-qat-w4a16", workload="long-ctx-single", chat_template="gemma-canonical",
+        engine="vllm-stable", drafter="gemma-it-assistant", kv_format="bf16",
+        tp=4, max_ctx=262144, max_num_seqs=2, mem_util=0.91,
+        compose_path="models/gemma-4-31b/vllm/compose/multi4/google-qat-w4a16/base.yml",
+        default_port=8034,
+        kvcalc_key="gemma-4-31b:gemma-dual",
+        status="caveats",
+        status_note="Official google/gemma-4-31B-it-qat-w4a16-ct (compressed-tensors W4A16), TP=4 BF16 KV @262K on stock vLLM v0.25.1 with official Gemma assistant MTP n=2. Production-gated 2026-07-28 on 4x RTX 3090 PCIe at 230W/card: 650,262-token / 14.84-GiB KV pool (2.48x at 262,144); recall passed through 257,544 tokens with 1,213 MiB/card free; verify-full passed chat, tools, streaming tools, reasoning, cascade, and profile AL floor; vision smoke identified a blue circle on red; continuous soak passed 100/100 with zero errors/silent outputs/VRAM growth and 104.2% TPS retention. Canonical decode 80.61 narrative / 92.34 code TPS; 10K/90K prefill 981/692 tok/s. Full 8-pack: 116/150 thinking-off and 122/150 thinking-on. Full n=1..4 sweep: all arms passed 20/20 streamed two-tool calls; n=2 changes narrative/code decode -2.2%/+11.7% (~+4.7% equal-weight aggregate) versus no MTP. CAVEATS: uses all four GPUs; near-max text leaves only 1.2 GiB/card, so vision plus near-max text is unvalidated.",
+    ),
 
     # Gemma-4-31B unsloth QAT W4A16 (compressed-tensors int4) — QAT-int4 fidelity alt to
     # autoround-int4. Same dual / int8-PTH-KV(#40391) / assistant-MTP path as gemma-int8-mtp.

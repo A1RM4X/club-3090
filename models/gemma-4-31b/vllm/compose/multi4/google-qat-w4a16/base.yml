@@ -1,0 +1,155 @@
+# ===========================================================================
+# Profile (at-a-glance):
+#   Model:     Gemma 4 31B — official Google QAT W4A16 (compressed-tensors INT4)
+#   Topology:  Quad 3090 (TP=4, PCIe; NVLink auto-detected via NVLINK_MODE)
+#   Drafter:   MTP n=2 (Google's official `gemma-4-31B-it-assistant`)
+#   KV:        bf16 (engine-default; overlay-free)
+#   Vision:    yes (live smoke-tested)
+#   Max ctx:   262144 native; MTP recall verified at 257544 prompt tokens
+#   Genesis:   N/A — Genesis is Qwen3-Next-specific
+#   Status:    ⚠️ Production w/ caveats
+#   Caveats:   Uses all four GPUs. MTP n=2 trades -2.2% narrative for +11.7% code decode
+#              versus no MTP. At 257K, 1,213 MiB/card remains; image requests pass at short
+#              context but vision plus a near-max text prompt is not validated.
+#   Quality:   8-pack 116/150 thinking-OFF (TC12·IF14·SO15·DE12·RM13·BF14·HA14·CLI22)
+#              and 122/150 thinking-ON (TC15·IF14·SO14·DE12·RM13·BF15·HA13·CLI26).
+#              Verify-full + stress to 257,544 + vision smoke pass. Soak 100/100, 0 errors,
+#              0 silent, 0 MiB growth, 104.2% TPS retention. Decode 80.61/92.34 narr/code;
+#              10K/90K prefill 981/692 tok/s. Live-gated 2026-07-28 at 230 W/card.
+#   Best for:  Full-native-context Gemma 4 coding, tools, and vision on 4× RTX 3090.
+# ---------------------------------------------------------------------------
+# Full-context profile for google/gemma-4-31B-it-qat-w4a16-ct on 4× RTX 3090.
+#
+# The checkpoint uses compressed-tensors pack-quantized W4A16 and excludes the
+# vision tower and tied lm_head from quantization. That should avoid the quantized
+# tie_weights failure seen with older AutoRound checkpoints. The live gate confirms
+# compatibility with the pinned vLLM image.
+#
+# BF16 KV carries the full native window at TP=4. INT8-PTH is deliberately excluded:
+# Gemma 4's mixed 256/512 head dimensions need the unresolved #40391 alignment fix,
+# and newer unpatched engines have shown a silent long-context recall cliff. FP8 KV
+# is unavailable on sm_86 for this attention path.
+#
+# vLLM #45588 fixes the legacy Gemma MTP parser failure on this pin: every n=1..4
+# arm passed 20/20 streamed two-tool calls. The full n-sweep selects n=2: versus
+# no MTP it changes narrative/code decode by -2.2%/+11.7% (~+4.7% equal-weight
+# aggregate). n=1 is aggregate-flat; n=3/n=4 regress aggregate throughput.
+#
+# Hardware metadata (parsed by scripts/preflight.sh):
+# Requires-min-vram-gb: 24
+# Engine-profile: vllm-stable
+# Requires-min-gpu-count: 4
+# Tensor-parallel: 4
+services:
+  vllm-gemma-4-31b-google-qat-w4a16-tp4:
+    image: ${VLLM_IMAGE:-vllm/vllm-openai:v0.25.1}
+    container_name: "${ESTATE_CONTAINER:-vllm-gemma-4-31b-google-qat-w4a16-tp4}"
+    restart: ${CLUB3090_RESTART:-unless-stopped}
+    ports:
+      - "${BIND_HOST:-0.0.0.0}:${ESTATE_PORT:-${PORT:-8034}}:8000"
+    volumes:
+      - ${MODEL_DIR:-../../../../../../models-cache}:/root/.cache/huggingface
+      # Google Gemma 4 CANONICAL chat template (published 2026-07-09) — vendored;
+      # the image-bundled example predates Google's fix (see the patch README).
+      - ../../../patches/google-canonical-chat-template/chat_template.jinja:/etc/club3090/gemma-canonical-template.jinja:ro
+      # torch.compile + Triton kernel caches — first boot warms (~5-7 min);
+      # subsequent boots reuse cached graphs (~3 min).
+      - ../../../cache/torch_compile_google_qat_w4a16:/root/.cache/vllm/torch_compile_cache
+      - ../../../cache/triton_google_qat_w4a16:/root/.triton/cache
+      # NVLink auto-detection — runs inside container at boot.
+      - ../../../../../../scripts/detect_nvlink.sh:/etc/club3090/detect_nvlink.sh:ro
+      # No overlay mounts: BF16 KV runs on the pinned stock vLLM image.
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=${ESTATE_GPUS:-${NVIDIA_VISIBLE_DEVICES:-all}}
+      # CUDA-level GPU mask — the runtime-agnostic half of GPU selection
+      # (#610): launch.sh --gpus exports GPU UUIDs here. CDI runtimes (NixOS,
+      # nvidia-ctk cdi) IGNORE NVIDIA_VISIBLE_DEVICES, so this mask is what
+      # actually pins cards there; on the classic runtime the UUID form is
+      # renumbering-proof. Unset → absent (no masking).
+      - CUDA_VISIBLE_DEVICES
+      - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN:-}
+      - HF_HUB_OFFLINE=${HF_HUB_OFFLINE:-${OFFLINE:-0}}
+      - TRANSFORMERS_OFFLINE=${TRANSFORMERS_OFFLINE:-${OFFLINE:-0}}
+      - VLLM_WORKER_MULTIPROC_METHOD=spawn
+      - NVLINK_MODE=${NVLINK_MODE:-auto}
+      - NCCL_CUMEM_ENABLE=0
+      - NCCL_P2P_DISABLE=1
+      - VLLM_NO_USAGE_STATS=1
+      - OMP_NUM_THREADS=1
+      - PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True,max_split_size_mb:512}
+      - VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
+      # verify-full profile floor: n=2 is throughput-positive despite AL occasionally <2.
+      - MTP_ACCEPT_MIN=${MTP_ACCEPT_MIN:-1.8}
+      - TRITON_CACHE_DIR=/root/.triton/cache
+    shm_size: "16gb"
+    ipc: host
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    entrypoint:
+      - /bin/bash
+      - -c
+      - |
+        # Overlay-free on the pinned stock vLLM image — just NVLink autodetect + serve.
+        source /etc/club3090/detect_nvlink.sh
+        if [ "$${_NVLINK_ENABLED:-0}" = "1" ]; then
+          exec vllm serve "$$@"
+        else
+          exec vllm serve --disable-custom-all-reduce "$$@"
+        fi
+      - --
+    command:
+      - --override-generation-config
+      - '{"temperature":${TEMP:-${TEMPERATURE:-1.0}},"top_p":${TOP_P:-0.95},"top_k":${TOP_K:-64},"min_p":${MIN_P:-0.0},"repetition_penalty":${REPEAT_PENALTY:-1.0}}'
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --model
+      - /root/.cache/huggingface/gemma-4-31b-google-qat-w4a16
+      - --served-model-name
+      - gemma-4-31b
+      - gemma-4-31b-google-qat-w4a16
+      - --tensor-parallel-size
+      - "${TP:-4}"
+      - --pipeline-parallel-size
+      - "${PP:-1}"
+      # ---- KV format: bf16 (engine-default, overlay-free). `auto` resolves to the
+      #      model dtype (bf16). int8-PTH is NOT used here (needs #40391, unmerged →
+      #      silent recall cliff on unpatched newer engines). Ada/Blackwell users MAY override
+      #      KV_DTYPE=fp8_per_token_head; sm_86 Ampere cannot (no fp8e4nv kernel).
+      - --kv-cache-dtype
+      - "${KV_DTYPE:-auto}"
+      # The model declares a native 262,144-token window. TP=4 + MTP n=2 measured a
+      # 650,262-token BF16 KV pool; recall passed at 257,544 prompt tokens.
+      - --max-model-len
+      - "${MAX_MODEL_LEN:-${CTX:-262144}}"
+      - --gpu-memory-utilization
+      # Keep >1 GiB physical VRAM outside vLLM for sustained agent/checkpoint overhead.
+      # Final MTP n=2 stress leaves 1,213 MiB at 0.91; another 1% would cross the gate.
+      - "${GPU_MEMORY_UTILIZATION:-0.91}"
+      # --max-num-seqs is a cap, not a KV reservation. Keep two streams available;
+      # the measured pool determines whether two long requests can overlap.
+      - --max-num-seqs
+      - "${MAX_NUM_SEQS:-2}"
+      # Vision tower: max_tokens_per_mm_item=2496 must fit in batched tokens.
+      - --max-num-batched-tokens
+      - "${MAX_NUM_BATCHED_TOKENS:-4096}"
+      - --trust-remote-code
+      # Tool-call support uses the native gemma4 ParserEngine plus Google's current
+      # canonical template. Single and streaming tool calls passed the live gate.
+      - --enable-auto-tool-choice
+      - --tool-call-parser
+      - gemma4
+      # Route Gemma-4's <|channel>thought…<channel|> reasoning into reasoning_content.
+      - --reasoning-parser
+      - gemma4
+      - --chat-template
+      - /etc/club3090/gemma-canonical-template.jinja
+      # Full n=1..4 sweep selects n=2 for this quant. Override only for re-benchmarking.
+      - --speculative-config
+      - '{"model":"/root/.cache/huggingface/gemma-4-31b-it-assistant","num_speculative_tokens":${SPEC_N_MAX:-2}}'

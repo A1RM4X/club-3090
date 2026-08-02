@@ -52,6 +52,19 @@ weights:
     engine: vllm
     kind: main
     verify_glob: "*.safetensors"
+  google-qat-w4a16:
+    path: gemma-4-31b-google-qat-w4a16
+    local_subdir: gemma-4-31b-google-qat-w4a16
+    size_gb: 22.0
+    format: compressed-tensors
+    status: production
+    hf_repo: google/gemma-4-31B-it-qat-w4a16-ct
+    hf_repos:
+      - google/gemma-4-31B-it-qat-w4a16-ct
+    revision: 52f3f65bc7a02d555763bc923bd1d9094898219d
+    engine: vllm
+    kind: main
+    verify_glob: "*.safetensors"
   qat-awq-int4:
     path: gemma-4-31b-qat-awq-int4
     local_subdir: gemma-4-31b-qat-awq-int4

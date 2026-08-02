@@ -56,6 +56,7 @@ assert_entry qwen3.6-27b:ubergarm-iq4ks ubergarm/Qwen3.6-27B-GGUF qwen3.6-27b-gg
 assert_entry qwen3.6-35b-a3b:autoround-int4 Intel/Qwen3.6-35B-A3B-int4-mixed-AutoRound qwen3.6-35b-a3b-autoround-int4
 assert_entry gemma-4-31b:autoround-int4 Intel/gemma-4-31B-it-int4-AutoRound gemma-4-31b-autoround-int4
 assert_entry gemma-4-31b:awq cyankiwi/gemma-4-31B-it-AWQ-4bit gemma-4-31b-it-AWQ-4bit
+assert_entry gemma-4-31b:google-qat-w4a16 google/gemma-4-31B-it-qat-w4a16-ct gemma-4-31b-google-qat-w4a16
 assert_entry gemma-4-31b:assistant google/gemma-4-31B-it-assistant gemma-4-31b-it-assistant
 assert_entry gemma-4-31b:dflash z-lab/gemma-4-31b-it-dflash gemma-4-31b-it-dflash
 assert_entry gemma-4-26b-a4b:autoround-int4-mixed Intel/gemma-4-26B-A4B-it-int4-mixed-AutoRound gemma-4-26b-a4b-autoround-int4-mixed
@@ -79,5 +80,6 @@ assert_lookup qwen3.6-27b-gguf/ubergarm-mtp-iq4ks/Qwen3.6-27B-MTP-IQ4_KS.gguf qw
 assert_lookup qwen3.6-27b-prism-eagle3/compressed qwen3.6-27b:prism_eagle3
 assert_lookup carnice-v2-27b-int4-recipe-d-bf16mtp/chat_template.jinja qwen3.6-27b:carnice-bf16mtp
 assert_lookup qwopus3.6-27b-int4-recipe-d-bf16mtp/config.json qwen3.6-27b:qwopus-bf16mtp
+assert_lookup gemma-4-31b-google-qat-w4a16/config.json gemma-4-31b:google-qat-w4a16
 
 echo "test-model-weights-registry: ok"

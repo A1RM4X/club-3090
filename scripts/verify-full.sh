@@ -26,6 +26,7 @@
 #
 # Usage:
 #   CONTAINER=<your-container> bash scripts/verify-full.sh
+#   MTP_ACCEPT_MIN=1.8 bash scripts/verify-full.sh  # profile-specific measured floor
 #
 # Env (optional):
 #   URL          Default: http://localhost:8020
@@ -509,9 +510,10 @@ except Exception as e:
 run_check "output_quality" check_output_quality
 
 # --------------------------------------------------------------------
-# 10. MTP acceptance length — assert spec-decode is contributing speedup.
-#     Mean AL >= 2.0 means each step accepts >=1 drafted token on average
-#     (target_only baseline = 1.0). Production sees AL 3.4-3.8 with n=3.
+# 10. MTP acceptance length — assert spec-decode is contributing.
+#     The default floor is 2.0 (target_only baseline = 1.0); production Qwen
+#     profiles see AL 3.4-3.8 with n=3. MTP_ACCEPT_MIN permits a profile-specific
+#     measured floor when a shallower drafter is independently throughput-positive.
 # --------------------------------------------------------------------
 check_mtp_acceptance() {
   echo "[9/9] MTP acceptance length threshold ..."
@@ -566,11 +568,21 @@ check_mtp_acceptance() {
     return 0
   fi
 
-  if python3 -c "import sys; sys.exit(0 if float('$al') >= 2.0 else 1)" 2>/dev/null; then
-    pass "MTP acceptance length = ${al} (>=2.0 — spec-decode contributing)"
+  local accept_min="${MTP_ACCEPT_MIN:-}"
+  if [[ -z "$accept_min" && "$CONTAINER" != "none" ]] && command -v docker >/dev/null 2>&1; then
+    accept_min="$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$CONTAINER" 2>/dev/null \
+      | awk -F= '$1 == "MTP_ACCEPT_MIN" {print $2; exit}')"
+  fi
+  accept_min="${accept_min:-2.0}"
+  if ! [[ "$accept_min" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+    fail "invalid MTP_ACCEPT_MIN=${accept_min}" "Set a non-negative numeric threshold."
+    return 1
+  fi
+  if python3 -c "import sys; sys.exit(0 if float('$al') >= float('$accept_min') else 1)" 2>/dev/null; then
+    pass "MTP acceptance length = ${al} (>=${accept_min} — spec-decode contributing)"
   else
-    fail "MTP acceptance length = ${al} (<2.0 — spec-decode degraded or off)" \
-         "Either MTP routing broken (P65 not active?) or accept rate collapsed. Check spec_decode kernel + Genesis env vars."
+    fail "MTP acceptance length = ${al} (<${accept_min} — below this profile's floor)" \
+         "Check MTP routing and the profile's measured acceptance/throughput evidence."
   fi
 }
 run_check "mtp" check_mtp_acceptance
