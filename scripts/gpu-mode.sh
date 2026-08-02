@@ -450,6 +450,24 @@ show_status() {
         m=$(curl -sf -m 2 http://localhost:8038/v1/models | python3 -c "import sys,json;d=json.load(sys.stdin);print(', '.join(x['id'] for x in d.get('data',[])))" 2>/dev/null)
         echo -e "  ${GREEN}▶${NC} gemma-12b @ :8038        → ${m:-unknown} (gemma4_unified, INT8 + bf16 KV + MTP, single card)"
     fi
+    if curl -sf -m 2 http://localhost:8033/v1/models >/dev/null 2>&1; then
+        _endpoint_up=1
+        local m
+        m=$(curl -sf -m 2 http://localhost:8033/v1/models | python3 -c "import sys,json;d=json.load(sys.stdin);print(', '.join(x['id'] for x in d.get('data',[])))" 2>/dev/null)
+        echo -e "  ${GREEN}▶${NC} gemma-qat @ :8033        → ${m:-unknown} (QAT W4A16 + INT8 PTH KV)"
+    fi
+    if curl -sf -m 2 http://localhost:8099/v1/models >/dev/null 2>&1; then
+        _endpoint_up=1
+        local m
+        m=$(curl -sf -m 2 http://localhost:8099/v1/models | python3 -c "import sys,json;d=json.load(sys.stdin);print(', '.join(x['id'] for x in d.get('data',[])))" 2>/dev/null)
+        echo -e "  ${GREEN}▶${NC} thinkingcap @ :8099      → ${m:-unknown} (AutoRound W4A16 served W4A8 + built-in MTP + 262K)"
+    fi
+    if curl -sf -m 2 http://localhost:8199/v1/models >/dev/null 2>&1; then
+        _endpoint_up=1
+        local m
+        m=$(curl -sf -m 2 http://localhost:8199/v1/models | python3 -c "import sys,json;d=json.load(sys.stdin);print(', '.join(x['id'] for x in d.get('data',[])))" 2>/dev/null)
+        echo -e "  ${GREEN}▶${NC} deckard @ :8199          → ${m:-unknown} (llama.cpp Q6_K + MTP, dual)"
+    fi
     if curl -sf -m 2 http://localhost:8090/v1/models >/dev/null 2>&1; then
         _endpoint_up=1
         echo -e "  ${GREEN}▶${NC} studio director @ :8090  → qwen3.5-4b-uncensored (prompt crafter, GPU0, llama.cpp)"
