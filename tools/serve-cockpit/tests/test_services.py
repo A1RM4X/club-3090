@@ -4125,11 +4125,18 @@ class TestServeOverrides:
 
 
 class TestBringGgufDownload:
-    """route-G [D]: a GGUF bring must fetch the picked quant's files directly (hf
-    download --include), NOT pull.sh — pull.sh aborts unsupported-format on a GGUF
-    repo (no config.json).  (2026-07-09 dogfood.)"""
+    """route-G [D]: a GGUF bring must fetch the picked quant's files directly
+    (--include), NOT pull.sh — pull.sh aborts unsupported-format on a GGUF repo
+    (no config.json).  (2026-07-09 dogfood.)
 
-    def test_gguf_includes_build_hf_download_cmd(self, tmp_path):
+    #804: and it must go through the hf_fetch module CLI, not a bare
+    `hf download`.  huggingface_hub client-side REFUSES the classic path above a
+    hard-coded 50 GB ceiling; a large monolithic GGUF is precisely the file that
+    trips it, and this funnel is precisely the path such files take.  The module
+    CLI carries the resilience ladder (classic LFS -> opt-in Xet -> re-resolved
+    raw curl) with a mandatory sha256 gate on every rung."""
+
+    def test_gguf_includes_build_hf_fetch_cmd(self, tmp_path):
         import asyncio
         d = CockpitData(tmp_path)
         cap = {}
@@ -4144,9 +4151,16 @@ class TestBringGgufDownload:
             "org/Repo-GGUF", "llamacpp/default",
             gguf_includes=["org_Repo-Q8_0.gguf", "mmproj-f16.gguf"]))
         c = cap["cmd"]
-        assert c[1] == "download" and "pull.sh" not in " ".join(c)     # hf download, not pull.sh
+        joined = " ".join(c)
+        assert "pull.sh" not in joined                                 # not the safetensors path
+        # The ladder, not a bare `hf download` — the whole point of the repoint.
+        assert c[:2] == ["python3", "scripts/lib/profiles/hf_fetch.py"], c
+        assert "download" not in c, "a bare `hf download` argv would re-inherit the 50 GB wall"
+        assert c[2] == "org/Repo-GGUF"
         assert "--local-dir" in c and str(d.bring_pull_dir("org/Repo-GGUF")) in c
         assert c.count("--include") == 2
+        # A re-run must adopt an already-correct 96 GB file, not re-pull it.
+        assert "--verify-in-place" in c
         assert cap["env"].get("HF_HUB_DISABLE_XET") == "1"             # resumable classic LFS
 
     def test_no_gguf_includes_uses_pull_sh(self, tmp_path):

@@ -210,6 +210,15 @@ later is exactly when the awkward facts get dropped.
 | **GPU** — VRAM / util | `CAPTURE: VRAM` (idle / peak / post, per device) and `CAPTURE: PCIe` (sm%, memctl%, host cpu%). |
 | **Cache** — hits start → end | `CAPTURE: EXPERT CACHE`, per device, with **marginal** and cumulative rates. |
 | **resource-cost row** (A/B) | pool slots + total MiB per device, straight from the census. |
+| **Interconnect** — the BENCHMARKS Rig cell's field 4 | `=== Interconnect (three layers) ===` footer: **layer 1** driver P2P grant (`topo -p2p` + kernel-module flavor), **layer 2** NCCL use (resolved `NCCL_P2P*`/`NVLINK_MODE`), **layer 3** engine custom-AR. Read it off the artifact instead of transcribing it from a different run's `report.sh` — that is how the cell went stale. |
+
+**Reading layer 3.** It has four states, and only one of them is a misconfiguration:
+`ENGAGED` (the engine's custom all-reduce is on) · `engine-VETOED` (vLLM disabled its custom AR at
+world>2 without NVLink — **expected**, and P2P is still live via NCCL peer transfers, #786) ·
+`OFF` (the container resolved to PCIe/no-P2P mode) · `custom-AR n/a` (llama.cpp-family engines split
+layers with plain copies; there is no all-reduce kernel to engage, so "off" would be a category
+error). A single-card run reports all three layers as `n/a — 1 GPU(s) visible` rather than printing
+nothing, so a reader never has to guess whether the block was suppressed or the rig was single-card.
 
 ### Additions to the Integrity panel
 
@@ -264,6 +273,13 @@ Set `DECODE_GRANULARITY=canvas` to declare the class up front rather than waitin
 classify it, or `=token` to suppress the classification on a model you know is autoregressive. The
 per-run `n/a` guard is **not** overridable — a zero-width window has no decode rate whatever the
 label says.
+
+`bench-agentic.sh` carries the identical guard and the identical two knobs: a turn with no
+measurable decode window prints `n/a` with `(decode window 0 — single-block emission; wall N tok/s)`,
+degenerate turns are excluded from the per-turn `Decode TPS` column with the exclusion stated, and
+the ramp closes with the same `⚠ CANVAS GRANULARITY` verdict. **The TTFT curve is unaffected** —
+TTFT is measured, not derived — so an agentic run against a dLLM still produces its reason for
+existing, just without a decode-rate column.
 
 Two numbers on the card need their provenance stated, because both are easy to quote wrongly:
 

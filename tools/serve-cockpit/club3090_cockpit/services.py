@@ -1390,9 +1390,21 @@ class CockpitData:
         if gguf_includes:
             # GGUF bring (route-G): pull.sh is the SAFETENSORS evaluate/download
             # path — it ABORTS `unsupported-format (no config.json)` on a GGUF repo.
-            # So fetch the picked quant's files DIRECTLY into the pull dir with the
-            # same guards as hf-download.sh (classic LFS = resumable; token survives
-            # a non-login shell).  One `--include` per pattern.  (2026-07-09 dogfood.)
+            # So fetch the picked quant's files DIRECTLY into the pull dir.
+            # One `--include` per pattern.  (2026-07-09 dogfood.)
+            #
+            # #804: this used to build a bare `hf download` argv, which inherits
+            # huggingface_hub's hard-coded 50 GB MAX_HTTP_DOWNLOAD_SIZE ceiling on
+            # the classic path — a client-side POLICY refusal, not flakiness, so
+            # retrying is futile. Large monolithic GGUFs are exactly the files that
+            # hit it (laguna-s-2.1-Q4_K_M.gguf, 96 GB, single file), and this funnel
+            # is exactly the path they take. Routed through the #855 module CLI so a
+            # GGUF pull gets the resilience ladder: classic LFS -> opt-in Xet ->
+            # per-attempt re-resolved raw curl, each rung announcing why the
+            # previous failed, and every rung sha256-gated against x-linked-etag.
+            # --verify-in-place adopts an already-correct file on a re-run instead
+            # of re-pulling it (a 96 GB file is not something to re-fetch to learn
+            # it was already fine).
             pull = self.bring_pull_dir(repo)
             env.setdefault("HF_HUB_DISABLE_XET", "1")
             env.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "30")
@@ -1404,8 +1416,8 @@ class CockpitData:
                         env["HF_TOKEN"] = tok
                 except OSError:
                     pass
-            hf_bin = shutil.which("hf") or str(Path.home() / ".local" / "bin" / "hf")
-            cmd = [hf_bin, "download", repo, "--local-dir", str(pull)]
+            cmd = ["python3", "scripts/lib/profiles/hf_fetch.py", repo,
+                   "--local-dir", str(pull), "--verify-in-place"]
             for pat in gguf_includes:
                 cmd += ["--include", pat]
         else:

@@ -108,6 +108,15 @@ services:
       # consumer Blackwell card, set it yourself (VLLM_USE_DEEP_GEMM=0). Unset =
       # vLLM's arch default (DeepGEMM stays on where it works).
       - VLLM_USE_DEEP_GEMM
+      # #809 — this model's decode class, declared in its profile YAML and
+      # injected by switch.sh/launch.sh. vLLM itself ignores it; it rides into
+      # the container so the bench/soak harnesses can read the served model's
+      # own declaration off `docker exec <c> env` instead of the operator having
+      # to remember `DECODE_GRANULARITY=canvas` on every run. This model
+      # denoises a 256-token canvas in parallel and emits ~one SSE chunk per
+      # canvas, so TTFT == wall on a single-canvas response and decode_TPS is
+      # NOT a decode rate for it — the headline number is wall_TPS.
+      - DECODE_GRANULARITY=${DECODE_GRANULARITY:-canvas}
       - PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True,max_split_size_mb:512}
       - VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
       - VLLM_ATTENTION_BACKEND=TRITON_ATTN

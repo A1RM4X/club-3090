@@ -20,7 +20,7 @@ For a *reply* answering a specific question (e.g. "where's the X YAML?"), you ca
 | 0 | **Update banner** (italic, above `---`) | Only on edits — "promoted 🧪 → ✅", "added cross-rig numbers". States *what changed and when*. | First publish. |
 | 1 | **Intro** — what shipped, one sentence | Name the slug in **bold**, the model, the engine, the topology. Credit the model/quant/drafter authors inline (`@handle` + HF link) — capability that isn't ours gets attributed up front. | Never. |
 | 2 | **Headline finding** | The single most interesting result, one line — the reason someone keeps reading. | Never. |
-| 3 | **🎴 Results Card** | The measured panel — ① Serving ② Quality (full 8-pack `/150`) ③ Takeaways. Author per [`RESULTS_CARD.md`](RESULTS_CARD.md). | Never — numbers are the point. |
+| 3 | **🎴 Results Card** | The measured panel — ① Serving ② Quality (full 8-pack `/150`) ③ Takeaways. Author per [`RESULTS_CARD.md`](RESULTS_CARD.md) — **v2**: the Quality table carries Std / CV / p50 / p95 and states `repeat = N`; Serving carries KV quality class, ctx/slot, power cap, three-layer interconnect and acceleration state. | Never — numbers are the point. |
 | 4 | **Why / context** | Why this model/config is worth shipping — the workload it serves, the trade it makes. (#350's "Why an uncensored model?" / "Why it's Production".) | A trivially-obvious ship. |
 | 5 | **Getting it** | Where the weights live (public HF repo + `hf download`), whether `setup.sh`/`launch.sh` auto-fetch, any engine-version floor. | — |
 | 6 | **Run it** | The exact `switch.sh` / `gpu-mode` command, the port + served model name, OWUI wiring. Copy-pasteable. | — |
@@ -42,28 +42,43 @@ We just shipped **`<engine>/<slug>`** — <one-sentence what-it-is>. It's **<Mod
 <!-- §2 headline -->
 The headline: **<the single most interesting finding, one line>.**
 
-<!-- §3 Results Card — author per docs/RESULTS_CARD.md -->
-## 🎴 Results Card — <rig>, <engine + version>, <thinking on/off>
+<!-- §3 Results Card — author per docs/RESULTS_CARD.md (v2) -->
+## 🎴 Results Card — <rig>, <engine + pin>, <thinking on/off>
 
 ### ① Serving
+**Stack** · <engine> <pin> · <model> <weights quant> · KV **<codec> (<quality class>)** · ctx <N><, ctx/slot <M>>
+**Placement** · <N>× <GPU>, <split mode> · expert offload: <summary / none> · power cap <W> W
+**Interconnect** · L1 driver P2P <granted/refused> · L2 NCCL <state> · L3 engine custom-AR <engaged/vetoed/off/n-a>
+**Acceleration** · moe-cache <pool GB, steady hit %> | off · spec-dec <drafter, draft-N, accept %> | off
+**Concurrency envelope** _(when probed)_ · knee N=<n>, aggregate <t/s> @knee
+
 | Config | Spec-dec | KV | ctx | Narr | Code | Accept | VRAM |
 |---|---|---|---|--:|--:|--:|--:|
 | <baseline / variant> | <none / MTP n=N / DFlash> | <kv> | <ctx> | <tps> | <tps> | <%> | <GB> |
 
 <n-sweep / context-ceiling / lift summary line>
 
-### ② Quality — core 8-pack (/150, <think setting>)
-| Pack | <A> | <B> |
-|---|--:|--:|
-| toolcall-15 | x | x |
-| instructfollow-15 | x | x |
-| structoutput-15 | x | x |
-| dataextract-15 | x | x |
-| reasonmath-15 | x | x |
-| bugfind-15 | x | x |
-| hermesagent-20 | x | x |
-| cli-40 | x | x |
-| **Total /150** | **x (y%)** | **x (y%)** |
+### ② Quality bench, thinking <on|off>, benchlocal-cli v<X.Y.Z>, repeat = <N>
+| Pack | Pass / Total | Score | Std | CV | p50 latency | p95 latency | Status |
+|---|---:|---:|---:|---:|---:|---:|---|
+| toolcall-15 (v1.0.1) | a / b | c% | d% | e | f s | g s | ok |
+| instructfollow-15 (v1.0.0) | a / b | c% | d% | e | f s | g s | ok |
+| structoutput-15 (v1.0.0) | a / b | c% | d% | e | f s | g s | ok |
+| dataextract-15 (v1.0.0) | a / b | c% | d% | e | f s | g s | ok |
+| reasonmath-15 (v1.0.0) | a / b | c% | d% | e | f s | g s | ok |
+| bugfind-15 (v1.0.1) | a / b | c% | d% | e | f s | g s | ok |
+| hermesagent-20 (v1.0.0) | a / b | c% | d% | e | f s | g s | ok |
+| cli-40 (v1.0.2) | a / b | c% | d% | e | f s | g s | ok |
+| **TOTAL** | **A / B** | **C%** | | | | | |
+
+**Equivalent to: X/150**
+
+<details>
+<summary>Raw data</summary>
+
+<the full benchlocal-cli run output, verbatim>
+
+</details>
 
 <one-line read of the quality result — tie? regression? lossless spec-dec?>
 Plus: **verify-full <n>/8** · **verify-stress <n>/8** · **soak-continuous <PASS/…>**.
@@ -111,6 +126,7 @@ Non-overlapping by design — `quality-test.sh` is behavioral-only, `report.sh -
 
 - **Attribute third-party work up front and in Credits** — model authors, quant/drafter authors, engine PRs. Capability that isn't ours gets named twice (intro + Credits), not buried.
 - **Numbers must be measured** — the Results Card is the empirical core; follow [`RESULTS_CARD.md`](RESULTS_CARD.md)'s rules (core 8-pack is exactly `/150`, spec-dec is its own column, state the `n`, reproduce sampling/pin/thinking in the footnote).
+- **State `repeat = N` on the Quality table, always** — including when it is 1, where Std/CV render `—`. `repeat ≥ 3` is encouraged for an announcement (it is the headline post for that config) but not gated: it triples 8-pack runtime. Keep the raw benchlocal output in the collapsed `Raw data` block — a claimed score nobody can audit is not a receipt.
 - **State the lifecycle honestly** — 🧪 / ✅ / 👁️ — and *why* (a rolling pre-release engine pin keeps a fully-validated compose 🧪; say so).
 - **Pre-post checklist** (same as RESULTS_CARD §"Posting to a public discussion/issue"): grep the draft for internal absolute paths / model-store paths / tokens; don't link untracked/experimental composes (they 404 — describe in prose or link the image tag); verify every repo link with `git ls-tree` and every image tag with `docker manifest inspect`.
 - **Lead with the ask if it's a reply** — when answering a specific question, give the one-line answer first, then the announcement body.

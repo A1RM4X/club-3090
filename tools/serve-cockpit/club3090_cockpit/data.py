@@ -962,6 +962,8 @@ class BenchRow:
 GATE_STEPS: tuple[str, ...] = (
     "verify-full",
     "bench",
+    "bench-agentic",     # #805 — the multi-turn prefill curve
+    "concurrency",       # #805 — N=1 control + N=2/4 rungs, capped at served slots
     "verify-stress",
     "quality-full",
     "quality-thinking",

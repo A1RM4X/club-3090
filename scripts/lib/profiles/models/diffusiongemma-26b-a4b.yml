@@ -27,8 +27,21 @@ moe_intermediate_size: 704
 active_params_b: 3.8
 mtp_num_hidden_layers: null           # diffusion LM — no AR spec-dec / MTP
 vision_capable: false                 # text dLLM (we serve text)
-# diffusion-specific (informational; not consumed by kv-calc):
-# diffusion=true, canvas_length=256, max_denoising_steps=48, sampler=entropy_bound
+# diffusion-specific (not consumed by kv-calc):
+# diffusion=true, max_denoising_steps=48, sampler=entropy_bound
+#
+# decode_granularity — #809. This model does NOT emit token-by-token: it denoises
+# a whole canvas in parallel and the SSE endpoint emits ~one chunk per completed
+# canvas. So any response that fits in one canvas arrives as a single chunk,
+# TTFT == wall, and `decode_TPS = tokens / (wall - TTFT)` divides by a zero-width
+# window. Before the harness knew the class it printed decode_TPS=800000000.00
+# and a shape summary reading `mean=2728143.37 CV=223.6%`, which three community
+# reports pasted as measurements. The headline number for this class is wall_TPS.
+#
+# Declared here so the launchers export DECODE_GRANULARITY and the bench/soak
+# harnesses label the output without the operator having to remember the knob.
+decode_granularity: canvas            # canvas | token
+canvas_tokens: 256                    # config.json diffusion_config.canvas_length
 weights:
   fp8:
     path: diffusiongemma-26b-a4b-it-fp8-dynamic
