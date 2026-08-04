@@ -196,3 +196,88 @@ p2p_transfer_verdict() {
     echo "⚠ interconnect WARN: P2P transfer check has only ${ok}/${total} directed pairs OK — peer access is advertised but BROKEN on some pairs (vLLM cache: ${src}). NCCL silently falls back on failing pairs → throughput ≈ P2P-off there. Guide: docs/PCIE_P2P.md"
   fi
 }
+# ── P2P opportunity hint (#873) ──────────────────────────────────────────────
+# Everything above answers "is P2P on?". This answers the question a user with
+# two cards and no P2P actually has: "could it be, and is it worth it?".
+#
+# Deliberately tiered rather than one line, because the naive "you could enable
+# P2P!" is WRONG for most rigs that would see it: cards on separate root
+# complexes can never peer regardless of driver, and a BAR1 smaller than VRAM
+# cannot back the patched module's static full-VRAM mapping (#734) — telling
+# either of those users to build a DKMS module wastes their evening. The
+# reference 2x3090 is itself the BAR1 case, which is why B outranks A.
+#
+# Prints ONE informational line, or nothing. Never a warning: not having P2P is
+# not a fault, and this must never read as "your rig is misconfigured".
+
+# GPU-GPU link class from `topo -m`: "same_root" (PHB/PIX/PXB — peer traffic can
+# stay below the CPU) | "split" (SYS/NODE — crosses the SMP/host-bridge boundary,
+# unreachable for P2P) | "unknown". Off-diagonal cells only.
+p2p_topology_class() {
+  nvidia-smi topo -m 2>/dev/null | awk '
+    NR == 1 { for (i = 1; i <= NF; i++) if ($i ~ /^GPU[0-9]+$/) ngpu++; next }
+    $1 ~ /^GPU[0-9]+$/ {
+      for (i = 2; i <= ngpu + 1; i++) {
+        if ($i == "X") continue
+        if ($i ~ /^(PHB|PIX|PXB)$/) near = 1
+        else if ($i ~ /^(SYS|NODE)$/) far = 1
+      }
+    }
+    END {
+      if (far) print "split"
+      else if (near) print "same_root"
+      else print "unknown"
+    }'
+}
+
+# Smallest BAR1 and its card's VRAM, as "<bar1MiB> <fbMiB>"; empty when the
+# driver does not report the fields. Mirrors detect_nvlink.sh _bar1_undersized,
+# but reports the numbers rather than a verdict (report.sh wants to print them).
+p2p_bar1_min() {
+  nvidia-smi -q -d MEMORY 2>/dev/null | awk '
+    /^GPU /             { idx++; sect = ""; next }
+    /FB Memory Usage/   { sect = "fb";   next }
+    /BAR1 Memory Usage/ { sect = "bar1"; next }
+    /Memory Usage/      { sect = "";     next }
+    sect != "" && $1 == "Total" && $3 ~ /^[0-9]+$/ {
+      if (sect == "fb") fb[idx] = $3; else bar1[idx] = $3
+      sect = ""
+    }
+    END {
+      for (i = 1; i <= idx; i++)
+        if (fb[i] > 0 && bar1[i] > 0 && (best == 0 || bar1[i] < best)) { best = bar1[i]; bfb = fb[i] }
+      if (best > 0) printf "%d %d\n", best, bfb
+    }'
+}
+
+# True (0) when `topo -p2p r` reports CNS on any pair — the stock GeForce
+# driver's software refusal, the one gate a patched module actually lifts.
+p2p_reports_cns() {
+  nvidia-smi topo -p2p r 2>/dev/null | grep -qE '(^|[[:space:]])CNS([[:space:]]|$)'
+}
+
+# p2p_opportunity_hint <gpu_count> <host_capability>
+# One line when there is something true to say; silent otherwise.
+p2p_opportunity_hint() {
+  local count="${1:-0}" cap="${2:-none}"
+  [[ "${count:-0}" -ge 2 ]] || return 0        # single card: meaningless
+  [[ "$cap" == "none" ]] || return 0           # nvlink / pcie_p2p: already covered
+
+  local topo; topo="$(p2p_topology_class)"
+  if [[ "$topo" == "split" ]]; then
+    echo "ℹ interconnect: ${count} GPUs, but they sit on SEPARATE root complexes (topo -m: SYS/NODE) — peer-to-peer is unreachable on this layout regardless of driver or BIOS, so there is nothing to enable here. If you can re-slot them onto the same root complex, docs/PCIE_P2P.md §1-§2 covers what to aim for."
+    return 0
+  fi
+  [[ "$topo" == "same_root" ]] || return 0     # unknown topology: say nothing
+
+  local bar1 fb; read -r bar1 fb <<<"$(p2p_bar1_min)"
+  if [[ -n "${bar1:-}" ]] && [[ "${bar1:-0}" -gt 0 ]] && (( bar1 * 2 < fb )); then
+    echo "ℹ interconnect: ${count} GPUs on a P2P-capable layout (same root complex) with peer access OFF, and BAR1 is ${bar1} MiB against ${fb} MiB of VRAM. The patched-driver P2P path maps the FULL VRAM aperture through BAR1, so it cannot work until that changes — this is the gate to fix first, not the driver. Check which one you're behind: the BIOS toggles (Above 4G Decoding + Re-Size BAR, docs/PCIE_P2P.md §4), or a pre-ReBAR VBIOS ceiling — \`sudo lspci -vv -s <bus> | grep -A4 'Physical Resizable BAR'\`, and if \`supported:\` tops out at 256MB it is firmware (#734)."
+    return 0
+  fi
+
+  if p2p_reports_cns; then
+    echo "ℹ interconnect: ${count} GPUs on a P2P-capable layout (same root complex) with peer access OFF — \`topo -p2p\` reports CNS, which is the stock driver refusing P2P on GeForce cards rather than a hardware limit. A patched kernel module can unlock it: measured +2% narrative / +9% code on dual rigs (#91/#295), so code and spec-decode workloads gain and narrative decode barely moves. It is an optional enthusiast lever, and it ships as a custom DKMS module you rebuild on every driver bump. If you want it: docs/PCIE_P2P.md §5."
+  fi
+}
+

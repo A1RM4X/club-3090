@@ -117,6 +117,8 @@ A 3-slot (triple-width) card like most 3090s covers its own slot **plus the two 
 
 ## 5. Enabling P2P on consumer GPUs
 
+> **Not sure whether your rig is even a candidate?** `bash scripts/report.sh` answers that under *GPU hardware → NVLink*. On a 2+-card PCIe rig with peer access off it prints one line naming **which gate you're actually behind**: cards on separate root complexes (unreachable regardless of driver — §1–§2), a BAR1 too small to back the static full-VRAM mapping (fix §4 / the VBIOS **first**; this section can't help until then), or the stock driver's `CNS` refusal — which is the one case this section fixes. It stays silent on single-card rigs, NVLink rigs, and rigs where P2P is already on, so a line appearing means there's something real to decide.
+
 Two hard truths set expectations before you start:
 
 1. **The stock NVIDIA driver refuses P2P on GeForce cards over `PHB`.** Even with perfect topology and BIOS, the consumer driver disables peer access. Enabling it requires a **patched kernel module** — the community [`aikitoria/open-gpu-kernel-modules`](https://github.com/aikitoria/open-gpu-kernel-modules) fork ([Sam McLeod's walkthrough](https://smcleod.net/2026/02/patching-nvidias-driver-and-vllm-to-enable-p2p-on-consumer-gpus/)). This is a custom DKMS module — weigh the maintenance cost. (Should the walkthrough link ever rot, the shape of it: clone the fork matching your driver branch → build + install via DKMS in place of the stock `nvidia` kernel module → reboot → `nvidia-smi topo -p2p r` should now report `OK` between your GPUs.)
