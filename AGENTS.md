@@ -258,7 +258,11 @@ For **entirely new models** under validation (e.g. "let's try MiniMax-M2.7"): ke
 
 **Long-running tests: redirect full output to a log file — NEVER pipe through `tail`/`head`/`grep`.** A pipe buffers until the process exits, so a `--full` quality run piped to `tail -12` is a ~2 h black box: no live `[N/M]` progress, no partial scores, and an interrupt leaves nothing readable (benchlocal also writes its results JSON only at completion — noonghunna/benchlocal-cli#82 tracks scenario-level resume). Do `bash scripts/quality-test.sh --full ... > /path/run.log 2>&1` (or `| tee`) and summarize from the file; `tail -f` the file for live progress. Learned 2026-07-11 on a template A/B.
 
-**Gotcha (all serving tests):** `verify-*`/`bench.sh` default `MODEL=qwen3.6-27b-autoround` — against any other served model that's a silent HTTP 404. Pass `MODEL=<served-name>` explicitly (or use `rebench-full.sh`, which autodetects).
+**Model resolution (all serving tests): they auto-detect — don't hand-pass `MODEL=` out of superstition.** Every serving script resolves the served-model id from `GET /v1/models` when `MODEL` is unset: `verify.sh`, `verify-full.sh`, `verify-stress.sh`, `bench.sh` (via `preflight_autodetect_model`), plus `quality-test.sh`, `soak-test.sh`, `bench-agentic.sh`, `concurrency-probe.sh`, `spec-sweep.sh`, `rebench-full.sh` (each inline). `bench.sh` announces it: `[autodetect] served model='…'`. An explicit `MODEL=` **always wins and is never clobbered**. The `qwen3.6-27b` literal in some of them is a **last-resort fallback for an unreachable endpoint**, not the effective default.
+
+⚠️ **Do pin `MODEL=` on multi-model endpoints** (llama-swap, or a compose registering several `--served-model-name` aliases): detection takes `data[0].id`, which may not be the alias you mean.
+
+> *This paragraph used to read "`verify-*`/`bench.sh` default `MODEL=qwen3.6-27b-autoround` — against any other served model that's a silent HTTP 404." That stopped being true when #372 landed autodetect, and the stale wording caused a wrong support answer on [#873](https://github.com/noonghunna/club-3090/issues/873) (a contributor was told his bench run would 404 when it would have auto-resolved). Verified against all ten scripts 2026-08-04.*
 
 The pipeline is layered: each script has a different question it answers ("does it serve / work / survive / fast / behave correctly / stay healthy"). Skipping any layer can mask regressions.
 
