@@ -326,6 +326,12 @@ else
     nvidia-smi nvlink --status 2>&1 | redact | details "NVLink link status"
   else
     echo "_No NVLink detected (PCIe-only)_"
+    # "Could P2P be on here, and is it worth it?" — the question a 2-card
+    # PCIe rig actually has, which every other line in this report leaves
+    # unanswered (the verdict below needs a RUNNING container; this doesn't).
+    # Tiered + achievability-gated on purpose: see p2p_opportunity_hint.
+    _p2p_hint="$(p2p_opportunity_hint "$(p2p_gpu_count)" "$(p2p_host_capability)" 2>/dev/null || true)"
+    [[ -n "$_p2p_hint" ]] && { echo; echo "$_p2p_hint"; }
   fi
 
   subsection "Topology"

@@ -69,6 +69,7 @@ case "\$*" in
   -L) printf '%b' "$1" ;;
   "topo -m") printf '%b' "$2" ;;
   "topo -p2p r") printf '%b' "$3" ;;
+  "-q -d MEMORY") printf '%b' "${4:-}" ;;
 esac
 EOF
 chmod +x "$TMP/nvidia-smi"; }
@@ -204,5 +205,52 @@ assert_contains "$out" "WARN"
 assert_contains "$out" "3/4"
 assert_empty "$(p2p_transfer_verdict 0 0 x)"                          # no data -> silent
 echo "  ✓ transfer-cache parse + verdict: full OK / partial WARN / garbage silent"
+
+# ── 9. P2P opportunity hint (#873): tiered, achievability-gated, never nags ──
+# The naive "you could enable P2P!" is WRONG for most rigs that would see it.
+# What matters here is that each rig class gets the message that is TRUE for it,
+# and that the firmware gate outranks the driver gate — the reference 2x3090 is
+# CNS *and* BAR1-capped, so a precedence bug would tell the maintainer's own rig
+# to go build a DKMS module that provably cannot work.
+TOPO_SYS='\tGPU0\tGPU1\nGPU0\t X \tSYS\nGPU1\tSYS\t X \n'
+_mem() { printf 'GPU 00000000:0%d:00.0\n    FB Memory Usage\n        Total : 24576 MiB\n        Used  : 1 MiB\n    BAR1 Memory Usage\n        Total : %d MiB\n        Used  : 4 MiB\n    Conf Compute Protected Memory Usage\n        Total : 0 MiB\n' "$1" "$2"; }
+MEM_SMALL="$(_mem 1 256)$(_mem 3 256)"      # aperture never grew (ReBAR off / capped VBIOS)
+MEM_BIG="$(_mem 1 32768)$(_mem 3 32768)"    # full-size aperture
+
+hint() { PATH="$TMP:$PATH" bash -c 'source scripts/lib/p2p-state.sh; p2p_opportunity_hint "$(p2p_gpu_count)" "$(p2p_host_capability)"'; }
+
+# (a) separate root complexes -> unreachable; must NOT sell the patched module
+mk_smi "$L2" "$TOPO_SYS" "$P2P_CNS" "$MEM_BIG"
+out="$(hint)"
+assert_contains "$out" "SEPARATE root complexes"
+[[ "$out" != *"§5"* ]] || fail "split-topology hint must not point at the patched-module path"
+
+# (b) same root + CNS + SMALL BAR1 -> firmware gate wins over the driver gate
+mk_smi "$L2" "$TOPO_PHB" "$P2P_CNS" "$MEM_SMALL"
+out="$(hint)"
+assert_contains "$out" "BAR1 is 256 MiB against 24576 MiB"
+assert_contains "$out" "§4"
+[[ "$out" != *"§5"* ]] || fail "BAR1-capped hint must not recommend the patched module (it cannot work)"
+
+# (c) same root + CNS + full-size BAR1 -> the one actionable case
+mk_smi "$L2" "$TOPO_PHB" "$P2P_CNS" "$MEM_BIG"
+out="$(hint)"
+assert_contains "$out" "§5"
+assert_contains "$out" "CNS"
+assert_contains "$out" "DKMS"          # the cost is stated, not just the gain
+assert_contains "$out" "+2% narrative" # honest expected gain, so users can decline
+
+# (d) BAR1 unreported by the driver -> fail open to the driver-gate message
+mk_smi "$L2" "$TOPO_PHB" "$P2P_CNS" ""
+assert_contains "$(hint)" "§5"
+
+# (e) silence where there is nothing to say
+mk_smi "$L2" "$TOPO_PHB" "$P2P_OK" "$MEM_BIG"
+assert_empty "$(hint)"                                  # P2P already on
+mk_smi "$L2" "$TOPO_NV" "$P2P_CNS" "$MEM_BIG"
+assert_empty "$(hint)"                                  # NVLink rig
+mk_smi 'GPU 0: RTX 3090\n' "$TOPO_PHB" "$P2P_CNS" "$MEM_SMALL"
+assert_empty "$(hint)"                                  # single card
+echo "  ✓ opportunity hint: split/firmware/driver tiers, BAR1 outranks CNS, silent when moot"
 
 echo "test-p2p-state: ok"
