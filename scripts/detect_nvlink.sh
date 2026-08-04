@@ -94,6 +94,13 @@ _pcie_p2p_available() {
 # rig, and silently withholding P2P from a rig where it works would be the worse
 # error. Promote to a gate only with a confirmed case. Fails open — a driver that
 # doesn't report these fields yields no lines and no warning.
+#
+# ⚠️ Necessary, not sufficient — do NOT read silence here as "P2P will work". The
+# #873 rig reported BAR1 Total 32768 MiB against 32607 MiB of VRAM (so this probe
+# stays quiet) and still hung in NCCL init until the driver was forced onto the
+# static mapping via NVreg_RegistryDwords. What this catches is the *aperture*
+# being too small (the firmware-gated #734 class) — one cause of an unusable
+# mapping, ahead of the hang rather than after it, not all of them.
 _bar1_undersized() {
   nvidia-smi -q -d MEMORY 2>/dev/null | awk '
     /^GPU /             { idx++; sect = ""; next }
