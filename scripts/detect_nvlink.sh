@@ -22,6 +22,10 @@
 #                it). The config is forced either way — this is the escape hatch
 #                for a rig whose probe is stricter than reality — but we never
 #                claim "engaged" without evidence. See club-3090 #290, #688.
+#
+# On every path that ends in PCIe P2P (not NVLink) we also check BAR1 against VRAM
+# and warn when the aperture is too small to back the patched driver's static-BAR1
+# mapping — the one failure mode that HANGS NCCL instead of degrading. See #873.
 
 NVLINK_MODE="${NVLINK_MODE:-auto}"
 _P2P_LEVEL=NVL   # NCCL_P2P_LEVEL used when _NVLINK_ENABLED=1 (overridden by pcie_p2p)
@@ -74,6 +78,37 @@ _pcie_p2p_available() {
       for (i = 2; i <= NF; i++) if ($i != "X" && $i != "OK") bad = 1
     }
     END { exit (rows > 0 && !bad) ? 0 : 1 }
+  '
+}
+
+# Cards whose BAR1 aperture is far smaller than their VRAM, as "GPU<n> BAR1=<x>MiB
+# VRAM=<y>MiB" lines (empty when every card is fine). The patched-consumer-driver
+# P2P path maps the WHOLE VRAM aperture through BAR1 (static BAR1 mapping) and DMAs
+# straight to the peer's physical addresses, so a small BAR1 cannot back it — the
+# hard prerequisite already documented in docs/PCIE_P2P.md §5. Real values are
+# bimodal (~256 MiB when the aperture never grew, >= VRAM when it did), so half-VRAM
+# discriminates with room to spare and never trips on accounting slop.
+#
+# This WARNS, it does not gate: peer access being advertised (topo -p2p: OK) while
+# BAR1 is small is a combination we have inferred but not yet confirmed on a real
+# rig, and silently withholding P2P from a rig where it works would be the worse
+# error. Promote to a gate only with a confirmed case. Fails open — a driver that
+# doesn't report these fields yields no lines and no warning.
+_bar1_undersized() {
+  nvidia-smi -q -d MEMORY 2>/dev/null | awk '
+    /^GPU /             { idx++; sect = ""; next }
+    /FB Memory Usage/   { sect = "fb";   next }
+    /BAR1 Memory Usage/ { sect = "bar1"; next }
+    /Memory Usage/      { sect = "";     next }   # e.g. Conf Compute Protected
+    sect != "" && $1 == "Total" && $3 ~ /^[0-9]+$/ {
+      if (sect == "fb") fb[idx] = $3; else bar1[idx] = $3
+      sect = ""
+    }
+    END {
+      for (i = 1; i <= idx; i++)
+        if (fb[i] > 0 && bar1[i] > 0 && bar1[i] * 2 < fb[i])
+          printf "GPU%d BAR1=%dMiB VRAM=%dMiB ", i - 1, bar1[i], fb[i]
+    }
   '
 }
 
@@ -163,6 +198,18 @@ if [ "$_NVLINK_ENABLED" -eq 1 ]; then
   _alloc="$(printf '%s' "$_alloc" | sed -E 's/(^|,)expandable_segments:[^,]*//g; s/^,+//; s/,+$//; s/,+/,/g')"
   [ -n "$_alloc" ] || _alloc="max_split_size_mb:512"
   export PYTORCH_CUDA_ALLOC_CONF="$_alloc"
+  # BAR1 sanity — PCIe-P2P path only (NVLink peer traffic doesn't ride BAR1, so an
+  # NVL level skips the probe and its nvidia-smi call entirely). Advertised-but-
+  # unmappable peer access does NOT degrade gracefully: NCCL hangs inside
+  # ncclCommInitRank instead of falling back, which reads as a boot that stops dead
+  # right after "vLLM is using nccl". Name the cause before that happens (#873).
+  if [ "$NCCL_P2P_LEVEL" != "NVL" ]; then
+    _BAR1_BAD="$(_bar1_undersized)"
+    if [ -n "$_BAR1_BAD" ]; then
+      echo "[nvlink] WARNING: enabling PCIe P2P, but BAR1 is far smaller than VRAM on: ${_BAR1_BAD}— the patched-driver P2P path maps the FULL VRAM aperture through BAR1 (static BAR1 mapping), which a BAR1 this small cannot back. Peer access can still be ADVERTISED by the driver (topo -p2p: OK) while transfers fail, and NCCL then HANGS during init rather than falling back — if this boot stops right after 'using nccl', this is why. Fix: enable Above 4G Decoding + Re-Size BAR in BIOS (some cards need a ReBAR VBIOS; some driver branches need the static-BAR1 registry override) — docs/PCIE_P2P.md §4-§5. To boot now without P2P: NVLINK_MODE=force_off." >&2
+    fi
+    unset _BAR1_BAD
+  fi
   if [ "${_P2P_UNVERIFIED:-0}" -eq 1 ]; then
     # pcie_p2p forced, but topo -p2p didn't confirm peer access. Config is applied;
     # engagement is NOT proven. Say so — never print "ENABLED" without evidence (#688).
@@ -177,4 +224,4 @@ else
   echo "[nvlink] P2P DISABLED — NCCL_P2P_DISABLE=1, custom all-reduce OFF, expandable_segments ON"
 fi
 
-unset -f _pcie_p2p_available _ar_claim _nvlink_full_mesh 2>/dev/null || true   # don't leak the probes into the sourcing shell
+unset -f _pcie_p2p_available _ar_claim _nvlink_full_mesh _bar1_undersized 2>/dev/null || true   # don't leak the probes into the sourcing shell
