@@ -277,7 +277,7 @@ p2p_opportunity_hint() {
   fi
 
   if p2p_reports_cns; then
-    echo "ℹ interconnect: ${count} GPUs on a P2P-capable layout (same root complex) with peer access OFF — \`topo -p2p\` reports CNS, which is the stock driver refusing P2P on GeForce cards rather than a hardware limit. A patched kernel module can unlock it: measured +2% narrative / +9% code on dual rigs (#91/#295), so code and spec-decode workloads gain and narrative decode barely moves. It is an optional enthusiast lever, and it ships as a custom DKMS module you rebuild on every driver bump. If you want it: docs/PCIE_P2P.md §5."
+    echo "ℹ interconnect: ${count} GPUs on a P2P-capable layout (same root complex) with peer access OFF — \`topo -p2p\` reports CNS, which is the stock driver refusing P2P on GeForce cards rather than a hardware limit. A patched kernel module can unlock it: gain is strongly card-dependent: +2% narrative / +9% code measured on dual 3090 (#91/#295), but +32% decode on a dual 5090 (#873), so code and spec-decode workloads gain and narrative decode barely moves. It is an optional enthusiast lever, and it ships as a custom DKMS module you rebuild on every driver bump. If you want it: docs/PCIE_P2P.md §5."
   fi
 }
 
