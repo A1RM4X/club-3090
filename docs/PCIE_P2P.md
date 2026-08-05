@@ -145,7 +145,35 @@ Two hard truths set expectations before you start:
 >
 > then `sudo update-initramfs -u`, reboot, and confirm with `cat /proc/driver/nvidia/params | grep -iE "Peer|P2P|Bar"`.
 >
+> ### ⚠️ SCOPE: this override is BLACKWELL evidence — do NOT apply it prophylactically
+> Every datapoint for these keys comes from **one 2× RTX 5090 rig**. Before you paste them:
+> - **3090 and 4090 P2P is confirmed working WITHOUT them** on this project's rigs — @TheFuzy's
+>   4× 3090 ([#688](https://github.com/noonghunna/club-3090/issues/688)) and @MIkamal88's 2× 3090
+>   ([#719](https://github.com/noonghunna/club-3090/discussions/719)) both ran the aikitoria BAR1
+>   path months before these keys were discovered.
+> - **They are not free.** Measured on the 5090 rig: with P2P *off*, the override costs
+>   **−3.2% narrative / −1.8% code decode** — you pay that whenever peer access isn't engaged.
+> - aikitoria's README documents **no** registry keys as required, for any card.
+>
+> **So: try the patched module alone first. Reach for these only if `topo -p2p` says `OK` and NCCL
+> still hangs** (§8) — which so far has only been observed on 50-series.
+>
 > **Those two keys are the bisected minimum** — the reporter first got it working with five (`ForceP2P=17;RMForceP2PType=1;RMPcieP2PType=1;PeerMappingOverride=1;RMForceStaticBar1=1`) and then confirmed the pair above boots P2P healthily on its own, across two slugs. `RMForceStaticBar1=1` names the mechanism; `PeerMappingOverride=1` lifts the peer-mapping restriction. (aikitoria's README documents only `RMForceP2PType=1`, and there as a *testing* knob to make 3090s prefer PCIe over NVLink — it isn't needed here.) Undocumented RM registry keys are a support-free surface: if a boot goes bad, delete the file and rebuild the initramfs.
+
+> **Which P2P path your card uses (aikitoria's README):**
+>
+> | card | path |
+> |---|---|
+> | **RTX 3090** | **Pairwise NVLink where available, PCIe BAR1 otherwise** — the only card with two |
+> | RTX 4090 | PCIe BAR1 |
+> | RTX 5090 | PCIe BAR1 (also works cross-device within a generation, e.g. 5090 ↔ RTX PRO 6000 Blackwell) |
+>
+> This matters for 3090 owners specifically: **with bridges fitted you are on the NVLink path, not
+> BAR1**, so the BAR1 prerequisites (§4/§5) and the Blackwell override above are irrelevant to you —
+> and `RMForceP2PType=1` is the documented knob to force PCIe *instead*, for testing. Reference
+> throughput from the same README: 5090 pair ≈ **55–56 GB/s** unidirectional / **111 GB/s**
+> bidirectional with P2P, against **~43 GB/s** without — useful as a sanity target for
+> `p2pBandwidthLatencyTest` (§7).
 
 **On this stack**, once the patched module is installed you don't edit composes — set one env var:
 
