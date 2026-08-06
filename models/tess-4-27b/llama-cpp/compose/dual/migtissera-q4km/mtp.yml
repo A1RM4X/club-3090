@@ -1,7 +1,7 @@
 # ===========================================================================
 # Profile (at-a-glance):
 #   Model:     Tess-4-27B (Qwen3.5-based dense 27B, migtissera Q4_K_M GGUF)
-#   Engine:    llama.cpp (mainline server-cuda-b9967, external draft-mtp)
+#   Engine:    llama.cpp (mainline server-cuda-b10236, external draft-mtp)
 #   Topology:  Dual 3090 (layer-split -ts 1,1)
 #   Drafter:   MTP n=2 external (n-sweep sweet spot 2026-07-09) — --spec-draft-model mtp-Tess-*.gguf + --spec-type draft-mtp
 #   KV:        q4_0 K + q4_0 V
@@ -13,7 +13,10 @@
 #   Engine-profile: llama-cpp-local
 #   Quality:   core 8-pack 116/150 (77%) think-off, 117/150 (78%) think-on single
 #              draw (benchlocal --full, shipped config @ b9967 + 16K budget,
-#              2026-07-12; prior b9246 basis: 115/118 on 2026-07-09). Leads the
+#              2026-07-12; prior b9246 basis: 115/118 on 2026-07-09). ⚠️ NOT
+#              re-run at the current b10236 pin — quality gate consciously
+#              skipped at that bump (maintainer, 2026-08-06); numbers are
+#              b9967-era provenance, functional validation is current. Leads the
 #              agentic packs (hermes 14-15/20, cli 25/40 off) vs the qwen3.6-27b
 #              dual-max reference (9, 20). cli-40 62% think-off = mid-tier
 #              autonomous-CLI — the known quality shape, not a caveat.
@@ -103,7 +106,7 @@
 
 services:
   llama-cpp-tess-4-27b:
-    image: ${LLAMACPP_IMAGE:-ghcr.io/ggml-org/llama.cpp:server-cuda-b9967}
+    image: ${LLAMACPP_IMAGE:-ghcr.io/ggml-org/llama.cpp:server-cuda-b10236}
     container_name: "${ESTATE_CONTAINER:-llama-cpp-tess-4-27b}"
     restart: unless-stopped
     ports:
