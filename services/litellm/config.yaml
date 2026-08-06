@@ -8,6 +8,16 @@ model_list:
   # primary `qwen3.6-27b` (+ its own quant-specific name as an alias), so this route
   # matches whichever scene is on :8010 regardless of quant (#482/#490). The quant
   # differs by compose path/port + the scene's alias, NOT by the primary name.
+  # DeepSeek-V4-Flash-0731 (284B MoE, CPU expert offload to host RAM).
+  # Now a CATALOG SLUG: llamacpp/deepseek-flash-dual-q8 (#905), whose registry
+  # default_port is 8030 — so this route matches the shipped slug, not a hand-launch.
+  # The IQ2 sibling serves on 8031; add a second route if you want both reachable.
+  - model_name: deepseek-v4-flash
+    litellm_params:
+      model: openai/deepseek-v4-flash
+      api_base: http://host.docker.internal:8030/v1
+      api_key: EMPTY
+
   - model_name: qwen3.6-27b
     litellm_params:
       model: openai/qwen3.6-27b

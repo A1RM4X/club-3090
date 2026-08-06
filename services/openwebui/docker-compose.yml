@@ -40,6 +40,9 @@ services:
       # scripts/setup-ai-studio.sh (it registers these + drops a stale :4000) or set them in
       # Admin → Settings → Connections. Backends are no-auth on localhost, so the key is a placeholder.
       - OPENAI_API_BASE_URLS=http://host.docker.internal:8090/v1;http://host.docker.internal:8030/v1;http://host.docker.internal:8010/v1;http://host.docker.internal:8051/v1;http://host.docker.internal:8032/v1;http://host.docker.internal:8038/v1;http://host.docker.internal:8199/v1
+      # ⚠️ COUNT MUST MATCH *_URLS above — positional, ;-separated pairs. Nothing
+      # validates this, so a backend added to one list and not the other silently
+      # leaves that entry unpaired.
       - OPENAI_API_KEYS=sk-noauth;sk-noauth;sk-noauth;sk-noauth;sk-noauth;sk-noauth;sk-noauth
       # Ollama removed from the stack 2026-06-22 — disable the API so OWUI doesn't
       # probe a dead :11434 on boot (chat routes through the OpenAI API above).
