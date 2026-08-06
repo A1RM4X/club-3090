@@ -963,6 +963,53 @@ COMPOSE_REGISTRY = {
     # First EXTERNAL-MTP compose in the catalog: the nextn head ships as a SEPARATE
     # GGUF (mtp-Tess-*.gguf), engaged via --spec-draft-model + --spec-type draft-mtp
     # (contrast Deckard's embedded head). kv_format q4_0 (K+V). kvcalc SKIP.
+    # ── DeepSeek-V4-Flash-0731 (284B MoE) — the catalog's first CPU-OFFLOAD slugs.
+    # 137 GiB of routed experts live in HOST RAM; a few bundles are pinned back onto
+    # the GPUs (residency) and the rules are INJECTED by the launcher from detected
+    # free VRAM, never hardcoded. kvcalc SKIP (hybrid MoE + MLA — the calculator has
+    # no model for it). required_sm 8.6 so 3090/4090/5090 all qualify; the 4090/5090
+    # paths are INFERRED from the image's arch list, never booted here.
+    # No DEFAULTS row on purpose: incubating is excluded from the curated walk.
+    "llamacpp/deepseek-flash-dual-q8": _entry(
+        model="deepseek-v4-flash-0731", weights_variant="unsloth-q8-kxl", workload="long-ctx-single",
+        engine="llama-cpp-local", drafter="dspark", kv_format="fp16",
+        tp=2, max_ctx=204800, max_num_seqs=1, mem_util=None,
+        compose_path="models/deepseek-v4-flash-0731/llama-cpp/compose/dual/unsloth-q8-kxl/offload.yml",
+        default_port=8030,
+        kvcalc_key="SKIP",
+        required_sm=8.6,
+        status="incubating",
+        status_note="A 284B MoE on 2x24 GB. QUALITY TIER of the two DeepSeek-Flash offload slugs. Stock upstream b10236, zero patches. Three levers compose: CPU expert offload (137 GiB of routed experts in host RAM) + partial residency (bundles pinned back onto the GPUs, sized by the launcher from DETECTED free VRAM) + the DSpark drafter. HARD GATE: ~146 GB host RAM worst case -- preflight REFUSES below it. Ships 200K, NOT 262K: at 262K with the drafter it boots READY at 97.4% VRAM, passes a trivial decode, then dies on a ~15.7K-token prefill (CUDA OOM in cuMemCreate, reproduced 2026-08-06). NO PERFORMANCE OR QUALITY NUMBERS ARE PUBLISHED -- incubating; a canonical bench and the 8-pack are both owed. Validated operationally only: boot + a 14,011-token prefill probe + verify-full all checks passed.",
+        category="frontier",
+    ),
+
+    "llamacpp/deepseek-flash-dual-iq2": _entry(
+        model="deepseek-v4-flash-0731", weights_variant="unsloth-iq2-xxs", workload="long-ctx-single",
+        engine="llama-cpp-local", drafter="dspark", kv_format="fp16",
+        tp=2, max_ctx=204800, max_num_seqs=1, mem_util=None,
+        compose_path="models/deepseek-v4-flash-0731/llama-cpp/compose/dual/unsloth-iq2-xxs/offload.yml",
+        default_port=8031,
+        kvcalc_key="SKIP",
+        required_sm=8.6,
+        status="incubating",
+        status_note="REACH TIER of the two DeepSeek-Flash offload slugs: ~86 GB host RAM worst case vs the Q8 tier's ~146 GB, which is what makes a 284B model fit a constrained box. Stock upstream b10236, zero patches; same three levers (offload + launcher-sized residency + DSpark). ~2.6-bit experts. Scoped to dual 24 GB by design. NO PERFORMANCE OR QUALITY NUMBERS ARE PUBLISHED -- incubating; canonical bench and 8-pack both owed, and quality is the open question on a quant this low. Validated operationally only: boot + a 14,011-token prefill probe + verify-full all checks passed.",
+        category="frontier",
+    ),
+
+    # multi4: AUTHORED HERE, VALIDATED ELSEWHERE. We have 2 cards.
+    "llamacpp/deepseek-flash-multi4-q8": _entry(
+        model="deepseek-v4-flash-0731", weights_variant="unsloth-q8-kxl", workload="long-ctx-single",
+        engine="llama-cpp-local", drafter="dspark", kv_format="fp16",
+        tp=4, max_ctx=204800, max_num_seqs=1, mem_util=None,
+        compose_path="models/deepseek-v4-flash-0731/llama-cpp/compose/multi4/unsloth-q8-kxl/offload.yml",
+        default_port=8032,
+        kvcalc_key="SKIP",
+        required_sm=8.6,
+        status="incubating",
+        status_note="4-card QUALITY tier. NEVER BOOTED BY US -- authored from measured 2-card data plus the ~0.55 residency calibration; every number is an ESTIMATE until a 4-card owner runs it. The argument is NOT throughput: every layer pinned to a GPU is a layer NOT in host RAM, so host RAM FALLS with card count -- ~113 GB (est.) at 4x24 GB vs ~140 GB at 2x24. 128 GB is a very common host config, which the 2-card Q8 slug EXCLUDES and this one FITS, so multi4 is what puts the quality tier inside a mainstream RAM budget. Residency should also be at its best here (~23% of expert traffic on GPU vs 4.7% on two cards). No IQ2 multi slug: on four cards Q8 itself drops into a 128 GB budget, so a low-bit tier is not needed to fit.",
+        category="frontier",
+    ),
+
     "llamacpp/tess-dual-mtp": _entry(
         model="tess-4-27b", weights_variant="migtissera-q4km", workload="fast-chat",
         engine="llama-cpp-local", drafter="tess-mtp-gguf", kv_format="q4_0",

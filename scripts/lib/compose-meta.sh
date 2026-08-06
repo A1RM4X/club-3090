@@ -352,3 +352,131 @@ compose_hw_model_status() {
   printf 'no|%s (your rig: %s)' "$friendly_need" "$(compose_hw_summary)"
   return 1
 }
+
+# ---------------------------------------------------------------------------
+# resolve_offload_residency <compose_file>
+#
+# Sizes CPU-offload RESIDENCY from DETECTED per-device VRAM and exports OT_G0..N,
+# which the offload composes expand into their leading `-ot` slots.
+#
+# Division of labour (matches how VLLM_IMAGE is handled): profiles hold policy,
+# LAUNCHERS resolve and inject, preflight gates. Nothing is hardcoded in a compose,
+# because the right count is card-dependent — a 24 GB-tuned regex either wastes VRAM
+# on a 32 GB card or OOMs a smaller one.
+#
+# ⚠️ THE 0.55 CALIBRATION IS LOAD-BEARING. Naive free-VRAM ÷ bundle-size
+#    OVERESTIMATES BY ~2x because it ignores the compute-buffer reserve (measured
+#    3948+3697 MiB at -ub 4096, plus ~8-9 GB more when the DSpark drafter attaches).
+#    Predicted 4 layers for Q8 on 2x24 GB; measured 2. Predicted 11 for IQ2; measured 6.
+#    Shipping the naive number hands users a config that dies on first prefill.
+#
+# ⚠️ A LAYER'S EXPERTS MUST SIT ON THE CARD OWNING ITS DENSE TENSORS, or every token
+#    pays a cross-PCIe hop. With `-sm layer` over N cards, layer i lives on card
+#    floor(i*N/L) — so each card draws its resident layers from its OWN range.
+#
+# Emits nothing (leaving the composes' no-op defaults in place) when VRAM cannot be
+# read or the header is absent. Degrading to all-experts-CPU is always safe; it is
+# the config that runs anywhere.
+# ---------------------------------------------------------------------------
+resolve_offload_residency() {
+  local compose_file="$1"
+  [[ -f "$compose_file" ]] || return 0
+  command -v nvidia-smi >/dev/null 2>&1 || return 0
+
+  local bundle; bundle="$(compose_meta_get "$compose_file" cpu-offload-bundle-mib || true)"
+  [[ "$bundle" =~ ^[0-9]+$ ]] || return 0          # not a residency-capable compose
+  local layers; layers="$(compose_meta_get "$compose_file" cpu-offload-moe-layers || true)"
+  [[ "$layers" =~ ^[0-9]+$ ]] || return 0
+  local reserve; reserve="$(compose_meta_get "$compose_file" cpu-offload-gpu-reserve-mib || true)"
+  [[ "$reserve" =~ ^[0-9]+$ ]] || reserve=18000
+  # First MoE layer. Models with a DENSE PREFIX (Laguna=1, Inkling=2) have no experts
+  # in their leading layers; a rule naming one silently matches NOTHING, so the user
+  # gets fewer resident layers than we think we granted and host RAM errs UNSAFE.
+  local first; first="$(compose_meta_get "$compose_file" cpu-offload-first-moe-layer || true)"
+  [[ "$first" =~ ^[0-9]+$ ]] || first=0
+  local last=$(( first + layers - 1 ))
+
+  local -a totals=()
+  while read -r m; do [[ "$m" =~ ^[0-9]+$ ]] && totals+=("$m"); done \
+    < <(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null)
+  local n="${#totals[@]}"
+  (( n >= 2 )) || return 0
+
+  local per_card=$(( layers / n ))
+  local i card_free fit rule count lay
+  for (( i=0; i<n; i++ )); do
+    card_free=$(( totals[i] - reserve ))
+    (( card_free < 0 )) && card_free=0
+    # Calibrated, not naive: raw free/bundle overestimates ~2x because it ignores the
+    # compute reserve and the drafter. Verified against measured counts.
+    fit=$(( card_free * 55 / 100 / bundle ))
+    (( fit > per_card )) && fit=$per_card
+    (( fit < 1 )) && continue                     # leave this card's no-op default
+
+    # ⭐ OUTER-EDGE SELECTION. Card 0 counts UP from the first MoE layer; the last card
+    # counts DOWN from the last. Middle cards work outward from their range centre.
+    #
+    # Why not "first layer of this card's nominal range": that lands exactly ON the
+    # -sm layer split point, which we do NOT know (the engine reports buffer sizes, not
+    # per-layer device assignment). Land on the wrong side and the bundle sits on a card
+    # that does not own the layer's dense tensors -- every token then pays a cross-PCIe
+    # hop, the precise pathology explicit device pinning exists to avoid. Working from
+    # the outer edges is correct for ANY split.
+    rule=""
+    for (( count=0; count<fit; count++ )); do
+      if (( i == 0 )); then                       # first card: up from the bottom
+        lay=$(( first + count ))
+      elif (( i == n - 1 )); then                 # last card: down from the top
+        lay=$(( last - count ))
+      else                                        # middle: outward from the centre
+        lay=$(( first + (2*i + 1) * layers / (2*n) + (count % 2 == 0 ? count/2 : -(count/2 + 1)) ))
+      fi
+      (( lay < first || lay > last )) && continue
+      rule="${rule}${rule:+|}${lay}"
+    done
+    [[ -z "$rule" ]] && continue
+    export "OT_G${i}=blk\.(${rule})\.ffn_(gate|up|down)_exps\.weight=CUDA${i}"
+  done
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# resolve_offload_threads <compose_file>
+#
+# Exports THREADS = nproc/2 for CPU-offload composes, so `-t` tracks the RIG
+# instead of a number that happened to suit the reference box.
+#
+# ⚠️ WHY nproc/2 AND NOT nproc: the offloaded decode path is SYNCHRONIZATION-bound,
+#    not compute-bound — ~40 sequential GPU<->CPU handoffs per token with a thread
+#    barrier at each. Past the knee, extra threads add barrier contention faster
+#    than they add streaming, so throughput INVERTS rather than plateauing:
+#    measured on 35B-A3B, -t 48 burned 94% CPU to deliver 31% of peak (-69% vs
+#    -t 16). llama.cpp's own default is worse still (-31%, stack finding).
+#
+# ⚠️ HONEST SCOPE: on DeepSeek-V4-Flash the knee is FLAT — 16 / 24 measured
+#    10.18 / 10.67, i.e. indistinguishable (tuning matrix A0/A1, 2026-08-06). So
+#    this is shipped for ROBUSTNESS, not for a measured speedup on this model: a
+#    hardcoded 24 oversubscribes a 4-core box and under-uses a 64-core one. Do not
+#    quote a TPS gain for it.
+#
+# Why the launcher and not the compose: these composes carry NO entrypoint, so
+# there is no shell to run `nproc` in. Adding `bash -c` would pull them into the
+# `$$`-escaping regime that test-compose-nvlink-escape polices. Same division of
+# labour as OT_G*: profiles hold policy, launchers resolve, preflight gates.
+#
+# An explicit THREADS from the user/env always wins and is never clobbered.
+# ---------------------------------------------------------------------------
+resolve_offload_threads() {
+  local compose_file="$1"
+  [[ -f "$compose_file" ]] || return 0
+  [[ -n "${THREADS:-}" ]] && return 0            # user override wins
+  declare -F is_cpu_offload_compose >/dev/null 2>&1 || return 0
+  is_cpu_offload_compose "$compose_file" || return 0
+
+  local n; n="$(nproc 2>/dev/null || echo 0)"
+  [[ "$n" =~ ^[0-9]+$ ]] && (( n > 0 )) || return 0
+  local t=$(( n / 2 ))
+  (( t < 1 )) && t=1                             # single-core boxes still get 1
+  export THREADS="$t"
+  echo "[preflight] cpu-offload: threads=${t} (nproc/2 of ${n}) — offloaded decode is sync-bound; more threads invert"
+}
