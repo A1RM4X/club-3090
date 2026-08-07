@@ -293,6 +293,11 @@ bash benchlocal-cli/tools/build-sandboxes.sh   # ~30 GB free; `docker system pru
 ### serve-cockpit (c3)
 `tools/serve-cockpit/` is the Textual TUI cockpit — a separate Python app with its **own venv and pytest suite**, NOT covered by `scripts/tests/*.sh`. See its `README.md`. For agents:
 - Run tests with `tools/serve-cockpit/.venv/bin/python -m pytest tools/serve-cockpit/tests/ -q`. `test_services.py` + `test_registry_parser.py` are fast — run them on every c3 change; `test_app_headless.py` boots the full app and is slow — prefer targeted `-k` selection while iterating.
+- ⚠️ **The c3 suite is NOT in `scripts/tests/*.sh`, so the full sweep being green says nothing about c3.** A c3 change needs both, run separately. #905 shipped two red c3 tests behind a green `99/0` sweep for exactly this reason.
+- ⚠️⚠️ **Never run this venv from a git worktree — it silently tests the WRONG TREE.** The editable install pins **absolute** paths (`.venv/lib/python*/site-packages/_editable_impl_club3090_*.pth` → `/…/club-3090/tools/serve-cockpit` and `/…/tools/tui-core` in the **main checkout**). So `import club3090_cockpit` resolves to the main tree no matter your cwd or which worktree you are in: pytest collects *your* test files and runs them against **master's** application code. That mismatch produced **495 failures where 2 were real**, and — far worse — it *masked* a genuine bug in the change under test. Do c3 work in the **main checkout**, or build a venv inside the worktree. Verify which code you are actually testing before trusting a result:
+  ```bash
+  cd tools/serve-cockpit && .venv/bin/python -c "import club3090_cockpit; print(club3090_cockpit.__file__)"
+  ```
 - c3 consumes the `registry-emit.sh --json` contract. Adding a field to the emit means threading it through `services.py` (`_variant_row_from_dict`) and, if displayed, `app.py` — and emit changes also need the `test-switch-registry-parity` / `test-launch-registry-parity` guards green.
 - DataTable cells render in terminals: avoid U+FE0F variation-selector emoji (`⚠️ 👁️ ⏸️ 🗑️`) in fixed-width columns — Rich reserves 2 cells but many terminals draw 1, misaligning every column after it. Use `Emoji_Presentation=Yes` glyphs (see `_STATUS_GLYPH` in `app.py`).
 
