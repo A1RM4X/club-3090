@@ -199,10 +199,10 @@ weights:
                                            #   commit/tag. Unset = track HEAD (default).
                                            #   Set it to reproduce the bytes a BENCHMARKS
                                            #   row was measured against (guards re-quants).
-    files: ["*.safetensors"]               # or explicit GGUF filenames
+    files: ["*.safetensors"]               # ⚠️ REQUIRED — see "Two silent traps" below
     engine: vllm                           # vllm | ik-llama | llama-cpp | beellama (filesystem dir name)
     kind: main                             # main | draft | mmproj | gguf
-    verify_glob: "*.safetensors"           # or "*.gguf"
+    verify_glob: "*.safetensors"           # ⚠️ REQUIRED on GGUF ("*.gguf") — default is safetensors
   ubergarm-iq4ks:                          # second quant of the same model (own slug dir)
     path: <id>-gguf/ubergarm-mtp-iq4ks
     local_subdir: <id>-gguf/ubergarm-mtp-iq4ks
@@ -215,6 +215,31 @@ weights:
     kind: gguf
     verify_glob: "*.gguf"
 default_weight_variant: autoround-int4
+
+#### Two silent traps in `files:` and `verify_glob`
+
+Both fields are **well-formed YAML when wrong**, so nothing downstream complains — and both burned real users on the DeepSeek-Flash ship (#910, #911). Read this before writing a GGUF entry.
+
+**1. `verify_glob` defaults to `*.safetensors`.** In a GGUF directory that matches nothing, and the two consumers then blame the *weights*:
+
+| Consumer | What it reports | What is true |
+|---|---|---|
+| c3 `weights_state_for()` | `PARTIAL` — "interrupted / wrong", offers Download | every shard present |
+| `setup.sh` post-download verify | `exit 1`, *"download may have failed"* | the pull **succeeded** |
+
+A user's rational response to "download may have failed" is to delete and re-pull hundreds of GB. **Declare `verify_glob: "*.gguf"` on every GGUF entry.**
+
+**2. No `files:` means the fetch is the WHOLE repo.** Correct for a single-artifact bucket; catastrophic for one quant of a multi-quant repo. The DeepSeek GGUF repo holds **13 quants / 1,537 GB** — asking for the 85 GB tier started pulling all of it, on a real user's machine.
+
+And `hf download --local-dir` **preserves the repo's folder structure**. So if the artifact lives in a repo subfolder:
+
+- `local_subdir` must be the **bucket**, not the quant dir — otherwise it nests twice (`…-gguf/UD-IQ2_XXS/UD-IQ2_XXS/`) and no compose points there;
+- `files:` carries the **subfolder prefix**;
+- `verify_glob` carries it too (it globs relative to `local_subdir`, which also keeps each match a valid *repo* path for the hash check).
+
+A file at the repo **root** lands flat, so a root artifact can keep a nested `local_subdir` — that is how the DSpark drafter gets into its own directory.
+
+`test-model-weights-registry` guards all of it: `verify_glob` ↔ `format`, `verify_glob` ↔ `files:`, and "a fetchable entry sharing a `local_subdir` must scope its fetch."
 
 # Drafter compatibility (drives fits() C7-C9)
 compatible_drafters:
@@ -370,6 +395,36 @@ A registry entry isn't enough: every entry must **validate against the profile c
 **`<model>/default` resolves via `ENGINE_PREFERENCE` — add a `DEFAULTS` row per engine you ship.** Your new model is immediately runnable by name (`--model <id>` / `<id>/default`). For `<id>/default` to resolve cleanly on a given topology, that `(model, engine, topology)` must have a **functional** `DEFAULTS` entry (status `production`/`caveats` — a `preview`/`experimental`/`upstream-gated`/`deprecated` config is skipped, never auto-defaulted). The resolver walks `ENGINE_PREFERENCE[topology]` (single = `[beellama, ik-llama, llamacpp, vllm]`; dual/multi = `[vllm, ik-llama, llamacpp, beellama]`) and picks the first engine with a functional `DEFAULTS` slug, so:
 - Add a `DEFAULTS` row for **each engine × topology** you want `<model>/default` to cover. With no functional default at the detected topology the resolver emits a notice and falls back to the nearest-lower topology, else a clear "pick explicitly" message (it never crashes) — fine while a model is still validating, but the bare-launch UX wants at least one production row.
 - **`RECOMMENDED_DEFAULT_MODELS` is intentionally NOT auto-grown** — a new model is runnable + resolvable but is never the bare-`launch.sh` auto-default until you explicitly add its id to that shortlist. Leave it alone unless you mean to promote the model to a first-class default.
+
+## Step 4c — Wire the download front door (`scripts/setup.sh`), then RUN it
+
+Everything above makes the model *servable* once the weights are on disk. This step is how a user **gets** the weights — and it is the half that has historically shipped broken, because on the maintainer rig weights are placed by hand, so the path is never exercised.
+
+`setup.sh` carries **five hand-written per-model lists**. None is registry-derived, so nothing fails until a real user runs it:
+
+| # | Where | What it sets |
+|---|---|---|
+| 1 | picker / usage text | the model id is offered at all |
+| 2 | `model_label` case | display name |
+| 3 | `"Supported: …"` error string | the id is accepted, not rejected outright |
+| 4 | dispatch case | `PRIMARY_WEIGHT_KEY`, plus `ALWAYS_DRAFT_KEY` if a drafter is mandatory |
+| 5 | `SAMPLE_*` "next steps" case | `SAMPLE_CONTAINER` / `SAMPLE_PORT` / `SAMPLE_MODEL_NAME` / `NEXT_STEPS_NOTE` — and `SAMPLE_LAUNCH_HINT` for any model **without a vLLM compose**, or the generic line prints a `models/<id>/vllm/compose` path that does not exist |
+
+Miss #1–4 and the model has **no front door at all**. Miss #5 and setup **exits 1 on a run that fully succeeded** (#914).
+
+**Then run it for real:**
+
+```bash
+bash scripts/setup.sh <id>
+```
+
+Hand-placing weights does **NOT** count, exactly as a hand `docker run` does not count for Step 5. If the weights are already local this is nearly free — it resolves, skips the fetch, and hash-verifies what is there. Confirm three things:
+
+1. the resolved fetch names **only** the artifacts you want (not the whole repo — see [Two silent traps](#two-silent-traps-in-files-and-verify_glob));
+2. it exits **0**;
+3. the launch command it prints actually exists.
+
+> **Why this step exists.** Four defects shipped in a single day (#910, #911, #912, #914) — a verification that reported a good download as failed, a fetch that pulled 1,537 GB to serve 85 GB, a readiness check blind to a required drafter, and a disk gate that was a constant. Every one lived in the acquisition path. Every one was invisible to a compose-centric review, and the first was found by a user, not by us.
 
 ## Step 5 — Boot + verify-full + capture the boot log
 
@@ -603,14 +658,16 @@ Mirror `models/qwen3.6-27b/vllm/compose/dual/autoround-int4/fp8-mtp.yml` shape, 
 
 The most common catalog change (a new provider quant of a model we already serve — AWQ alongside AutoRound, an NVFP4 export, a new GGUF). No new ModelProfile architecture facts and **no new calibration anchors** (KV math is unchanged; `diagnose-profile` extrapolating from a sibling row is expected). The checklist — every item, in order; the ones people skip are **bolded** (each has shipped a real gap):
 
-1. **Weights-variant entry** in `scripts/lib/profiles/models/<id>.yml` — the map key is the SAME string as the compose `<quant>/` dir and the registry `weights_variant`. Record quant scheme, `format:` (drives engine compat), and any load gotchas in `manual_note`.
+1. **Weights-variant entry** in `scripts/lib/profiles/models/<id>.yml` — the map key is the SAME string as the compose `<quant>/` dir and the registry `weights_variant`. Record quant scheme, `format:` (drives engine compat), and any load gotchas in `manual_note`. **Declare `files:` and `verify_glob` — neither is optional.** Their defaults are wrong for GGUF and wrong for multi-quant repos, silently; read [Two silent traps](#two-silent-traps-in-files-and-verify_glob) before writing the entry. Also set `size_gb` honestly — the `setup.sh` disk gate is sized from it.
 2. **Compose** at `models/<id>/<engine>/compose/<topology>/<quant-slug>/<serving>.yml` — copy the nearest validated sibling; keep the `ESTATE_GPUS`/`ESTATE_PORT`/`ESTATE_CONTAINER` hooks; full profile header with honest `Status:`.
-3. **Registry `_entry`** — `default_port` == the compose `${PORT:-NNNN}` fallback (parity-tested); reuse the sibling `kvcalc_key` when weights size is within ~1 GB; no `DEFAULTS` row unless this is explicitly a default promotion.
+3. **Registry `_entry`** — `default_port` == the compose `${PORT:-NNNN}` fallback (parity-tested); reuse the sibling `kvcalc_key` when weights size is within ~1 GB; no `DEFAULTS` row unless this is explicitly a default promotion. **If the compose mounts a drafter or projector, add `weights_companions=("<key>",)`.** `drafter=` is only a display label; `weights_companions` is what readiness reads, and without it the cockpit reports the model ready with the drafter missing and Start fails at boot (#912).
 4. **Count bumps** in `scripts/tests/test-compose-registry-disk.sh` (registry + disk).
-5. **Run the FULL `scripts/tests/*.sh` suite** — a new slug IS a catalog-shape change; targeted guards are for scoped changes only. Baseline any failure against master before blaming (or excusing) your change.
-6. **`bash scripts/diagnose-profile.sh <slug>` → GREEN.**
-7. **Boot the ACTUAL compose** (`bash scripts/switch.sh <slug>`) **+ `verify-full.sh`** — an equivalent hand `docker run` does NOT count; the compose file itself (env interpolation, entrypoint, mounts) is what ships.
-8. **BENCHMARKS.md row + `learnings/<model>.md` note** — same session as the work.
+5. **`setup.sh` front door** — a new quant of an existing model usually needs no wiring, but if it changes the **default** weight key, update the dispatch case. Either way see [Step 4c](#step-4c--wire-the-download-front-door-scriptssetupsh-then-run-it) for the five per-model lists.
+6. **Run the FULL `scripts/tests/*.sh` suite** — a new slug IS a catalog-shape change; targeted guards are for scoped changes only. Baseline any failure against master before blaming (or excusing) your change.
+7. **`bash scripts/diagnose-profile.sh <slug>` → GREEN.**
+8. **Run the ACTUAL `bash scripts/setup.sh <id>`** — hand-placing weights does **NOT** count, exactly as a hand `docker run` does not count for step 9. This is the step whose absence let **four** separate defects ship in one day (#910, #911, #912, #914): every one lived in the acquisition path, and every one was invisible because the maintainer rig's weights had always been placed by hand. If the weights are already local the run is nearly free — it resolves, skips the fetch, and hash-verifies. Confirm: the resolved fetch names **only** the artifacts you want, it exits **0**, and the printed launch command actually exists.
+9. **Boot the ACTUAL compose** (`bash scripts/switch.sh <slug>`) **+ `verify-full.sh`** — an equivalent hand `docker run` does NOT count; the compose file itself (env interpolation, entrypoint, mounts) is what ships.
+10. **BENCHMARKS.md row + `learnings/<model>.md` note** — same session as the work.
 
 ## Common pitfalls
 
