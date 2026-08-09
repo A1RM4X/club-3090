@@ -46,7 +46,7 @@ Yes — the 32 GB envelope unlocks single-card configs the 3090 can't fit, and t
 **What works on Blackwell (sm_120):**
 
 - **AutoRound INT4 / AWQ / GPTQ** — same as every other arch, fully validated. The Marlin pad overlay we retired (upstream #45295 in v0.24.0+) was an sm_86-only fix; Blackwell uses CUTLASS Machete natively.
-- **NVFP4 weights** — native Tensor Core path on all Blackwell. We ship `vllm/qwen-27b-single-nvfp4` (single-card, ⚠️ Production w/ caveats) and `vllm/qwen-27b-dual-nvfp4` (dual TP=2, ⚠️ Production w/ caveats) for Qwen3.6-27B. Both require sm_9.0+ — sub-9.0 cards run them via the slower Marlin W4A16 fallback.
+- **NVFP4 weights** — native Tensor Core path on all Blackwell. We ship `vllm/qwen-27b-single-nvfp4` (single-card, ⚠️ Production w/ caveats) and `vllm/qwen-27b-dual-nvfp4` (dual TP=2, ⚠️ Production w/ caveats) for Qwen3.6-27B. The native CUTLASS path needs sm 9.0+; older cards fall back to the slower Marlin W4A16 route.
 - **FP8 weights** — native on sm_89+ via DeepGEMM. FP8 KV is storage-only on consumer Blackwell (no FA3 or trtllm-gen FMHA build for sm_120), same as Ada and Ampere.
 - **32 GB headroom** — clears Ampere boot OOMs (e.g. Gemma 4 single-card configs that don't fit on 24 GB).
 
