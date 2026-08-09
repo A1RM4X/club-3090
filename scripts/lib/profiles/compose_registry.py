@@ -991,7 +991,7 @@ COMPOSE_REGISTRY = {
         host_ram_gb=146,
         required_sm=8.6,
         status="incubating",
-        status_note="A 284B MoE on 2x24 GB. QUALITY TIER of the two DeepSeek-Flash offload slugs. Stock upstream b10236, zero patches. Three levers compose: CPU expert offload (137 GiB of routed experts in host RAM) + partial residency (bundles pinned back onto the GPUs, sized by the launcher from DETECTED free VRAM) + the DSpark drafter. HARD GATE: ~146 GB host RAM worst case -- preflight REFUSES below it. Ships 200K, NOT 262K: at 262K with the drafter it boots READY at 97.4% VRAM, passes a trivial decode, then dies on a ~15.7K-token prefill (CUDA OOM in cuMemCreate, reproduced 2026-08-06). NO PERFORMANCE OR QUALITY NUMBERS ARE PUBLISHED -- incubating; a canonical bench and the 8-pack are both owed. Validated operationally only: boot + a 14,011-token prefill probe + verify-full all checks passed.",
+        status_note="A 284B MoE on 2x24 GB. QUALITY TIER of the two DeepSeek-Flash offload slugs. Stock upstream b10236, zero patches. Three levers compose: CPU expert offload (137 GiB of routed experts in host RAM) + partial residency (bundles pinned back onto the GPUs, sized by the launcher from DETECTED free VRAM) + the DSpark drafter. HARD GATE: ~146 GB host RAM worst case -- preflight REFUSES below it. Ships 200K, NOT 262K: at 262K with the drafter it boots READY at 97.4% VRAM, passes a trivial decode, then dies on a ~15.7K-token prefill (CUDA OOM in cuMemCreate, reproduced 2026-08-06). CANONICAL BENCH PUBLISHED 2026-08-09 (BENCHMARKS.md row 2, reference 2x3090, 3-boot medians): decode 17.1 narrative / 26.9 code at canonical sampling, prefill 369 @10K / 287 @90K, TTFT 169 ms; greedy-replay 35.2. The 8-pack is still owed -- stays incubating until quality lands.",
         category="frontier",
     ),
 
@@ -1009,7 +1009,7 @@ COMPOSE_REGISTRY = {
         host_ram_gb=86,
         required_sm=8.6,
         status="incubating",
-        status_note="REACH TIER of the two DeepSeek-Flash offload slugs: ~86 GB host RAM worst case vs the Q8 tier's ~146 GB, which is what makes a 284B model fit a constrained box. Stock upstream b10236, zero patches; same three levers (offload + launcher-sized residency + DSpark). ~2.6-bit experts. Scoped to dual 24 GB by design. NO PERFORMANCE OR QUALITY NUMBERS ARE PUBLISHED -- incubating; canonical bench and 8-pack both owed, and quality is the open question on a quant this low. Validated operationally only: boot + a 14,011-token prefill probe + verify-full all checks passed.",
+        status_note="REACH TIER of the two DeepSeek-Flash offload slugs: ~86 GB host RAM worst case vs the Q8 tier's ~146 GB, which is what makes a 284B model fit a constrained box. Stock upstream b10236, zero patches; same three levers (offload + launcher-sized residency + DSpark). ~2.6-bit experts. Scoped to dual 24 GB by design. CANONICAL BENCH PUBLISHED 2026-08-09 (BENCHMARKS.md row 3, reference 2x3090): decode 15.4 narrative / 24.3 code at canonical sampling, prefill 436 @10K / 311 @90K -- decode ~10% SLOWER than Q8 (lower draft acceptance on 2.6-bit experts); this tier's case is the RAM gate and prefill, not decode. The 8-pack is still owed, and quality is the open question on a quant this low -- stays incubating.",
         category="frontier",
     ),
 
