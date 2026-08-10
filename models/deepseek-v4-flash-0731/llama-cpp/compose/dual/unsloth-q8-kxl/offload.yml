@@ -23,6 +23,14 @@
 #              • 262K is NOT offered. With the drafter attached it boots READY at
 #                97.4% VRAM and survives a trivial decode, then dies on a ~15.7K-token
 #                prefill with CUDA OOM in cuMemCreate (measured 2026-08-06).
+#              • `-ub/-b 4096` is a decode↔prefill trade, and it is set to 4096 here
+#                DELIBERATELY. Halving to 2048 frees ~2.2-2.7 GB/card of CUDA compute
+#                buffer. Measured 2026-08-10 on the EXPERIMENTAL expert-cache config
+#                (fork engine + cache + CPU drafter — NOT this slug): the cache
+#                absorbed all of it, +1,301 resident experts → +10% decode for
+#                −12.5% prefill @10K. ⚠️ On THIS stock slug there is no cache to
+#                absorb the freed VRAM, so 2048 buys the prefill loss WITHOUT the
+#                decode gain. Change it only if you are also running a cache.
 #              • multi-GPU beyond 2 cards uses the multi4 compose, not this one.
 #   Best for:  The quality tier of the two DeepSeek-Flash slugs Pick IQ2 instead if you are host-RAM bound
 #              or prefill-bound. ⭐
