@@ -369,7 +369,68 @@ def resolve_variant_pin(profiles, variant: str, gpu_spec: str = "") -> dict[str,
     exports.update(_mem_util_env(profiles, variant, gpu_spec))   # Phase 2 mem-fraction floor
     exports.update(_deepgemm_env(profiles, variant, entry, gpu_spec))  # fp8w consumer-Blackwell fix
     exports.update(_decode_granularity_env(profiles, entry))     # #809 dLLM decode class
+    exports.update(_moe_cache_env(profiles, variant, entry, gpu_spec))  # expert-cache reserve floor
     return exports
+
+
+# Expert-cache reserve measured on the reference rig (2×RTX 3090, 24 GB, sm 8.6).
+# 1536 MiB was the sweep optimum there; 1024 measured ~11% SLOWER despite a larger
+# pool and a higher hit rate, because the reserve stopped covering the allocator's
+# working room. That regression is the failure mode this floor exists to avoid.
+_MOE_RESERVE_REFERENCE_VRAM_GB = 24
+_MOE_RESERVE_REFERENCE_MB = 1536
+# Fraction of card VRAM used as the floor on cards larger than the reference. 1536
+# of 24 GB is 6.25%; keeping the ratio means a bigger card gets proportionally more
+# allocator headroom rather than inheriting a number derived on a smaller one.
+_MOE_RESERVE_VRAM_FRACTION = 0.0625
+
+
+def _moe_cache_env(profiles, variant: str, entry: dict, gpu_spec: str) -> dict[str, str]:
+    """Expert-cache reserve floor. Injects MOE_RESERVE_MB UPWARD only, and only on
+    cards larger than the rig the compose default was tuned on.
+
+    `--moe-cache auto` grants free-minus-reserve, so the reserve is what the
+    allocator keeps to absorb the compute buffer's swing between graph shapes
+    (measured 1,128 MiB at -ub 4096 / 200K on the reference model) plus CUDA
+    context, cudagraphs and fragmentation (~3.2 GB untracked there). Too small and
+    the pool wins memory it then fights the allocator for: on 24 GB, 1024 MiB was
+    ~11% slower than 1536 while showing a BIGGER pool and a HIGHER hit rate — cache
+    counters improve as wall-clock regresses, so this cannot be tuned on hit rate.
+
+    Direction is deliberately one-way. The swing is a property of graph shape, not
+    of card capacity, so a larger card does not *need* more reserve; it can simply
+    afford more, and erring high costs a few hundred pool slots while erring low
+    costs double-digit throughput. Smaller-than-reference cards are left alone: the
+    compose default already encodes a measured value, and lowering it on an untested
+    card would be guessing in the direction that measurably hurts.
+
+    ⚠️ Evidence scope: 24 GB Ampere only. The scaling on 32/96 GB cards is a safety
+    heuristic, NOT a tuned optimum — it keeps the reserve/VRAM ratio the reference
+    rig validated. Anyone with a bigger card should sweep on wall-clock and pin
+    MOE_RESERVE_MB explicitly; an explicit pin always wins. Empty dict = no
+    injection (compose default stands)."""
+    if not gpu_spec:
+        return {}
+    if os.environ.get("MOE_RESERVE_MB"):
+        return {}  # explicit user pin always wins
+    if not entry.get("moe_cache"):
+        return {}  # only composes that actually run the expert cache
+    try:
+        hardware = _parse_gpu_specs(gpu_spec, profiles)
+    except LaunchCompatError:
+        return {}  # unmapped card -> compose default
+    vrams = [hw.vram_gb for hw in hardware if getattr(hw, "vram_gb", None)]
+    if not vrams:
+        return {}
+    # One reserve applies per device, so size it for the SMALLEST card in the rig:
+    # a mixed rig must not hand a 24 GB card a floor derived from a 96 GB sibling.
+    smallest = min(vrams)
+    if smallest <= _MOE_RESERVE_REFERENCE_VRAM_GB:
+        return {}  # at or below the tuned reference -> the measured default stands
+    scaled = int(smallest * 1024 * _MOE_RESERVE_VRAM_FRACTION)
+    if scaled <= _MOE_RESERVE_REFERENCE_MB:
+        return {}
+    return {"MOE_RESERVE_MB": str(scaled)}
 
 
 def _decode_granularity_env(profiles, entry: dict) -> dict[str, str]:

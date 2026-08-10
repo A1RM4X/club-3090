@@ -68,6 +68,18 @@ def _entry(
     # PCIe); "prefetch" = vLLM bulk layer prefetch. Surfaced as the c3 catalog
     # "offload" column. First used by the Laguna 118B-MoE offload slugs.
     offload=None,
+    # True when the compose runs an adaptive expert cache (llama.cpp `--moe-cache`):
+    # hot CPU-resident experts are held in spare VRAM and served from there instead
+    # of over PCIe. Only meaningful alongside an `offload` backend — the cache exists
+    # to soften the miss path that offload creates.
+    #
+    # Load-bearing, not documentation: the launch-compat layer gates its
+    # MOE_RESERVE_MB injection on this flag (`_moe_cache_env`), so a compose that
+    # runs the cache without declaring it silently keeps a reserve derived on a
+    # 24 GB card no matter what the detected hardware is. `--moe-cache auto` grants
+    # free-minus-reserve, and on the reference rig a reserve 512 MiB too small cost
+    # ~11% throughput while REPORTING a bigger pool and a higher hit rate.
+    moe_cache=False,
     # Minimum HOST RAM in GB for a weight-offload slug — the worst case (all experts
     # on CPU). This is a HARD GATE, not a recommendation: below it the box thrashes or
     # OOMs, and preflight_cpu_offload_ram() REFUSES. Surfaced as the c3 catalog
@@ -129,6 +141,7 @@ def _entry(
         "act_format": act_format,
         "act8_capable": act8_capable,
         "offload": offload,
+        "moe_cache": bool(moe_cache),
         "host_ram_gb": host_ram_gb,
         "chat_template": chat_template,
         "tp": tp,
