@@ -448,10 +448,15 @@ and the gate never fires** — which is the entire difference between host and g
 > the gate never fires so this is invisible; in a VM the gate fires first and nothing downstream
 > matters. **Installing a patched module in a VM will not clear `CNS`.** Confirm before you build.
 
-### ✅ THE FIX — `x-nv-gpudirect-clique` (config-only, transfer-verified)
+### ⚠️ THE GRANT-CLEARER — `x-nv-gpudirect-clique` (config-only; clears `CNS`, does NOT prove delivery)
 
-**This works. It is NVIDIA's own sanctioned mechanism, it needs no patched driver, and it was verified
-by transfer test on 2× RTX 3090 passed through to a Proxmox/QEMU guest on 2026-08-05.**
+**This clears the `CNS` refusal.** It is NVIDIA's own sanctioned mechanism and needs no patched driver.
+⚠️ **Corrected 2026-08-10** — this section previously said "transfer-verified": on the reference rig the
+mapping the clique grants was later proven to be a **mirror** (writes reflect back to the writer; the
+peer never receives a byte — see the verdict block below), and the "passing transfer test" was a
+round-trip/bandwidth false positive. The mechanism below is still the only config-only way past the
+chipset gate, and field reports suggest it delivers on some hosts — but treat the grant as unproven
+until a **destination-verified** transfer or a value-checked collective passes.
 
 `hypervisorPcieP2pDetection()` is consulted **125 lines before** the chipset denial and short-circuits
 straight out of it (`p2p_caps.c:438`):
@@ -550,9 +555,18 @@ for the **same** reason: **NCCL collectives over a clique-granted peer path**. I
 `nccl-tests` reproducer with no engine involved — `ncclCommInitRank` completes in ~0.22 s, then the
 **first collective** never returns.
 
-**Point-to-point copies work. Real collectives do not.** That is the whole finding, and it is exactly
-what NVIDIA's comment leaves room for: the hypervisor *warrants* P2P works, and a warrant is not a
-measurement.
+~~**Point-to-point copies work. Real collectives do not.**~~ ⚠️ **Corrected 2026-08-10 — the copies
+never worked either.** A boundary probe on a clique-restored boot proved the granted aperture is a
+**mirror**: every peer path (CE copy, SM store, SM load, system-scope atomics) misroutes to a private
+per-direction backing. The writer reading back through the peer window sees its own full pattern; the
+target GPU reading the same buffer locally sees untouched zeros; both directions; zero host IOMMU
+faults. The bandwidth table above is real — but it measured **posted-write completion into the wrong
+page**, not delivery. And a round-trip verification (copy A→B, copy back, compare) is an *identity
+operation* under a mirror, structurally unable to detect it: only a **one-way transfer verified at the
+destination** exposes the class. The NCCL hangs and the CE-path corruption are both downstream of this
+single silent misroute. Minimal repro + full matrix: the [NVIDIA/nccl#2335 row in
+UPSTREAM.md](UPSTREAM.md). NVIDIA's wording covers exactly this: the hypervisor *warrants* P2P works,
+and a warrant is not a measurement.
 
 **So on a VM, treat the clique as UNPROVEN until your own collective workload boots.** If it hangs:
 - Immediate, no reboot: `NCCL_P2P_DISABLE=1` (verified — vLLM TP=2 then loaded 9.66 GiB in 41 s and
@@ -590,7 +604,13 @@ other hosts — the XCP-ng/L40 and OpenStack reports suggest it does. But **it d
 > need all three:
 >
 > 1. `topo -p2p` grant — cheapest, proves least
-> 2. `p2pBandwidthLatencyTest` — proves copies work
+> 2. ~~`p2pBandwidthLatencyTest` — proves copies work~~ ⚠️ **corrected 2026-08-10: proves only that
+>    writes COMPLETE, not that they ARRIVE.** Against a mirrored aperture (see the verdict block in
+>    §4a) it passes at full line rate while zero bytes reach the peer, and round-trip compares pass
+>    identically (your own reflection comes back). The valid form of this tier is a **one-way copy
+>    verified by reading the destination GPU locally** — or skip straight to
+>    `bash scripts/p2p-validate.sh`, which runs a value-checked NCCL collective and catches both the
+>    hang class and the wrong-data class in one shot.
 > 3. **Boot the engine and config you actually serve, and complete a real request** — the only tier
 >    that catches this class
 >
