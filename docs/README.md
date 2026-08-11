@@ -77,7 +77,7 @@ These are cross-cutting references both tracks reach for.
 | Doc | What it is |
 |---|---|
 | **`scripts/switch.sh --list`** *(runtime command, not a doc)* | **The authoritative compose × slug matrix.** Registry-derived from `scripts/lib/profiles/compose_registry.py`, so it's always current — every launchable slug with its topology, model, engine, KV format, and max ctx. Run this rather than trusting any hand-maintained table; the static lists in the per-topology docs are illustrative, this is the source of truth. |
-| [`engines/`](engines/) | Per-engine deep dives — [vLLM](engines/VLLM.md), [llama.cpp](engines/LLAMA_CPP.md), [SGLang](engines/SGLANG.md). |
+| [`engines/`](engines/) | Per-engine deep dives — [vLLM](engines/VLLM.md), [llama.cpp](engines/LLAMA_CPP.md), [ik_llama](engines/IK_LLAMA.md), [SGLang](engines/SGLANG.md), [llamacpp-club3090](engines/LLAMACPP_CLUB3090.md) 🧪 (MoE expert cache — @leloch's, unmerged upstream). |
 | [`INFERENCE_ENGINES.md`](INFERENCE_ENGINES.md) | Engine picker — which engine for which workload, and structural gaps. |
 | [`CLIFFS.md`](CLIFFS.md) | The accumulated-context / prefill failure modes (Cliff 2, Cliff 2b) and how to detect them. |
 | [`QUANTIZATION.md`](QUANTIZATION.md) | **Quant field guide** — GGUF ladder, the vLLM/safetensors schemes, KLD-by-fidelity (§4a), and the **fast/balanced/max tier trade-space** (§4b). The conceptual home the dtype/kernel matrices support. |
