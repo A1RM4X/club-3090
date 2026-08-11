@@ -1,0 +1,66 @@
+schema_version: 1
+id: llamacpp-club3090
+display_name: llama.cpp club-3090 test-bed (MoE expert cache)
+type: llama.cpp
+stability: experimental
+install:
+  method: docker_image
+  # Digest-pinned, not tag-pinned: tags move, digests do not (#940 precedent).
+  # Built 2026-08-10 from noonghunna/llama.cpp @ stack/club3090-moe-cache (e0a208949),
+  # CUDA 12.8.1 base, CMAKE_CUDA_ARCHITECTURES="86;89;120". Package is PRIVATE.
+  spec: ghcr.io/noonghunna/llamacpp-club3090@sha256:17824d4483dbd60c297613bddf130f25e739d3edc7e633e4d973edc4e2165649
+# The expert cache gates itself on Ampere (moe_cache_cc_ampere). Below that the
+# feature is simply absent, and there is no degraded path, so no fallback_sm.
+min_sm: 8.6
+supported_model_families:
+  - deepseek4-moe         # DeepSeek-V4-Flash-0731 (arch deepseek4, 43 all-MoE layers, MLA+DSA)
+features:
+  moe_expert_cache: true  # --moe-cache: hot CPU-resident experts held in spare VRAM
+supported_kv_formats:
+  - fp16                  # llama.cpp default; MLA + a 4,352-cell SWA window keep KV ~1 GB even at 200K
+supported_drafters:
+  - dspark                # external DSpark drafter (--spec-type draft-dspark)
+supported_weight_formats:
+  - gguf
+required_overlays: []
+vendored_overlays: []
+required_genesis: false
+feature_provenance:
+  # ⚠️ The headline feature is NOT ours. Anything carrying it credits the author.
+  moe_expert_cache:
+    author: leloch
+    source: https://github.com/leloch/llama.cpp
+    upstream: https://github.com/ggml-org/llama.cpp/discussions/24528
+    status: unmerged            # not in mainline llama.cpp; this image is the only way to run it
+  moe_cache_parallel_scatter:   # L1
+    author: club-3090
+    status: offered-to-author
+  moe_cache_d2h_overlap:        # L3
+    author: club-3090
+    status: offered-to-author
+  moe_cache_nobudget_warn:      # E (+ the 2026-08-10 single-session gate)
+    author: club-3090
+    status: offered-to-author
+  moe_cache_bypass_warn_split:
+    author: club-3090
+    status: offered-to-author
+  topk_runtime_batch:
+    author: club-3090
+    status: interim             # superseded when ggml-org#26390 lands; drop, do not carry
+notes: >-
+  TEST BED, not a product. A llama.cpp fork where promising MoE-serving work from different
+  authors runs in one binary, on one rig, under one measurement harness; upstreaming is each
+  author's call under their own name. The headline feature — the MoE expert cache — is
+  **leloch's** work (RFC ggml-org#24528) and is NOT in mainline; club-3090 adds L1 parallel
+  scatter, L3 D2H overlap, a no-budget warning, a bypass warn-split, and multi-row top-k
+  batching. Measured 2026-08-10 on 2x RTX 3090 vs the stock b10236 slug, canonical prompts,
+  same session: decode 18.34 -> 23.64 narrative (~+29%), prefill 436 -> ~355 @10K (~-19%);
+  the published IMAGE runs ~4% below the local binary (CUDA 12.8 vs 13.2), so quote image
+  numbers. Tuning is 2x24 GB specific — RESERVE_MB=1536 was derived from a MEASURED 1,128 MiB
+  compute-buffer swing; 1024 measured ~11% SLOWER despite a bigger pool AND a higher hit rate
+  (cache counters are diagnostics, tune on wall-clock). The launch-compat layer raises
+  MOE_RESERVE_MB on larger cards via `_moe_cache_env`. ⚠️ Do NOT set
+  GGML_OP_OFFLOAD_MIN_BATCH on a cache compose: at 2 it silently prevents the cache from
+  allocating at all and costs 4.2x throughput (22.34 -> 5.31 tok/s, measured). sm 89/120 are
+  BUILT but UNVALIDATED — no Blackwell or Ada boot has been run. QUALITY IS UNTESTED: no
+  8-pack has been run on any config of this engine.

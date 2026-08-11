@@ -1,0 +1,144 @@
+# ===========================================================================
+# Profile (at-a-glance):
+#   Model:     DeepSeek-V4-Flash-0731 (284B MoE, unsloth UD-Q8_K_XL — MXFP4
+#              experts + BF16 attention, 151 GB across 5 shards)
+#   Engine:    llamacpp-club3090 (fork: leloch's MoE expert cache v2 + our L1/L3/E
+#              ports, bypass warn-split, and multi-row top-k batching)
+#   Topology:  Dual 3090 PCIe (layer-split -ts 1,1, no NVLink)
+#   Drafter:   DSpark n=5 external, PINNED TO CPU (-devd none) — see Caveats
+#   KV:        fp16 (llama.cpp default — MLA + a 4,352-cell SWA window keep it tiny)
+#   Vision:    no
+#   Max ctx:   204800  (262144 boots on this config — see Caveats)
+#   Genesis:   N/A — llama.cpp engine
+#   Status:    🧪 Experimental
+#   Caveats:   • ⚠️ ATTRIBUTION: the MoE expert cache is **leloch's** work
+#                (github.com/leloch/llama.cpp, RFC ggml-org#24528). This slug
+#                packages it; it does not originate it. Our additions are the
+#                L1 parallel scatter, L3 D2H overlap, no-budget warning, bypass
+#                warn-split, and the multi-row top-k batching.
+#              • UNMERGED ENGINE. The cache is not in mainline llama.cpp. This
+#                slug pins a fork image; it cannot be reproduced with stock.
+#              • QUALITY IS UNTESTED. No 8-pack has been run on this config.
+#                Both the cache and the CPU drafter touch the generation path.
+#                Stays 🧪 until an 8-pack + soak-continuous pass.
+#              • ⚠️ COLD-START TAX: the FIRST request after boot is slow (~50-75 s
+#                for 900 tokens) while the expert pool fills. Steady state is
+#                reached after one generation. Do not benchmark the first request.
+#              • `-devd none` is LOAD-BEARING, not a preference. With the drafter
+#                GPU-resident the cache records ZERO hits (device-list reorder in
+#                the shared-draft path), and on 2×24 GB the drafter also wants
+#                10.4 GiB that the pool needs. CPU drafter costs ~7-15% depending
+#                on acceptance; the cache more than repays it.
+#              • Tuning is 2×24 GB SPECIFIC. RESERVE_MB=1536 was derived from a
+#                MEASURED 1,128 MiB compute-buffer swing on this topology; 1024
+#                is below that swing and measured ~11% SLOWER despite a larger
+#                pool and higher hit rate. Do not copy these values to another
+#                card count or VRAM size without re-deriving them.
+#              • `-ub/-b 2048` is a decode↔prefill trade, chosen deliberately:
+#                vs 4096 it frees ~2.2-2.7 GB/card of compute buffer which the
+#                cache converts into ~1,300 more resident experts → +10% decode
+#                for −12.5% prefill @10K. Prefer 4096 for prompt-heavy work.
+#              • 262144 boots and serves here (unlike the stock slug, which OOMs
+#                at 262K with a GPU-resident drafter), but costs ~8% decode and
+#                445 expert slots, and this model is PREFILL-BOUND at depth.
+#                Set CTX=262144 only if you genuinely need it.
+#              • Needs ~140 GB of HOST RAM (experts live in CPU memory). Hard gate.
+#              • Load takes ~8-10 min (--no-mmap).
+#   Best for:  Decode-heavy DeepSeek serving — chat, agentic loops, long
+#              generations — where the expert cache pays for itself. ⭐
+# ---------------------------------------------------------------------------
+# WHY THIS EXISTS
+#   The stock Q8 slug keeps a 10.4 GiB DSpark drafter on the GPU and caches
+#   nothing, idling ~9.3 GB of VRAM. This config reallocates that: drafter to
+#   host, ~5,159 experts (~47% of 11,008) resident in VRAM instead. Measured
+#   2026-08-10 on the reference rig, same session, canonical prompts at temp 0:
+#
+#     stock slug              18.34 narr / 23.51 code
+#     this config             23.64 / 22.67 decode · 354.7 t/s prefill @10K
+#                             pool 2,579 + 2,580 slots · hit rate ~56%
+#
+#   ≈ +29% decode vs stock, ≈ −19% prefill. Cache hit rate and pool occupancy
+#   are DIAGNOSTICS ONLY — three times on this stack a config improved every
+#   cache counter and got slower. Tune on wall-clock.
+# ---------------------------------------------------------------------------
+services:
+  llama-cpp-deepseek-flash-q8-moecache:
+    # Digest-pinned, not tag-pinned: tags move, digests do not (#940 precedent).
+    # The engine profile is authoritative for this pin; keep them in step.
+    # Built 2026-08-10 from stack/club3090-moe-cache @ e0a208949, CUDA arch 86;89;120.
+    image: ${LLAMACPP_CLUB3090_IMAGE:-ghcr.io/noonghunna/llamacpp-club3090@sha256:17824d4483dbd60c297613bddf130f25e739d3edc7e633e4d973edc4e2165649}
+    container_name: ${ESTATE_CONTAINER:-llama-cpp-deepseek-flash-q8-moecache}
+    restart: unless-stopped
+    ports:
+      - "${BIND_HOST:-0.0.0.0}:${ESTATE_PORT:-${PORT:-8030}}:8080"
+    volumes:
+      - "${MODEL_DIR:-../../../../../../models-cache}:/models:ro"
+    environment:
+      # Expert-cache tuning — every value MEASURED on 2×24 GB, see Caveats.
+      - GGML_CUDA_MOE_CACHE_ADMIT_AFTER=${MOE_ADMIT_AFTER:-64}
+      - GGML_CUDA_MOE_CACHE_RESERVE_MB=${MOE_RESERVE_MB:-1536}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ['${ESTATE_GPUS:-0,1}']
+              capabilities: [gpu]
+    # ⚠️ LIST FORM, NOT a folded `command: >-` string — REQUIRED, not style.
+    # Docker Compose's command-line parser REJECTS `(gate|up|down)` inside a
+    # folded string. The list form skips shell parsing, so the regex survives
+    # byte-for-byte.
+    command:
+      - '-m'
+      - '/models/deepseek-v4-flash-0731-gguf/UD-Q8_K_XL/DeepSeek-V4-Flash-0731-UD-Q8_K_XL-00001-of-00005.gguf'
+      - '--host'
+      - '0.0.0.0'
+      - '--port'
+      - '8080'
+      - '--alias'
+      - 'deepseek-v4-flash'
+      - '-np'
+      - '1'
+      - '-c'
+      - '${CTX:-204800}'
+      - '-ngl'
+      - '99'
+      - '-sm'
+      - 'layer'
+      - '-ts'
+      - '1,1'
+      - '-fa'
+      - 'on'
+      # ⚠️ SINGLE -ot with comma-separated rules. Current mainline DEPRECATES
+      # repeated -ot and honours ONLY THE LAST occurrence — passing it three
+      # times silently drops the GPU pins. All experts to CPU here; the cache
+      # decides residency dynamically, so static pins are counter-productive.
+      - '-ot'
+      - 'blk\.[0-9]+\.ffn_(gate|up|down)_exps\.weight=CPU'
+      - '-t'
+      - '${THREADS:-8}'
+      - '-ub'
+      - '${UBATCH:-2048}'
+      - '-b'
+      - '${UBATCH:-2048}'
+      - '--cache-prompt'
+      - '--no-mmap'
+      - '-md'
+      - '/models/deepseek-v4-flash-0731-gguf/dspark/dspark-DeepSeek-V4-Flash-0731-Q8_0.gguf'
+      - '--spec-type'
+      - 'draft-dspark'
+      - '--spec-draft-n-max'
+      - '${SPEC_N:-5}'
+      # Drafter on the HOST — load-bearing, see Caveats.
+      - '-devd'
+      - 'none'
+      - '--moe-cache'
+      - '${MOE_CACHE:-auto}'
+      - '--fit'
+      - 'off'
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 40
+      start_period: 900s

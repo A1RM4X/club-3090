@@ -1,0 +1,125 @@
+# ===========================================================================
+# Profile (at-a-glance):
+#   Model:     DeepSeek-V4-Flash-0731 (284B MoE, unsloth UD-Q8_K_XL — MXFP4
+#              experts + BF16 attention, 151 GB across 5 shards)
+#   Engine:    llamacpp-club3090 (fork: leloch's MoE expert cache v2 + our L1/L3/E
+#              ports, bypass warn-split, and multi-row top-k batching)
+#   Topology:  4× CUDA (layer-split -ts 1,1,1,1)
+#   Drafter:   DSpark n=5 external, PINNED TO CPU (-devd none)
+#   KV:        fp16
+#   Vision:    no
+#   Max ctx:   204800
+#   Genesis:   N/A — llama.cpp engine
+#   Status:    🧪 Experimental
+#   Caveats:   • ⚠️⚠️ THE TUNING BELOW IS INHERITED, NOT DERIVED — this is the
+#                single most important caveat on this file. `RESERVE_MB=1536`
+#                and `-ub 2048` were measured on **2×24 GB** against a MEASURED
+#                1,128 MiB compute-buffer swing. On 4 cards the per-card free
+#                VRAM, the swing, and the pool/compute balance are all different,
+#                and on 32 GB Blackwell they are different again. On 2×24 GB the
+#                neighbouring value (1024) was ~11% SLOWER — the knee is sharp.
+#                **Re-derive both per topology before trusting this file.**
+#                Procedure: boot with `-lv 4` + `GGML_CUDA_MOE_CACHE_STATS=50`,
+#                read the compute-buffer swing, set RESERVE above it, then sweep
+#                on WALL-CLOCK (never on hit rate).
+#              • ⚠️ NOT VALIDATED ON THIS RIG. The reference rig has 2 cards.
+#                Every number in the dual sibling is 2×3090; nothing here has
+#                been booted. This file is scaffolding pending 4-card rig time.
+#              • ⚠️ BLACKWELL (sm_120) IS UNVERIFIED. The cache has a compute
+#                capability gate and all measurements are Ampere (sm_86). Do not
+#                claim 5090 support until the image is built for sm_120 AND a
+#                boot + hit-rate check passes on that hardware.
+#              • ⚠️ ATTRIBUTION: the MoE expert cache is **leloch's** work
+#                (github.com/leloch/llama.cpp, RFC ggml-org#24528).
+#              • UNMERGED ENGINE — pins a fork image; not reproducible on stock.
+#              • QUALITY IS UNTESTED. No 8-pack has been run on any topology.
+#              • COLD-START TAX: the first request after boot is slow while the
+#                expert pool fills. Do not benchmark it.
+#              • `-devd none` is LOAD-BEARING: with the drafter GPU-resident the
+#                cache records ZERO hits (shared-draft device-list reorder).
+#              • Needs ~140 GB of HOST RAM. Hard gate.
+#   Best for:  Decode-heavy DeepSeek serving on 4 cards — PENDING VALIDATION. ⭐
+# ---------------------------------------------------------------------------
+# WHY THIS EXISTS
+#   The 4-card sibling of the dual moe-cache slug. More aggregate VRAM should
+#   mean a larger expert pool and a higher resident fraction (dual reaches ~47%
+#   of 11,008 experts); whether that converts into decode throughput is exactly
+#   what needs measuring, because on this stack a bigger pool with better hit
+#   rates has repeatedly been SLOWER. Treat the dual numbers as a hypothesis
+#   for this topology, not a prediction.
+# ---------------------------------------------------------------------------
+services:
+  llama-cpp-deepseek-flash-q8-moecache-multi4:
+    # Digest-pinned, not tag-pinned (#940 precedent). Engine profile is authoritative.
+    # Built 2026-08-10 from stack/club3090-moe-cache @ e0a208949, CUDA arch 86;89;120.
+    image: ${LLAMACPP_CLUB3090_IMAGE:-ghcr.io/noonghunna/llamacpp-club3090@sha256:17824d4483dbd60c297613bddf130f25e739d3edc7e633e4d973edc4e2165649}
+    container_name: ${ESTATE_CONTAINER:-llama-cpp-deepseek-flash-q8-moecache-multi4}
+    restart: unless-stopped
+    ports:
+      - "${BIND_HOST:-0.0.0.0}:${ESTATE_PORT:-${PORT:-8032}}:8080"
+    volumes:
+      - "${MODEL_DIR:-../../../../../../models-cache}:/models:ro"
+    environment:
+      # ⚠️ PLACEHOLDER VALUES inherited from the 2-card sibling. Re-derive.
+      - GGML_CUDA_MOE_CACHE_ADMIT_AFTER=${MOE_ADMIT_AFTER:-64}
+      - GGML_CUDA_MOE_CACHE_RESERVE_MB=${MOE_RESERVE_MB:-1536}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ['${ESTATE_GPUS:-0,1,2,3}']
+              capabilities: [gpu]
+    # ⚠️ LIST FORM, NOT a folded string — compose rejects `(gate|up|down)` in a
+    # folded `command: >-`.
+    command:
+      - '-m'
+      - '/models/deepseek-v4-flash-0731-gguf/UD-Q8_K_XL/DeepSeek-V4-Flash-0731-UD-Q8_K_XL-00001-of-00005.gguf'
+      - '--host'
+      - '0.0.0.0'
+      - '--port'
+      - '8080'
+      - '--alias'
+      - 'deepseek-v4-flash'
+      - '-np'
+      - '1'
+      - '-c'
+      - '${CTX:-204800}'
+      - '-ngl'
+      - '99'
+      - '-sm'
+      - 'layer'
+      - '-ts'
+      - '${TENSOR_SPLIT:-1,1,1,1}'
+      - '-fa'
+      - 'on'
+      # ⚠️ SINGLE -ot, comma-separated: current mainline honours ONLY THE LAST
+      # -ot occurrence. All experts to CPU; the cache decides residency.
+      - '-ot'
+      - 'blk\.[0-9]+\.ffn_(gate|up|down)_exps\.weight=CPU'
+      - '-t'
+      - '${THREADS:-8}'
+      - '-ub'
+      - '${UBATCH:-2048}'
+      - '-b'
+      - '${UBATCH:-2048}'
+      - '--cache-prompt'
+      - '--no-mmap'
+      - '-md'
+      - '/models/deepseek-v4-flash-0731-gguf/dspark/dspark-DeepSeek-V4-Flash-0731-Q8_0.gguf'
+      - '--spec-type'
+      - 'draft-dspark'
+      - '--spec-draft-n-max'
+      - '${SPEC_N:-5}'
+      - '-devd'
+      - 'none'
+      - '--moe-cache'
+      - '${MOE_CACHE:-auto}'
+      - '--fit'
+      - 'off'
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 40
+      start_period: 900s

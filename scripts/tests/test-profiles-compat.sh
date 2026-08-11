@@ -35,7 +35,7 @@ p = load_profiles()
 assert len(p.hardware) == 10  # +dgx-spark (#576 follow-up)
 assert len(p.models) == 16   # +qwen-agentworld-35b-a3b
 assert len(p.workloads) == 5
-assert len(p.engines) == 13
+assert len(p.engines) == 14
 assert len(p.drafters) == 16  # +dspark
 assert len(p.calibration) == 6
 PY
