@@ -70,3 +70,9 @@ results/*
 # #252: curated quality-baseline corpus (committed; the trusted n>=3 aggregates
 # `quality-baseline.sh` diffs fresh runs against). Run output elsewhere stays ignored.
 !results/baselines/
+
+# Local AI-agent working state (Claude Code, and anything that mirrors its layout).
+# Never committed: it holds per-machine settings, session scratch, and local
+# worktree bookkeeping that is meaningless — and occasionally sensitive — to
+# anyone else. Listed explicitly because `git add -A` would otherwise sweep it in.
+.claude/
