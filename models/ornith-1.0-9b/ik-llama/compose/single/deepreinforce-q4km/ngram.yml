@@ -43,7 +43,7 @@ services:
     ports:
       - "${BIND_HOST:-0.0.0.0}:${ESTATE_PORT:-${PORT:-8070}}:8080"
     volumes:
-      - "${MODEL_DIR:-/mnt/models/huggingface}:/models:ro"
+      - "${MODEL_DIR:-../../../../../../models-cache}:/models:ro"
     # ENTRYPOINT is /app/llama-server — args only. The ngram self-spec stage is
     # baked in (this is ngram.yml); tune via NGRAM_NMAX / NGRAM_MIN_HITS.
     command: >-

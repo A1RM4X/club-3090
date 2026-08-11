@@ -98,7 +98,7 @@ services:
     ports:
       - "${BIND_HOST:-0.0.0.0}:${PORT:-8099}:8000"
     volumes:
-      - ${MODEL_DIR:-/opt/ai/models}:/root/.cache/huggingface
+      - ${MODEL_DIR:-../../../../../../models-cache}:/root/.cache/huggingface
       # W4A8 int8-activation patches (Bug A INC input_dtype + Bug B negscale fold) —
       # SHARED from the qwen3.6-27b tree (single source of truth, like pr48375);
       # run at boot via install.sh. Registered in patches.yml (qwen-w4a8-int8-act).
