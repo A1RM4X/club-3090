@@ -524,6 +524,18 @@ First-pass numbers for the two MoE models onboarded in v0.7.3. **Preview** track
 
 ---
 
+## DeepSeek-V4-Flash-0731 (284B MoE via CPU expert offload — 🧪 experimental)
+
+284B MoE served on 48 GB of VRAM by keeping **all** routed experts in host RAM and letting the [`llamacpp-club3090`](docs/engines/LLAMACPP_CLUB3090.md) engine hold the hot ones in spare VRAM ([@leloch](https://github.com/leloch/llama.cpp)'s MoE expert cache, [RFC ggml-org#24528](https://github.com/ggml-org/llama.cpp/discussions/24528) — **unmerged upstream**). ⚠️ The binding requirement is **host RAM, not VRAM**: ~160 GiB resident for the Q8_K_XL config (192 GB practical floor). Full writeup: [discussion #951](https://github.com/noonghunna/club-3090/discussions/951).
+
+| Compose | Rig | KV | Max ctx | Narr / Code TPS | PP tok/s | Peak VRAM | Date | Notes |
+| --- | --- | --- | ---: | ---: | ---: | ---: | --- | --- |
+| `llamacpp-club3090/deepseek-flash-dual-q8-moecache` | @noonghunna (2× 3090, 230 W cap) | fp16 | 200K | **21.91 / 34.14** (CV 4.8% / 2.3%) | **320.9** @10K | 22.8 GB/card | 2026-08-11 | **Canonical protocol** (3 warm + 5 measured, `temp 0.6/0.95/20`). TTFT ~127 ms. Unsloth `UD-Q8_K_XL`, 151 GB weights, **RSS 160.4 GiB**. moe-cache `auto` → ~5,159 experts resident, **~57% hit rate**; DSpark drafter **on CPU** (`-devd none` — a GPU-resident drafter gives the cache **zero hits**). Quality 8-pack: **128/150 reasoning-on · 122/150 off** (⚠️ no stock-engine arm, so *not* a quality-neutrality claim). ⚠️ `bench.sh` swap guard FAILed (17 MB of the serving process paged out) — re-run after a clean boot to firm these up. verify-full PASS; verify-stress + soak **not run**. |
+| — same, greedy A/B vs stock `b10236` | @noonghunna (2× 3090) | fp16 | 200K | 18.34 → **23.64** narr (**+29%**) | 436 → ~355 (−19%) | 22.8 GB/card | 2026-08-10 | **`temp 0` (greedy), same session, same binary** — single-variable A/B, spread 0.2%. ⚠️ Greedy inflates spec-dec acceptance (~0.96), so **23.64 is not a serving number** — quote the canonical 21.91 row above. Cumulative ladder: `18.34 → 21.56` (cache + CPU drafter) `→ 22.96` (RESERVE_MB 1536) `→ 23.64` (`-ub 2048`). ~⅔ of the −19% prefill is the `-ub` choice, reversible at `-ub 4096` for ~−10% decode. |
+| `llamacpp-club3090/deepseek-flash-multi4-q8-moecache` | — | fp16 | 200K | **not run** | — | — | — | ⚠️ **Constants inherited from the 2-card measurement, never run on 4 cards.** `RESERVE_MB`/`-ub` were derived against 2×24 GB; per-card free VRAM differs at TP=4. |
+
+---
+
 ## Ornith-1.0 (DeepReinforce agentic-coding fine-tunes — 🧪 experimental)
 
 DeepReinforce agentic-coding RL fine-tunes of the Qwen3-Next family (`qwen35` 9B dense-hybrid · `qwen35moe` 35B-A3B). Both land **in-band with the base Qwen** on general capability — the fine-tune's value, where any, is coding (the 35B edges the base on aider; the 9B is a footprint play). ik_llama GGUF, drafter-free ngram, full 262K.

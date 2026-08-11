@@ -30,6 +30,21 @@ On **2× RTX 3090**, DeepSeek-V4-Flash-0731 (UD-Q8_K_XL, 284B MoE), same session
 | **decode** (narrative) | 18.34 tok/s | **23.64 tok/s** | **~+29%** |
 | **prefill** @10K | 436 tok/s | ~355 tok/s | ~−19% |
 
+⚠️ **Those are `temp 0` (greedy) figures** — both arms, so the +29% is a valid single-variable A/B, but
+greedy inflates spec-dec acceptance (~0.96) and the absolutes are **not serving numbers**. Under the
+canonical protocol (`temp 0.6 / top_p 0.95 / top_k 20`, 3 warm + 5 measured, 2026-08-11):
+
+| Metric | Result |
+|---|--:|
+| decode, narrative | **21.91 tok/s** (CV 4.8%) |
+| decode, code | **34.14 tok/s** (CV 2.3%) |
+| TTFT | **~127 ms** |
+| prefill @10K | **320.9 tok/s** |
+
+**Quote 21.91 as the serving number.** There is no canonical *stock* arm, so no canonical uplift figure
+exists — only a canonical absolute. ⚠️ That run tripped `bench.sh`'s swap guard (17 MB of the serving
+process paged out); worth re-running after a clean boot.
+
 **You are trading prefill for decode.** That is the whole bargain, and whether it's a good one depends
 entirely on your workload — see [Is this worth it for you?](#is-this-worth-it-for-you) below.
 
@@ -190,8 +205,12 @@ draft or `--parallel 4` lands squarely in it. The lever is raising `MAX_BATCH`, 
 
 Stated plainly, because an experimental engine that hides its gaps is worse than no engine:
 
-- **Quality has one measurement, and no same-model comparison arm.** We cannot claim the cache is
-  quality-neutral. Proving that needs the identical 8-pack against stock `b10236`, which we have not run.
+- **Quality is measured in both reasoning modes, but has no same-model comparison arm.** 8-pack
+  (benchlocal-cli v0.9.4, `repeat = 1`): **128/150 reasoning-on, 122/150 off** — six packs tied or
+  improved with reasoning on, none regressed, and thinking costs up to **4× latency** on the packs
+  where it engages. Zero `<think>` leakage, zero timeouts across all 300 scenarios. ⚠️ These packs were
+  never run against stock `b10236` on the same model, so this shows the output is **sound**, not that
+  the cache is **quality-neutral**. Proving the latter needs a stock arm we have not run.
 - **Ada and Blackwell are compiled but never booted.**
 - **The 4-card slug has never run on 4 cards.** Its `RESERVE_MB` and `-ub` are *inherited from the
   2-card measurement*, not derived — per-card free VRAM differs at TP=4.
