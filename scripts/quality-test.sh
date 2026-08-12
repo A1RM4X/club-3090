@@ -234,6 +234,7 @@ SANDBOX_LOG_DIR="${SANDBOX_LOG_DIR:-}"
 SAMPLING_FROM_SERVER="${SAMPLING_FROM_SERVER:-0}"
 ENABLE_THINKING="${ENABLE_THINKING:-0}"
 NO_THINKING="${NO_THINKING:-0}"
+REASONING_EFFORT="${REASONING_EFFORT:-}"
 THINKING_MAX_TOKENS="${THINKING_MAX_TOKENS:-}"
 MAX_TOKENS="${MAX_TOKENS:-}"
 # #252: passthroughs to benchlocal-cli for the quality-baseline corpus —
@@ -757,6 +758,32 @@ fi
 if [[ "$NO_THINKING" == "1" ]]; then
   CLI_ARGS+=(--no-thinking)
   echo "[quality-test] thinking: disabled for every pack, ignoring per-pack defaults (non-canonical)"
+fi
+# ---- reasoning switch: resolved by benchlocal-cli itself (its #131) ---------
+# WHICH request field turns reasoning off is model-specific, and an unrecognised
+# one is silently ignored — so on such a model --no-thinking and --enable-thinking
+# produce two IDENTICAL reasoning-on runs, and the 8-pack reports an off-vs-on
+# comparison that never happened. Found on Inkling-Small 2026-08-12 (effort dial,
+# default 0.9; reads `reasoning_effort`, not `enable_thinking`).
+#
+# This wrapper used to work around it by injecting the switch via --extra-body.
+# That is GONE: benchlocal-cli#131 resolves the control itself and — crucially —
+# forwards it through the Hermes and Aider SANDBOXES, which an --extra-body from
+# out here never reached. Two detectors would only drift; theirs is complete.
+# See noonghunna/benchlocal-cli#130 (report) and #131 (fix, merged 2026-08-12).
+#
+# ⚠️ The capability check below is the guard that matters: a benchlocal-cli older
+# than #131 fails SILENTLY on such a model — no error, just a null A/B.
+if ! benchlocal-cli run --help 2>/dev/null | grep -q -- "--reasoning-effort"; then
+  echo "[quality-test] WARN: this benchlocal-cli predates the model-specific thinking fix (#131)." >&2
+  echo "[quality-test]   On a model that does not use chat_template_kwargs.enable_thinking (e.g. an" >&2
+  echo "[quality-test]   effort-dial model), --no-thinking and --enable-thinking are BOTH ignored and" >&2
+  echo "[quality-test]   the two arms are the same reasoning-on run — a silently invalid A/B." >&2
+  echo "[quality-test]   Upgrade: pip install --upgrade git+https://github.com/noonghunna/benchlocal-cli.git" >&2
+fi
+if [[ -n "$REASONING_EFFORT" ]]; then
+  CLI_ARGS+=(--reasoning-effort "$REASONING_EFFORT")
+  echo "[quality-test] reasoning effort: $REASONING_EFFORT (forwarded to benchlocal-cli)"
 fi
 if [[ -n "$THINKING_MAX_TOKENS" ]]; then
   CLI_ARGS+=(--thinking-max-tokens "$THINKING_MAX_TOKENS")
