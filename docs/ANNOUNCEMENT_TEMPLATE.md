@@ -20,7 +20,7 @@ For a *reply* answering a specific question (e.g. "where's the X YAML?"), you ca
 | 0 | **Update banner** (italic, above `---`) | Only on edits — "promoted 🧪 → ✅", "added cross-rig numbers". States *what changed and when*. | First publish. |
 | 1 | **Intro** — what shipped, one sentence | Name the slug in **bold**, the model, the engine, the topology. Credit the model/quant/drafter authors inline (`@handle` + HF link) — capability that isn't ours gets attributed up front. | Never. |
 | 2 | **Headline finding** | The single most interesting result, one line — the reason someone keeps reading. | Never. |
-| 3 | **🎴 Results Card** | The measured panel — ① Serving ② Quality (full 8-pack `/150`) ③ Takeaways. Author per [`RESULTS_CARD.md`](RESULTS_CARD.md) — **v2**: the Quality table carries Std / CV / p50 / p95 and states `repeat = N`; Serving carries KV quality class, ctx/slot, power cap, three-layer interconnect and acceleration state. | Never — numbers are the point. |
+| 3 | **🎴 Results Card** | The measured panel — ① Serving ② Quality (full 8-pack `/150`, **pass@1 AND pass@3 per pack**) ③ Takeaways. Author per [`RESULTS_CARD.md`](RESULTS_CARD.md) — **v2**: the Quality table carries Std / CV / p50 / p95 and states `repeat = N`; Serving carries KV quality class, ctx/slot, power cap, three-layer interconnect and acceleration state. | Never — numbers are the point. |
 | 4 | **Why / context** | Why this model/config is worth shipping — the workload it serves, the trade it makes. (#350's "Why an uncensored model?" / "Why it's Production".) | A trivially-obvious ship. |
 | 5 | **Getting it** | Where the weights live (public HF repo + `hf download`), whether `setup.sh`/`launch.sh` auto-fetch, any engine-version floor. | — |
 | 6 | **Run it** | The exact `switch.sh` / `gpu-mode` command, the port + served model name, OWUI wiring. Copy-pasteable. | — |
@@ -59,19 +59,21 @@ The headline: **<the single most interesting finding, one line>.**
 <n-sweep / context-ceiling / lift summary line>
 
 ### ② Quality bench, thinking <on|off>, benchlocal-cli v<X.Y.Z>, repeat = <N>
-| Pack | Pass / Total | Score | Std | CV | p50 latency | p95 latency | Status |
+| Pack | pass@1 | pass@3 | Score | Std | CV | p50 latency | p95 latency | Status |
 |---|---:|---:|---:|---:|---:|---:|---|
-| toolcall-15 (v1.0.1) | a / b | c% | d% | e | f s | g s | ok |
-| instructfollow-15 (v1.0.0) | a / b | c% | d% | e | f s | g s | ok |
-| structoutput-15 (v1.0.0) | a / b | c% | d% | e | f s | g s | ok |
-| dataextract-15 (v1.0.0) | a / b | c% | d% | e | f s | g s | ok |
-| reasonmath-15 (v1.0.0) | a / b | c% | d% | e | f s | g s | ok |
-| bugfind-15 (v1.0.1) | a / b | c% | d% | e | f s | g s | ok |
-| hermesagent-20 (v1.0.0) | a / b | c% | d% | e | f s | g s | ok |
-| cli-40 (v1.0.2) | a / b | c% | d% | e | f s | g s | ok |
-| **TOTAL** | **A / B** | **C%** | | | | | |
+| toolcall-15 (v1.0.1) | a / b | a3 / b | c% | d% | e | f s | g s | ok |
+| instructfollow-15 (v1.0.0) | a / b | a3 / b | c% | d% | e | f s | g s | ok |
+| structoutput-15 (v1.0.0) | a / b | a3 / b | c% | d% | e | f s | g s | ok |
+| dataextract-15 (v1.0.0) | a / b | a3 / b | c% | d% | e | f s | g s | ok |
+| reasonmath-15 (v1.0.0) | a / b | a3 / b | c% | d% | e | f s | g s | ok |
+| bugfind-15 (v1.0.1) | a / b | a3 / b | c% | d% | e | f s | g s | ok |
+| hermesagent-20 (v1.0.0) | a / b | a3 / b | c% | d% | e | f s | g s | ok |
+| cli-40 (v1.0.2) | a / b | a3 / b | c% | d% | e | f s | g s | ok |
+| **TOTAL** | **A / B** | **A3 / B** | **C%** | | | | | |
 
-**Equivalent to: X/150**
+**Equivalent to: X/150 pass@1 · Y/150 pass@3**
+
+⚠️ Both metrics, per pack — they can point in opposite directions; see [`RESULTS_CARD.md`](RESULTS_CARD.md) → Quality table (v2).
 
 <details>
 <summary>Raw data</summary>

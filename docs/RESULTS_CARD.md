@@ -34,7 +34,7 @@ _(engine-internal decode TPS; 3 warm + 5 measured; temp/top-k/top-p; image/pin; 
 
 ### ② Quality bench, thinking <on|off>, benchlocal-cli v<X.Y.Z>, repeat = <N>
 
-| Pack | Pass / Total | Score | Std | CV | p50 latency | p95 latency | Status |
+| Pack | pass@1 | pass@3 | Score | Std | CV | p50 latency | p95 latency | Status |
 |---|---:|---:|---:|---:|---:|---:|---|
 | toolcall-15 (v1.0.1) | a / b | c% | d% | e | f s | g s | ok |
 | instructfollow-15 (v1.0.0) | a / b | c% | d% | e | f s | g s | ok |
@@ -59,7 +59,7 @@ _(engine-internal decode TPS; 3 warm + 5 measured; temp/top-k/top-p; image/pin; 
 
 **Optional reasoning/code packs** _(on top of the core 8-pack — kept separate so /150 stays intact)_:
 
-| Pack | Pass / Total | Score | Std | CV | p50 | p95 | Status |
+| Pack | pass@1 | pass@3 | Score | Std | CV | p50 | p95 | Status |
 |---|---:|---:|---:|---:|---:|---:|---|
 | humaneval-plus-30 | a / b | c% | d% | e | f s | g s | ok |
 | lcb-v6-30 | a / b | c% | d% | e | f s | g s | ok |
@@ -73,7 +73,7 @@ _(engine-internal decode TPS; 3 warm + 5 measured; temp/top-k/top-p; image/pin; 
 - _tl;dr — one line._
 ````
 
-**A/B card?** Keep the v1 two-value-column shape for the Quality table (`| Pack | setting A | setting B |`, bold the winner per row) — the dispersion columns are for characterising *one* config; an A/B is about the delta between two. State `repeat = N` for both arms either way.
+**A/B card?** Keep the two-value-column shape for the Quality table — but **two columns PER ARM**, not one: `| Pack | A pass@1 | A pass@3 | B pass@1 | B pass@3 | Δp@1 | Δp@3 |`, bold the winner per row. Carrying only pass@1 per arm is exactly how an A/B inverts a conclusion (see the Quality table rules above) — the dispersion columns are for characterising *one* config; an A/B is about the delta between two. State `repeat = N` for both arms either way.
 
 ## Rules that keep cards comparable
 
@@ -84,6 +84,8 @@ _(engine-internal decode TPS; 3 warm + 5 measured; temp/top-k/top-p; image/pin; 
 
 ### Quality table (v2)
 
+- **⚠️ BOTH `pass@1` AND `pass@3`, per pack — never pass@1 alone, and never pass@3 only on the TOTAL row.** The two can point in OPPOSITE directions, so a pass@1-only table produces confidently wrong conclusions. Measured on Inkling-Small 2026-08-12, reasoning off → on: `hermesagent-20` went **−2 on pass@1 but 0 on pass@3** (12/20 in both legs) — reasoning cost *first-attempt reliability*, not capability, which is a different engineering conclusion and invisible on pass@1. In the same table `toolcall-15` was −1 / **−2** (worse than pass@1 implied) and `cli-40` +3 / **+1** (better). **When the two deltas disagree, say so in the prose — that divergence is usually the most interesting thing in the table.** This omission has shipped twice, once in a published announcement ([#959](https://github.com/noonghunna/club-3090/discussions/959)) that needed a correction banner.
+- **Say what pass@3 IS.** At `repeat = 1` it is benchlocal's **retry-on-fail**, not three independent samples — so it is a recovery metric, NOT a variance estimate. Std / CV are the dispersion columns; don't let pass@3 stand in for them.
 - **`repeat = N` is always stated**, in the heading, even when it is 1. At `repeat = 1` the **Std / CV cells render `—`** — same columns, honestly labelled, so tables stay diffable across posts and nobody has to guess whether a blank means "zero dispersion" or "not measured".
 - **`repeat ≥ 3` is encouraged for headline and promotion posts.** It triples 8-pack runtime, so it is *encouraged, not gated*. The reason to want it: pack noise is ±5–7 points, and a single run gives you no way at all to tell a real regression from that. A CV column is how a reader sees which packs are stable (`toolcall` at 0.00) and which are not (`hermesagent` at 0.14) — and therefore which rows a small delta is even meaningful on.
 - **p50 / p95 latency per pack**, from the per-item timings benchlocal already records. p95 is the one that matters for an agent workload: a pack whose p50 is 1.3 s and p95 is 12.9 s is a different serving experience from one flat at 4 s, and the mean hides it completely.
