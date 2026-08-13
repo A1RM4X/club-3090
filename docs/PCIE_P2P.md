@@ -836,6 +836,32 @@ Everything below was hit for real. Start from the symptom.
 >
 > **Only reading the generated text caught it.** That is strictly worse than a hang, which at least
 > announces itself. Before trusting any verdict in §7, generate real output and read it.
+>
+> ⭐ **You do not have to eyeball it — `verify-full` scans for exactly this.** Step 8/9 (*output
+> quality / cascade detection*) generates a 2000-token essay and computes lexical variety over the
+> first 200 words; the regex matches only alphabetic tokens, so a punctuation-spam completion like
+> `!!!!!!!!!!!!` yields an empty word list → **`variety = 0.000`** → hard fail against the `≥ 0.30`
+> threshold. It independently trips on `max_line_repeat ≥ 5` and on an empty completion.
+>
+> ```bash
+> bash scripts/verify-full.sh      # after any P2P change, before trusting a bench
+> ```
+>
+> ⚠️ **Know its limit.** It catches **degenerate** output — punctuation spam, token repetition,
+> collapse. It does **not** catch *fluent but wrong* output: text that reads naturally while not being
+> conditioned on the prompt scores high variety and passes. #922 and
+> [#751](https://github.com/noonghunna/club-3090/issues/751) both produced the degenerate form, which
+> is why this works for them; a subtler all-reduce corruption could slip past. For that tier use a
+> quality pack or a needle test with a known answer.
+>
+> **The correctness ladder for a P2P bring-up**, weakest to strongest:
+>
+> | tier | what it proves | what it misses |
+> |---|---|---|
+> | `nvidia-smi topo -p2p rw` = OK | the driver *granted* peer access | grant ≠ delivery — it can lie (§4a, #873) |
+> | byte-verified transfer test | data crosses and round-trips | a collective can still be wrong (this section) |
+> | **`verify-full`** | the model still produces *language* | fluent-but-wrong output |
+> | quality pack / needle with known answer | the output is *correct* | — |
 
 
 | symptom | cause | fix |
