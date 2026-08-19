@@ -61,8 +61,11 @@ auto-off (its NVLink-mesh gate at world>2, #786) so NCCL handles the all-reduce 
 hybrid — a healthy, expected state, not a misconfiguration. PCIe decode peak was 39% of link,
 so the interconnect is not the bottleneck.
 
-**Status: 🧪 Experimental — full functional/stress/soak/bench gate green; 8-pack quality
-open** (benchlocal not installed on this rig). The drafter is proven (AL 4.68–7.20), the
-256K ceiling is understood and documented, and every stability gate passes. See
-[Issue #1064](https://github.com/noonghunna/club-3090/issues/1064) and
-[PR #1060](https://github.com/noonghunna/club-3090/pull/1060).
+**Status: 🧪 Experimental — all 8 gates green.** verify-full 9/9 · verify-stress 7/7
+(ceiling ladder 6/6 to 240,635 tok, 0 MiB growth) · soak-continuous PASS · bench (TPS above) ·
+BENCHMARKS row · CHANGELOG · rig report · **8-pack quality 120/150 pass@1 (80%) / 124/150
+pass@3 (83%)** (benchlocal v0.9.9, no-thinking). The soft packs (cli-40 72%, hermesagent 65%)
+are the known Qwen-family floors, not serving-path faults; structoutput is a clean 15/15.
+The drafter is proven (AL 4.68–7.20), the 256K ceiling is understood and documented, and every
+stability + quality gate passes. See [Issue #1064](https://github.com/noonghunna/club-3090/issues/1064)
+and [PR #1060](https://github.com/noonghunna/club-3090/pull/1060).
