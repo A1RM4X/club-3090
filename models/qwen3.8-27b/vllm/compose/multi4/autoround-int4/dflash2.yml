@@ -11,7 +11,8 @@
 #   KV:        fp8 -> e4m3 (KV_CACHE_DTYPE override)
 #   Vision:    (same as the mtp sibling — input-only, no extra flags)
 #   Template:  native — the repo's own chat_template.jinja. NOT froggeric.
-#   Max ctx:   524288 default (MAX_MODEL_LEN override), gmu 0.80 — validated stable.
+#   Max ctx:   262144 (the model's NATIVE ceiling; NOT the 512K extension),
+#              gmu 0.80. The 512K number was fiction beyond ~244K — see below.
 #   Genesis:   none — DFlash2 drafter handles spec-decode independently
 #   Status:    🧪 Experimental
 #   Best for:  4-card INT4 with a HEAVY drafter — the DFlash2 candidate selector
@@ -40,7 +41,7 @@
 #   init_speculator dispatch, and the use_v2_model_runner force). All are
 #   anchor-checked + idempotent and hard-fail boot on drift.
 #
-# ⚠️⚠️ THE DRAFTER IS HEAVY — it OOMs a maxed-out config.
+# ⚠️⚠️ THE DRAFTER IS HEAVY — it OOMs a maxed-out config, and 512K is a trap.
 #   The DFlash2 codebooks (~0.5 GiB/GPU) + 5-layer backbone eat the headroom a
 #   large-context KV cache leaves. Measured on this rig (4× RTX 3090, 23.56 GiB
 #   each, INT4 target):
@@ -49,16 +50,27 @@
 #     - 256K ctx / gmu 0.85  -> 1,014,705 KV tokens (11.3 GiB/GPU), ~1.8 GiB
 #       free — prefill survives.
 #     - 512K ctx / gmu 0.80  -> 1,049,336 KV tokens (10.85 GiB/GPU), ~3 GiB
-#       free — VALIDATED: survived the full prefill ladder (32K/65K/130K/260K)
-#       with no OOM. This is the shipped default.
+#       free — survived the prefill ladder (32K/65K/130K/260K) with no OOM.
 #   The OOM is an ACTIVATION-buffer failure (a 50 MiB allocation with 53 MiB
 #   free), not a KV failure: the prefill's transient buffers scale with
 #   --max-num-batched-tokens (8192 here), not with max context. So the fix is
-#   headroom (lower gmu / max-model-len), not a patch change.
-#   ⚠️ At 512K the KV pool is the binding constraint (~2 concurrent 512K
-#      sequences). gmu 0.80 is the validated-stable setting; 0.90 OOM'd. If you
-#      need more concurrency, drop MAX_MODEL_LEN to 262144 (or lower) and raise
-#      gmu toward 0.85. Run MEMPROBE=1 to measure the real headroom need.
+#   headroom (lower gmu), not a patch change.
+#
+# ⚠️⚠️ 512K IS NOT A REAL SINGLE-SEQUENCE CEILING — do not ship it as one.
+#   The 512K figure is a YaRN-free position-embedding extension, but the KV pool
+#   + vLLM's mamba-hybrid scheduler cap a SINGLE sequence far below it. The
+#   verify-stress ceiling ladder measured the real cliff on this config:
+#       ~244,470 tok  -> recalled the needle (PASSED)
+#       ~275,000 tok  -> DROPPED: the engine threw a CUDA device-side assert in
+#                        the mamba-hybrid/FlashInfer attention path when it
+#                        rejected the overfull sequence, then auto-restarted.
+#   That assert is a vLLM robustness wart (a graceful reject would be correct),
+#   NOT a bug in this port. So the practical single-sequence ceiling is ~244K —
+#   which is why this compose ships max-model-len=262144 (the model's native
+#   max_position_embeddings), not 524288. Anyone who boots the 512K number
+#   blind will hit the assert on any sequence past ~244K.
+#   Concurrency at 256K: the ~1.05M-token pool holds ~4 full 256K sequences.
+#   Run MEMPROBE=1 to measure the real headroom need on your rig.
 #
 # ─── Prerequisite: download the DFlash2 draft model ──────────────────────
 #   This compose loads `incoai/Qwen3.8-27B-DFlash2` from
@@ -214,15 +226,16 @@ services:
       - bfloat16
       - --tensor-parallel-size
       - "${TP:-4}"
-      # 524288 default: validated stable at gmu 0.80 (survived the 32K/65K/130K/
-      # 260K prefill ladder with no OOM). 512K + gmu 0.90 OOM'd the first prefill.
-      # Drop to 262144 if you need more concurrent sequences than ~2.
+      # 262144 = the model's NATIVE max_position_embeddings. NOT 524288: the 512K
+      # YaRN-free extension is fiction beyond ~244K — the KV pool + mamba-hybrid
+      # scheduler drop any single sequence past ~244K (CUDA device-side assert,
+      # then auto-restart). See the "512K IS NOT A REAL CEILING" block above.
       - --max-model-len
-      - "${MAX_MODEL_LEN:-524288}"
+      - "${MAX_MODEL_LEN:-262144}"
       # 0.80 (not the mtp sibling's 0.95): the DFlash2 drafter is heavy, so we
-      # shrink the KV pool to leave room for prefill activation buffers. 0.90 at
-      # 512K OOM'd; 0.80 is validated stable. Raise toward 0.85 only if you drop
-      # MAX_MODEL_LEN to 256K and want more concurrency.
+      # shrink the KV pool to leave room for prefill activation buffers. 0.90
+      # OOM'd the first prefill; 0.80 is validated stable. The ~1.05M-token pool
+      # at 0.80 holds ~4 full 256K sequences.
       - --gpu-memory-utilization
       - "${GPU_MEMORY_UTILIZATION:-0.80}"
       - --max-num-seqs
