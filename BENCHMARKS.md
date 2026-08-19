@@ -358,6 +358,12 @@ Dense 27B, Qwen3-Next hybrid (16 full-attention + 48 linear-attention layers, 24
 
 ⚠️ **Do not diff these against the Qwen3.6-27B rows.** Different checkpoint, different sampler defaults (this tier follows the 3.8 model card's Instruct row), and cross-session TPS comparison is invalid on this rig — single boots swing ~5 TPS on the code leg, which is wider than most tier gaps. Same-session A/B only.
 
+### Quad-card (4× RTX 3090, TP=4) — vLLM
+
+| Compose | Rig | KV | Max ctx | Narr / Code TPS | PP tok/s | Peak VRAM | Date | Notes |
+| --- | --- | --- | ---: | ---: | ---: | ---: | --- | --- |
+| `multi4/autoround-int4/dflash2.yml` (`vllm/qwen38-27b-multi4-dflash2`, DFlash2 n=7) | @A1RM4X (4× 3090 Turbo 24 GB, PCIe) | fp8 e4m3 | 524288 | _TBD (bench.sh)_ | _TBD_ | ~22.8 GiB/card (22,810 MiB) | 2026-08-19 | 🧪 Experimental. **First DFlash2 drafter on this model.** 6-piece port of [vllm#52816](https://github.com/vllm-project/vllm/pull/52816) (the oceanplexian fork's PR #1 shipped only the model file; the candidate selector only runs in the V2 speculator, so the overlay adds `DFlash2Speculator` + dispatch + `use_v2_model_runner` force). **Prefill-validated:** 512K/gmu 0.80 survived the full ladder (32K/65K/130K/260K tokens) with no OOM — KV pool **1,049,336 tok (10.85 GiB/GPU)**, ~3 GiB free/card. 512K/gmu 0.90 OOM'd the first ~8K prefill (exit 137). **Open:** DFlash2 acceptance length + TPS + verify-stress + soak — the decode-quality bench is the remaining gate ([#1064](https://github.com/noonghunna/club-3090/issues/1064), [PR #1060](https://github.com/noonghunna/club-3090/pull/1060)). |
+
 ---
 
 ## Qwen3.6-40B-Deckard
