@@ -11,7 +11,7 @@
 #   KV:        fp8 -> e4m3 (KV_CACHE_DTYPE override)
 #   Vision:    (same as the mtp sibling — input-only, no extra flags)
 #   Template:  native — the repo's own chat_template.jinja. NOT froggeric.
-#   Max ctx:   262144 default (MAX_MODEL_LEN override). See the 512K caveat below.
+#   Max ctx:   524288 default (MAX_MODEL_LEN override), gmu 0.80 — validated stable.
 #   Genesis:   none — DFlash2 drafter handles spec-decode independently
 #   Status:    🧪 Experimental
 #   Best for:  4-card INT4 with a HEAVY drafter — the DFlash2 candidate selector
@@ -48,15 +48,17 @@
 #       prefill OOM'd the whole engine (exit 137).
 #     - 256K ctx / gmu 0.85  -> 1,014,705 KV tokens (11.3 GiB/GPU), ~1.8 GiB
 #       free — prefill survives.
+#     - 512K ctx / gmu 0.80  -> 1,049,336 KV tokens (10.85 GiB/GPU), ~3 GiB
+#       free — VALIDATED: survived the full prefill ladder (32K/65K/130K/260K)
+#       with no OOM. This is the shipped default.
 #   The OOM is an ACTIVATION-buffer failure (a 50 MiB allocation with 53 MiB
 #   free), not a KV failure: the prefill's transient buffers scale with
 #   --max-num-batched-tokens (8192 here), not with max context. So the fix is
 #   headroom (lower gmu / max-model-len), not a patch change.
-#   ⚠️ 512K does NOT fit comfortably on 24 GB: the KV pool is the binding
-#      constraint (~1-2 concurrent 512K sequences) and a full 512K prefill's
-#      activation buffers are large. Default is 262144 for that reason. If you
-#      set MAX_MODEL_LEN=524288, also lower GPU_MEMORY_UTILIZATION (try 0.80)
-#      and run with MEMPROBE=1 to measure the real headroom need first.
+#   ⚠️ At 512K the KV pool is the binding constraint (~2 concurrent 512K
+#      sequences). gmu 0.80 is the validated-stable setting; 0.90 OOM'd. If you
+#      need more concurrency, drop MAX_MODEL_LEN to 262144 (or lower) and raise
+#      gmu toward 0.85. Run MEMPROBE=1 to measure the real headroom need.
 #
 # ─── Prerequisite: download the DFlash2 draft model ──────────────────────
 #   This compose loads `incoai/Qwen3.8-27B-DFlash2` from
@@ -212,16 +214,17 @@ services:
       - bfloat16
       - --tensor-parallel-size
       - "${TP:-4}"
-      # 262144 default: the DFlash2 drafter's ~0.5 GiB/GPU of codebooks eats the
-      # headroom a 512K KV pool leaves, so 512K OOMs the first prefill on 24 GB.
-      # See the 512K caveat in the header.
+      # 524288 default: validated stable at gmu 0.80 (survived the 32K/65K/130K/
+      # 260K prefill ladder with no OOM). 512K + gmu 0.90 OOM'd the first prefill.
+      # Drop to 262144 if you need more concurrent sequences than ~2.
       - --max-model-len
-      - "${MAX_MODEL_LEN:-262144}"
-      # 0.85 (not the mtp sibling's 0.95): the DFlash2 drafter is heavy, so we
-      # shrink the KV pool to leave room for prefill activation buffers. If you
-      # raise MAX_MODEL_LEN to 512K, drop this to ~0.80 and run MEMPROBE=1 first.
+      - "${MAX_MODEL_LEN:-524288}"
+      # 0.80 (not the mtp sibling's 0.95): the DFlash2 drafter is heavy, so we
+      # shrink the KV pool to leave room for prefill activation buffers. 0.90 at
+      # 512K OOM'd; 0.80 is validated stable. Raise toward 0.85 only if you drop
+      # MAX_MODEL_LEN to 256K and want more concurrency.
       - --gpu-memory-utilization
-      - "${GPU_MEMORY_UTILIZATION:-0.85}"
+      - "${GPU_MEMORY_UTILIZATION:-0.80}"
       - --max-num-seqs
       - "${MAX_NUM_SEQS:-2}"
       - --max-num-batched-tokens
