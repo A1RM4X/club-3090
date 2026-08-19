@@ -63,9 +63,12 @@ so the interconnect is not the bottleneck.
 
 **Status: 🧪 Experimental — all 8 gates green.** verify-full 9/9 · verify-stress 7/7
 (ceiling ladder 6/6 to 240,635 tok, 0 MiB growth) · soak-continuous PASS · bench (TPS above) ·
-BENCHMARKS row · CHANGELOG · rig report · **8-pack quality 120/150 pass@1 (80%) / 124/150
-pass@3 (83%)** (benchlocal v0.9.9, no-thinking). The soft packs (cli-40 72%, hermesagent 65%)
-are the known Qwen-family floors, not serving-path faults; structoutput is a clean 15/15.
+BENCHMARKS row · CHANGELOG · rig report · **8-pack quality: no-thinking 120/150 pass@1 (80%) /
+124/150 pass@3 (83%); thinking-on 128/150 (85%) / 135/150 (90%)** (benchlocal v0.9.9). The
++8pp/+7pp thinking lift is concentrated in the reasoning-heavy packs (instructfollow 14→15,
+reasonmath 11→13, bugfind 12→14, hermesagent 13→15, cli-40 29→30); the soft packs (cli-40,
+hermesagent) are the known Qwen-family floors, not serving-path faults; structoutput is a clean
+15/15 in both arms.
 The drafter is proven (AL 4.68–7.20), the 256K ceiling is understood and documented, and every
 stability + quality gate passes. See [Issue #1064](https://github.com/noonghunna/club-3090/issues/1064)
 and [PR #1060](https://github.com/noonghunna/club-3090/pull/1060).
