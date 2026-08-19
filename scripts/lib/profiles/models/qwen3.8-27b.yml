@@ -148,7 +148,17 @@ default_weight_variant: unsloth-iq4nl
 # was fetched. An entry here that names a drafter YAML we don't ship would raise
 # CrossReferenceError at load_profiles() time, so this stays empty until a real
 # drafter is validated for this model.
-compatible_drafters: []
+#
+# ⭐ EXTERNAL DFlash2 drafter (2026-08-19): incoai/Qwen3.8-27B-DFlash2 is a
+# block-diffusion drafter (5-layer backbone + grouped dynamic depthwise conv +
+# candidate selector) that DOES exist for this model. It is NOT a drop-in like the
+# z-lab/Anbeeld DFlash drafters — the candidate selector only runs in the V2
+# speculator, so it needs the 6-file vllm-dflash2 overlay (see
+# models/qwen3.8-27b/vllm/patches/vllm-dflash2/). It is experimental and NOT yet
+# benched on this rig, so it is listed here but the compose is marked
+# Experimental and the first community boot is the validation.
+compatible_drafters:
+  - incoai-qwen38-dflash2
 # ⚠️ valid_tp is a VALIDITY list (will vLLM run this shard?), NOT a cleanliness
 # list (does KV divide evenly?). Those two diverge past TP=4 on this model and
 # conflating them is what made this list wrong until 2026-08-15.

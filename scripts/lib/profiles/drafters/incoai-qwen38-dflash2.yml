@@ -1,0 +1,37 @@
+schema_version: 1
+id: incoai-qwen38-dflash2
+display_name: incoai Qwen 3.8 DFlash2
+spec_method: dflash
+model_compat:
+  - qwen3.8-27b
+n_default: 7
+n_max: 16
+download:
+  hf_repo: incoai/Qwen3.8-27B-DFlash2
+  size_gb: 3.8
+  format: safetensors
+vram_footprint_gb: 3.8
+status: experimental
+# DFlash2 ("Keep Drafting Parallel") — the block-diffusion successor to DFlash.
+# A 5-layer backbone + a grouped dynamic depthwise conv + a **candidate selector**
+# (two 248320x256 codebook matrices, predecessor + successor). The checkpoint
+# declares architecture `DFlash2DraftModel`.
+#
+# ⚠️ NOT a drop-in like the z-lab/Anbeeld DFlash drafters. The DFlash2 candidate
+# selector is ONLY exercised by the V2 speculator (DFlash2Speculator). On the V1
+# runner the same checkpoint silently degrades to the base DFlash drafter and
+# weight-load fails with "no module named 'candidate_selector'". A working
+# deployment therefore needs the full 6-piece port of vllm-project/vllm#52816
+# (model file + base refactor + registry entry + DFlash2Speculator + the
+# init_speculator dispatch + the use_v2_model_runner force) — see the
+# vllm-dflash2 overlay under models/qwen3.8-27b/vllm/patches/. The oceanplexian/vllm
+# fork's PR #1 shipped only the model file, which is why a naive port OOMs.
+#
+# ⚠️ HEAVY DRAFTER: the codebooks (~0.5 GiB/GPU) + 5-layer backbone eat the
+# headroom a large-context KV cache leaves. On 4x RTX 3090 (23.56 GiB each, INT4
+# target) a 512K/gmu-0.90 config left ~0.5 GiB free and the first ~8K prefill
+# OOM'd the engine; 256K/gmu-0.85 gave 1,014,705 KV tokens with ~1.8 GiB free
+# and survived. Size GPU_MEMORY_UTILIZATION to the measured prefill-activation
+# peak (MEMPROBE=1) before pushing context higher.
+speculative_config_template: '{"method":"dflash","model":"{LOCAL_MODEL_PATH}","num_speculative_tokens":{N}}'
+local_model_path: /root/.cache/huggingface/qwen3.8-27b-dflash2

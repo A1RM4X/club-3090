@@ -936,3 +936,36 @@ patches:
   - <<: *genesis_env_patch
     id: genesis-pn59-streaming-gdn
     genesis_env: GENESIS_ENABLE_PN59_STREAMING_GDN
+  - id: qwen38-vllm-dflash2
+    model: [qwen3.8-27b]
+    files:
+      - models/qwen3.8-27b/vllm/patches/vllm-dflash2
+    load_bearing_when:
+      - composes:
+          - vllm/qwen38-27b-multi4-dflash2
+        reason: "DFlash2 candidate selector only runs in the V2 speculator; on the V1 runner the incoai Qwen3.8-27B-DFlash2 checkpoint silently degrades to the base DFlash drafter and weight-load fails with 'no module named candidate_selector'. This overlay ports the 6 load-bearing pieces of vllm-project/vllm#52816 (model file + base refactor + registry entry + DFlash2Speculator + init_speculator dispatch + use_v2_model_runner force)."
+        evidence: "models/qwen3.8-27b/vllm/compose/multi4/autoround-int4/dflash2.yml header; models/qwen3.8-27b/vllm/patches/vllm-dflash2/install.sh"
+    delivery:
+      dockerfile_bake: false
+      entrypoint_invoke: true
+      genesis: false
+    delivery_gaps: []
+    delivery_mechanism: install_script
+    delivery_spec:
+      script: models/qwen3.8-27b/vllm/patches/vllm-dflash2/install.sh
+      mounted_at: /etc/club3090/dflash2
+      invoke: "bash /etc/club3090/dflash2/install.sh"
+      invoked_before: vllm-import
+      wired_at: [volumes, entrypoint]
+    drift_guard:
+      kind: anchor
+      check: "patch_dflash2.py hard-fails boot (exit 1) if any of the 6 anchor-checked edits is missing from the pinned image — a re-pinned vLLM that drops/renames the DFlash2 hooks cannot serve a half-wired drafter"
+      on_fail: refuse-to-boot
+    capability: dflash2-spec-decode
+    foundational: false
+    status: unverified
+    upstream:
+      ref: vllm-project/vllm#52816
+      status: filed
+      drop_when: "vllm-project/vllm#52816 merges into a vLLM release the vllm-stable pin tracks — then the DFlash2 drafter is native and this overlay is retired (keep the compose, drop the mount). Until then the overlay is load-bearing."
+      note: "11-file upstream PR; we port the 6 pieces that make the drafter work. The oceanplexian/vllm fork's PR #1 shipped only the model file (missing the speculator + dispatch + V2-runner force), which is why a naive port OOMs/degrades. The vendored qwen3_dflash2.py also carries the unquantized-LM-head guard fix from vllm#52883."

@@ -46,6 +46,12 @@ supported_kv_formats:
 supported_drafters:
   - mtp
   - mtp_assistant
+  # DFlash / DFlash2 block-diffusion drafters (z-lab / incoai). The DFlash2
+  # candidate selector only runs in the V2 speculator, so it needs the vllm-dflash2
+  # overlay (6-piece port of vllm-project/vllm#52816) — see
+  # models/qwen3.8-27b/vllm/patches/vllm-dflash2/. Added 2026-08-19 with the
+  # vllm/qwen38-27b-multi4-dflash2 compose (incoai Qwen3.8-27B-DFlash2 drafter).
+  - dflash
 supported_weight_formats:
   - bf16
   - fp16

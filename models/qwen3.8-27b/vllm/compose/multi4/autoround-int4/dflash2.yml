@@ -1,0 +1,240 @@
+# ===========================================================================
+# Profile (at-a-glance):
+#   Model:     Qwen3.8-27B (Avuja AutoRound INT4 — 4-bit, group 128, sym,
+#              packing auto_round:auto_gptq; 18.23 GiB. Vision tower + MTP head
+#              ship UNQUANTIZED at bf16.) Served **W4A8** — int8 activations ON
+#              by default (W4A8=0 for W4A16).
+#   Topology:  Quad 3090 PCIe (TP=4, no NVLink)
+#   Drafter:   DFlash2 N=7 (incoai Qwen3.8-27B-DFlash2 — block-diffusion drafter
+#              with a grouped dynamic depthwise conv + a candidate selector).
+#              Toggle: SPEC_N=<n> sets depth; SPEC_N=0 (or SPEC=off) disables.
+#   KV:        fp8 -> e4m3 (KV_CACHE_DTYPE override)
+#   Vision:    (same as the mtp sibling — input-only, no extra flags)
+#   Template:  native — the repo's own chat_template.jinja. NOT froggeric.
+#   Max ctx:   262144 default (MAX_MODEL_LEN override). See the 512K caveat below.
+#   Genesis:   none — DFlash2 drafter handles spec-decode independently
+#   Status:    🧪 Experimental
+#   Best for:  4-card INT4 with a HEAVY drafter — the DFlash2 candidate selector
+#              picks better draft tokens than MTP, at the cost of ~0.5 GiB/GPU
+#              of drafter VRAM that eats prefill headroom.
+# ---------------------------------------------------------------------------
+# THE DFlash2 DRAFTER — what makes it different from the MTP sibling (mtp.yml)
+# and why it needed a patch overlay.
+#
+# DFlash2 ("Keep Drafting Parallel") is a block-diffusion drafter: a 5-layer
+# backbone + a grouped dynamic depthwise conv + a **candidate selector** (two
+# 248320×256 codebook matrices, predecessor + successor). The checkpoint
+# `incoai/Qwen3.8-27B-DFlash2` declares architecture `DFlash2DraftModel`.
+#
+# ⚠️⚠️ THE MODEL FILE ALONE IS NOT ENOUGH — you need the V2 speculator.
+#   The DFlash2 candidate selector is ONLY exercised by the V2 speculator
+#   (DFlash2Speculator). On the V1 runner the same checkpoint SILENTLY degrades
+#   to the base DFlash drafter (DFlashProposer), which never builds the DFlash2
+#   model — so weight-load fails with:
+#       ValueError: There is no module or parameter named 'candidate_selector'
+#                   in DFlashQwen3Model.
+#   The oceanplexian/vllm fork's PR #1 shipped ONLY the model file. The full
+#   upstream PR is vllm-project/vllm#52816 (11 files). This compose mounts the
+#   vllm-dflash2 overlay, which ports the 6 pieces that matter (model file,
+#   base-class refactor, registry entry, the DFlash2Speculator, the
+#   init_speculator dispatch, and the use_v2_model_runner force). All are
+#   anchor-checked + idempotent and hard-fail boot on drift.
+#
+# ⚠️⚠️ THE DRAFTER IS HEAVY — it OOMs a maxed-out config.
+#   The DFlash2 codebooks (~0.5 GiB/GPU) + 5-layer backbone eat the headroom a
+#   large-context KV cache leaves. Measured on this rig (4× RTX 3090, 23.56 GiB
+#   each, INT4 target):
+#     - 512K ctx / gmu 0.90  -> only ~0.5 GiB free at boot; the first ~8K-token
+#       prefill OOM'd the whole engine (exit 137).
+#     - 256K ctx / gmu 0.85  -> 1,014,705 KV tokens (11.3 GiB/GPU), ~1.8 GiB
+#       free — prefill survives.
+#   The OOM is an ACTIVATION-buffer failure (a 50 MiB allocation with 53 MiB
+#   free), not a KV failure: the prefill's transient buffers scale with
+#   --max-num-batched-tokens (8192 here), not with max context. So the fix is
+#   headroom (lower gmu / max-model-len), not a patch change.
+#   ⚠️ 512K does NOT fit comfortably on 24 GB: the KV pool is the binding
+#      constraint (~1-2 concurrent 512K sequences) and a full 512K prefill's
+#      activation buffers are large. Default is 262144 for that reason. If you
+#      set MAX_MODEL_LEN=524288, also lower GPU_MEMORY_UTILIZATION (try 0.80)
+#      and run with MEMPROBE=1 to measure the real headroom need first.
+#
+# ─── Prerequisite: download the DFlash2 draft model ──────────────────────
+#   This compose loads `incoai/Qwen3.8-27B-DFlash2` from
+#   `<MODEL_DIR>/qwen3.8-27b-dflash2/`. The default `bash scripts/setup.sh
+#   qwen3.8-27b` does NOT fetch it. Either:
+#     WITH_DFLASH2_DRAFT=1 bash scripts/setup.sh qwen3.8-27b
+#   or manually:
+#     hf download incoai/Qwen3.8-27B-DFlash2 \
+#       --local-dir <MODEL_DIR>/qwen3.8-27b-dflash2
+#   If the draft is missing, vLLM falls back silently and your wall TPS will
+#   match the no-drafter baseline — NOT the DFlash2-spec'd numbers.
+#
+# To run:
+#   cd <repo>/models/qwen3.8-27b/vllm/compose
+#   docker compose -f multi4/autoround-int4/dflash2.yml up -d
+#
+#   Sibling: multi4/autoround-int4/mtp.yml (MTP drafter — lighter, no patch).
+# ===========================================================================
+# Hardware metadata (parsed by scripts/preflight.sh):
+# Requires-min-vram-gb: 24
+# Engine-profile: vllm-dflash2
+# Requires-min-gpu-count: 4
+# Tensor-parallel: 4
+services:
+  vllm-qwen38-27b-multi4-dflash2:
+    image: ${VLLM_IMAGE:-vllm/vllm-openai:v0.27.1}
+    container_name: "${ESTATE_CONTAINER:-vllm-qwen38-27b-multi4-dflash2}"
+    # Repo contract (test-compose-restart-policy): every shipped vLLM compose uses
+    # the reboot-surviving knob. ⚠️ WHEN DEBUGGING A BOOT FAILURE SET
+    # CLUB3090_RESTART=no — under unless-stopped a failing container
+    # restart-loops and reports "Up 1 second" forever.
+    restart: ${CLUB3090_RESTART:-unless-stopped}
+    shm_size: "16gb"
+    ipc: host
+    ports:
+      - "${BIND_HOST:-0.0.0.0}:${PORT:-8098}:8000"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    volumes:
+      - ${MODEL_DIR:-../../../../../../models-cache}:/root/.cache/huggingface
+      # W4A8 int8-activation patches — NO-OP unless VLLM_MARLIN_INPUT_DTYPE=int8.
+      - ../../../../../qwen3.6-27b/vllm/patches/w4a8-int8-act:/etc/club3090/w4a8:ro
+      # Lets the drafter attach on this hybrid (mamba/eagle block drop).
+      - ../../../../../qwen3.6-27b/vllm/patches/vllm-pr48375-mamba-drop-eagle-block:/etc/club3090/pr48375:ro
+      # ⭐ THE DFlash2 DRAFTER — the 6-file port of vllm-project/vllm#52816.
+      # Installs the model + DFlash2Speculator + registry/runner wiring.
+      # Hard-fails boot on anchor drift (see the file header for the full list).
+      - ../../../patches/vllm-dflash2:/etc/club3090/dflash2:ro
+      - ../../../../../../scripts/detect_nvlink.sh:/etc/club3090/detect_nvlink.sh:ro
+      - ../../../cache/torch_compile:/root/.cache/vllm/torch_compile_cache
+      - ../../../cache/triton:/root/.triton/cache
+    environment:
+      # Drafter toggle — docker only forwards what is declared here. The DEFAULT
+      # lives in the entrypoint, not in these lines, so it cannot drift.
+      - SPEC_N=${SPEC_N:-}
+      - SPEC=${SPEC:-}
+      # Activation-headroom probe (optional). MEMPROBE=1 puts this compose's
+      # dflash2 dir on PYTHONPATH so sitecustomize.py + memprobe.py auto-load in
+      # every worker and log the per-step peak transient activation. That is the
+      # real number you need to size GPU_MEMORY_UTILIZATION. Off by default.
+      - MEMPROBE=${MEMPROBE:-0}
+      - MEMPROBE_EVERY=${MEMPROBE_EVERY:-20}
+      - NVIDIA_VISIBLE_DEVICES=${NVIDIA_VISIBLE_DEVICES:-all}
+      - CUDA_VISIBLE_DEVICES
+      - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN:-}
+      - HF_HUB_OFFLINE=${HF_HUB_OFFLINE:-${OFFLINE:-0}}
+      - TRANSFORMERS_OFFLINE=${TRANSFORMERS_OFFLINE:-${OFFLINE:-0}}
+      - VLLM_WORKER_MULTIPROC_METHOD=spawn
+      - NVLINK_MODE=${NVLINK_MODE:-auto}
+      - VLLM_SKIP_P2P_CHECK
+      - NCCL_CUMEM_ENABLE=0
+      - NCCL_P2P_DISABLE=${NCCL_P2P_DISABLE:-1}
+      - VLLM_NO_USAGE_STATS=1
+      - VLLM_USE_FLASHINFER_SAMPLER=${VLLM_USE_FLASHINFER_SAMPLER:-0}
+      - OMP_NUM_THREADS=1
+      - PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}
+      # ⭐ W4A8 (int8 activations) SHIPS ON — set W4A8=0 for the W4A16 path.
+      - W4A8=${W4A8:-1}
+      # ⚠️⚠️ WHY A SEPARATE BOOLEAN INSTE OF ${VLLM_MARLIN_INPUT_DTYPE:-int8}:
+      # vLLM VALIDATES this variable against a closed set and raises on anything
+      # else — INCLUDING THE EMPTY STRING. So there is NO value that means "off"
+      # — only ABSENCE means off. W4A8=0/1 gates whether the var is exported at
+      # all, and this stays a BARE pass-through so an explicit host value wins.
+      - VLLM_MARLIN_INPUT_DTYPE
+    entrypoint:
+      - bash
+      - -c
+      - |
+        set -e
+        source /etc/club3090/detect_nvlink.sh
+        # ⚠️ THIS MUST RUN BEFORE install.sh, NOT AFTER. install.sh only hard-FAILS
+        # on a patch-apply error when VLLM_MARLIN_INPUT_DTYPE is already set; if we
+        # exported it afterwards, a failed patch would downgrade to a WARNING and we
+        # would serve a HALF-WIRED int8 config.
+        if [ -z "$${VLLM_MARLIN_INPUT_DTYPE:-}" ] && [ "$${W4A8:-1}" != "0" ]; then
+          export VLLM_MARLIN_INPUT_DTYPE=int8
+        fi
+        bash /etc/club3090/w4a8/install.sh
+        bash /etc/club3090/pr48375/install.sh || exit 1
+        echo "[w4a8] VLLM_MARLIN_INPUT_DTYPE=$${VLLM_MARLIN_INPUT_DTYPE:-<unset -> W4A16>} (W4A8=$${W4A8:-1})"
+        # ⭐ DFlash2 drafter overlay — the 6-file port. Hard-fails boot on drift.
+        bash /etc/club3090/dflash2/install.sh || exit 1
+        # Activation-headroom probe: put the dflash2 dir on PYTHONPATH so
+        # sitecustomize.py + memprobe.py auto-load in every worker. Only active
+        # when MEMPROBE=1 (default off = zero overhead).
+        export PYTHONPATH="/etc/club3090/dflash2$${PYTHONPATH:+:$PYTHONPATH}"
+        if [ "$${MEMPROBE:-0}" = "1" ]; then
+          echo "[memprobe] MEMPROBE=1 -> activation-headroom probe ON (every $${MEMPROBE_EVERY:-20} steps)"
+        fi
+        AR=""
+        [ "$${_NVLINK_ENABLED:-0}" = "1" ] || AR="--disable-custom-all-reduce"
+        # -- Drafter toggle: the same contract on every club-3090 compose --------
+        #   SPEC_N=<n>  drafter depth (this compose defaults to 7); SPEC_N=0 disables
+        #   SPEC=off    back-compat alias for SPEC_N=0
+        # Turning the drafter off is the documented mitigation for a heavy drafter
+        # OOM and must never require editing this file. A non-numeric SPEC_N is a
+        # hard error, so a typo can never masquerade as a silent "drafter off".
+        _spec_n="$${SPEC_N:-7}"
+        case "$${SPEC:-}" in off|OFF|Off|false|no|0) _spec_n=0 ;; esac
+        case "$$_spec_n" in ""|*[!0-9]*)
+          echo "[spec] SPEC_N='$$_spec_n' is not a non-negative integer." >&2
+          echo "[spec] Fix: SPEC_N=<n> sets depth; SPEC_N=0 (or SPEC=off) disables." >&2
+          exit 1 ;;
+        esac
+        SPEC_ARGS=()
+        if [ "$$_spec_n" -gt 0 ]; then
+          SPEC_ARGS=(--speculative-config "{\"method\":\"dflash\",\"model\":\"/root/.cache/huggingface/qwen3.8-27b-dflash2\",\"num_speculative_tokens\":$$_spec_n}")
+          echo "[spec] drafter ON - DFlash2 n=$$_spec_n (incoai Qwen3.8-27B-DFlash2)" >&2
+        else
+          echo "[spec] drafter OFF (SPEC_N=0 / SPEC=off) - no speculative decoding" >&2
+        fi
+        exec vllm serve $$AR "$@" "$${SPEC_ARGS[@]}"
+      - --
+    command:
+      - --model
+      - /root/.cache/huggingface/qwen3.8-27b-autoround-int4
+      - --served-model-name
+      - qwen3.8-27b
+      - --quantization
+      - auto_round
+      - --dtype
+      - bfloat16
+      - --tensor-parallel-size
+      - "${TP:-4}"
+      # 262144 default: the DFlash2 drafter's ~0.5 GiB/GPU of codebooks eats the
+      # headroom a 512K KV pool leaves, so 512K OOMs the first prefill on 24 GB.
+      # See the 512K caveat in the header.
+      - --max-model-len
+      - "${MAX_MODEL_LEN:-262144}"
+      # 0.85 (not the mtp sibling's 0.95): the DFlash2 drafter is heavy, so we
+      # shrink the KV pool to leave room for prefill activation buffers. If you
+      # raise MAX_MODEL_LEN to 512K, drop this to ~0.80 and run MEMPROBE=1 first.
+      - --gpu-memory-utilization
+      - "${GPU_MEMORY_UTILIZATION:-0.85}"
+      - --max-num-seqs
+      - "${MAX_NUM_SEQS:-2}"
+      - --max-num-batched-tokens
+      - "${MAX_NUM_BATCHED_TOKENS:-8192}"
+      - --kv-cache-dtype
+      - "${KV_CACHE_DTYPE:-fp8_e4m3}"
+      - --trust-remote-code
+      - "${PREFIX_CACHE_ARG:---enable-prefix-caching}"
+      - --enable-chunked-prefill
+      - --reasoning-parser
+      - qwen3
+      - --enable-auto-tool-choice
+      - --tool-call-parser
+      - qwen3_coder
+      - --default-chat-template-kwargs
+      - '{"enable_thinking": ${ENABLE_THINKING:-false}, "reasoning_effort": "${REASONING_EFFORT:-low}"}'
+      - --override-generation-config
+      - '{"temperature":${TEMP:-0.7},"top_p":${TOP_P:-0.80},"top_k":${TOP_K:-20},"min_p":${MIN_P:-0.0},"presence_penalty":${PRESENCE_PENALTY:-1.5}}'
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
