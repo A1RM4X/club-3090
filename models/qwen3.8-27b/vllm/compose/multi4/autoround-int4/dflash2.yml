@@ -164,12 +164,18 @@ services:
         echo "[w4a8] VLLM_MARLIN_INPUT_DTYPE=$${VLLM_MARLIN_INPUT_DTYPE:-<unset -> W4A16>} (W4A8=$${W4A8:-1})"
         # ⭐ DFlash2 drafter overlay — the 6-file port. Hard-fails boot on drift.
         bash /etc/club3090/dflash2/install.sh || exit 1
-        # Activation-headroom probe: put the dflash2 dir on PYTHONPATH so
-        # sitecustomize.py + memprobe.py auto-load in every worker. Only active
-        # when MEMPROBE=1 (default off = zero overhead).
-        export PYTHONPATH="/etc/club3090/dflash2$${PYTHONPATH:+:$PYTHONPATH}"
-        if [ "$${MEMPROBE:-0}" = "1" ]; then
-          echo "[memprobe] MEMPROBE=1 -> activation-headroom probe ON (every $${MEMPROBE_EVERY:-20} steps)"
+        # Activation-headroom probe (MEMPROBE=1 to enable; off by default).
+        # Wrapped in `if [ -d ... ]` because this folded-scalar entrypoint folds two
+        # same-indent lines onto one; the export must sit under a more-indented
+        # first line (same pattern as the EXPAND_SEG / AR blocks around it).
+
+        if [ -d /etc/club3090/dflash2 ]; then
+          export PYTHONPATH="/etc/club3090/dflash2$${PYTHONPATH:+:$PYTHONPATH}"
+          if [ "$${MEMPROBE:-0}" = "1" ]; then
+            echo "[memprobe] ON (every $${MEMPROBE_EVERY:-20} steps)"
+          else
+            echo "[memprobe] OFF"
+          fi
         fi
         AR=""
         [ "$${_NVLINK_ENABLED:-0}" = "1" ] || AR="--disable-custom-all-reduce"
