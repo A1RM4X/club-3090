@@ -3108,7 +3108,8 @@ class TestEstateVramSplit:
              "compute": 5240, "pool": 9903, "used": 22992, "total": 24576,
              "unaccounted": 2563},
         ],
-        "warnings": ["2 moe-cache allocations logged per pool"],
+        "warnings": ["2 moe-cache allocations logged per pool -- figures "
+                     "take the LAST (summing them double-counts)"],
     }
 
     @staticmethod
@@ -3139,6 +3140,10 @@ class TestEstateVramSplit:
             assert "cycle" in txt                    # [G] affordance
             # model aggregates: 3524 + 3969 MiB ≈ 7 GiB
             assert "7G" in txt
+            # used/total anchor line: 22938+22992 of 2×24576 MiB
+            assert "used" in txt and "48G" in txt and "(93%)" in txt
+            # full moe-cache warning, not the 60-char chop
+            assert "summing them double-counts" in txt
 
     @pytest.mark.asyncio
     async def test_rail_drills_down_to_one_gpu(self):

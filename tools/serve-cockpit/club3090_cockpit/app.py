@@ -8809,6 +8809,11 @@ class RailStatus(Static):
         def _dev_row(d: dict) -> None:
             title = f"VRAM split · {self._vram_view}"
             lines.append(f"[bold]{title}[/bold]")
+            if d.get("used") is not None and d.get("total"):
+                pct = int(d["used"] / d["total"] * 100)
+                lines.append(
+                    f"  used     {_human_gb(int(d['used']) * 1024 * 1024)} / "
+                    f"{_human_gb(int(d['total']) * 1024 * 1024)} ({pct}%)")
             for label in ("model", "pool", "compute", "kv", "state"):
                 v = d.get(label)
                 if v is not None:
@@ -8824,14 +8829,20 @@ class RailStatus(Static):
 
         if self._vram_view == "estate":
             agg: dict[str, float] = {}
+            used = total = 0
             for d in devices:
                 for k in ("model", "pool", "compute", "kv", "state"):
                     if d.get(k) is not None:
                         agg[k] = agg.get(k, 0.0) + d[k]
+                if d.get("used") is not None and d.get("total"):
+                    used += int(d["used"])
+                    total += int(d["total"])
             other = sum(max(0, d.get("unaccounted") or 0) for d in devices)
             agg_row = dict(agg)
             agg_row["device"] = "estate"
             agg_row["unaccounted"] = other
+            agg_row["used"] = used
+            agg_row["total"] = total
             _dev_row(agg_row)
         else:
             d = next((x for x in devices if x.get("device") == self._vram_view), None)
@@ -8840,7 +8851,10 @@ class RailStatus(Static):
         if clamped:
             lines.append("[dim]  ⚠ components exceed the live total — split is from a staler boot log[/dim]")
         if vram.get("warnings"):
-            lines.append(f"[dim]  ⚠ {vram['warnings'][0][:60]}[/dim]")
+            # Full text -- Textual wraps to the rail width; a 60-char slice
+            # chopped the moe-cache warning mid-sentence.
+            for w in vram.get("warnings", []):
+                lines.append(f"[dim]  ⚠ {w}[/dim]")
         return lines
 
     def _render_card(self) -> None:
