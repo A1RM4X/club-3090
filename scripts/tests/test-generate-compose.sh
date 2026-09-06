@@ -183,12 +183,29 @@ for prof in GOLDEN:
     finally:
         os.unlink(gen_file)
 
-# At least one golden carries a real delivery-gap (the correction-#4 case).
+# The `wired` classification must be exercised by real data, not just structurally
+# present. Do NOT re-pin this to a specific dead patch: it was previously asserted
+# on qwen-vllm-pr35936-required-fallback, which club-3090#1188 correctly removed
+# from consideration (the overlay had been inert for two engine pins), and this
+# check went red as collateral. Assert against a patch that is genuinely wired.
 _, m_min = gc.generate(root, "vllm/minimal")
-check("qwen-qwen3coder-tool-parser-deferred-commit" in m_min["undelivered"],
-      "vllm/minimal must surface the qwen3coder delivery-gap as undelivered")
-check("qwen-vllm-pr35936-required-fallback" in m_min["wired"],
-      "vllm/minimal must wire the pr35936 fallback")
+check("qwen-froggeric-chat-template" in m_min["wired"],
+      f"vllm/minimal must wire the froggeric chat template (got {m_min['wired']})")
+
+# ⚠️ COVERAGE GAP, deliberately visible rather than silently dropped.
+# `undelivered` (the correction-#4 delivery-gap path) has NO live example any
+# more: qwen-qwen3coder-tool-parser-deferred-commit was the only patch that
+# produced one, and #1188 removed it after club-3090#1012 showed it patches a file
+# that no longer exists on any supported pin. Every golden now returns [].
+# So this asserts only the SHAPE. If a patch with a real delivery gap reappears,
+# restore a value assertion here -- a structural check cannot catch a classifier
+# that silently stops populating the list.
+check(isinstance(m_min["undelivered"], list),
+      "generate() must always return an `undelivered` list")
+check(m_min["undelivered"] == [],
+      f"no patch currently has a delivery gap; if this fires, a real fixture is "
+      f"available again and the value assertion above should be restored "
+      f"(got {m_min['undelivered']})")
 
 
 # --------------------------------------------------------------------------
