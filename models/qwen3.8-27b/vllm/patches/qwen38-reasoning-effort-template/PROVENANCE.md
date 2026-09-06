@@ -1,7 +1,7 @@
 # qwen38-reasoning-effort-template
 
 Vendored copy of Qwen3.8-27B's own `chat_template.jinja` with a **single semantic
-change**: `reasoning_effort: "high"` is mapped onto `medium` instead of raising.
+change**: `reasoning_effort: "high"` is mapped onto `xhigh` instead of raising.
 
 ## The defect
 
@@ -58,18 +58,37 @@ So one vendored file is correct for every slug, and the quantiser is irrelevant.
 
 ## The change
 
-Seven lines inserted before the validation. `high` maps to **`medium`**, the
-un-nudged baseline — the rung with no template branch and no injected preamble.
+A short mapping inserted before the validation. `high` maps to **`xhigh`**,
+Qwen3.8's real top rung.
 
-`xhigh` was the other candidate, and it is the wrong one here. It is Qwen3.8's
-top rung, so it looks like the intent-preserving choice for a caller asking for
-the standard top rung — but it injects a "think carefully, validate assumptions,
-consider alternatives" system preamble that is slow and timeout-prone, and a
-Claude-API client sends `high` on **every** request. Mapping to the top rung
-would therefore put all agent traffic into the slowest reasoning mode by
-default, on slugs that ship `max_num_seqs=1`. medium keeps the request served
-and un-nudged; a caller who genuinely wants the deep mode can still ask for
-`xhigh` by name.
+### Why `xhigh` and not `medium`
+
+The original submission mapped `high` onto `medium`, reasoning that `medium` is
+the un-nudged baseline while `xhigh` injects a "think carefully, validate
+assumptions, consider alternatives" preamble that is slow and timeout-prone — and
+that a Claude-API client sends `high` on *every* request, so mapping to the top
+rung would push all agent traffic into the slowest mode on slugs shipping
+`max_num_seqs=1`. That cost is real and documented in the compose headers.
+
+It was changed to `xhigh` on merge, for three reasons:
+
+1. **Bijection.** `low`/`medium`/`high` maps onto `low`/`medium`/`xhigh` with the
+   ordering intact. Under the `medium` mapping, two distinct client values collapse
+   onto one server behaviour and the top rung becomes **unreachable through
+   standard OpenAI/Anthropic vocabulary at all**.
+2. **These are not a scale with a middle.** `medium` has no template branch and
+   injects nothing. So mapping the top rung there does not hand the caller "one
+   rung down" — it hands them *no reasoning instruction whatsoever*, which is the
+   opposite of what they asked for.
+3. **The cost belongs in the default, not the vocabulary.** Traffic that sends no
+   `reasoning_effort` is governed by the server default (`low`, set via
+   `--default-chat-template-kwargs`) and is unaffected by this mapping. A caller
+   that explicitly sends `high` has opted in. If `xhigh` is too slow for a given
+   agent, the agent should send `medium` — the server should not silently
+   reinterpret the word.
+
+⚠️ The trade this accepts: clients that hardcode `high` land on the slow path.
+That is deliberate, per-request, and reversible by the caller.
 
 Everything else is byte-identical to upstream.
 
