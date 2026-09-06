@@ -3201,18 +3201,45 @@ class TestEstateVramSplit:
 
     @pytest.mark.asyncio
     async def test_worker_populates_split_and_G_cycles(self):
-        payload = json.dumps({
-            "devices": self.PAYLOAD["devices"],
-            "warnings": self.PAYLOAD["warnings"],
-        })
-        glm_log = (
-            "0.12.593.897 I load_tensors:        CUDA0 model buffer size =  3524.46 MiB\n"
-            "1.03.561.019 I llama_kv_cache:      CUDA1 KV buffer size =    80.00 MiB\n")
-        runner = FakeRunner(responses={
-            "docker logs": RunResult(returncode=0, stdout=glm_log, stderr=""),
-            "vram_breakdown.py": RunResult(returncode=0, stdout=payload,
-                                           stderr=""),
-        })
+        # Regression (#1118 follow-up): the boot component lines live on
+        # STDERR of a long log whose head any --tail window drops.  The read
+        # must take the FULL log and merge BOTH streams.
+
+        class _StreamsRunner(FakeRunner):
+            """docker-logs served with BOTH streams; for the parser call,
+            reads the handed temp log so the test can see what it got."""
+
+            def __init__(self, stdout, stderr):
+                super().__init__({})
+                self._out, self._err = stdout, stderr
+                self.parser_saw_load_tensors = False
+
+            async def run(self, cmd, *, cwd, timeout=30.0):
+                self.calls.append(list(cmd))
+                joined = " ".join(cmd)
+                if "vram_breakdown.py" in joined:
+                    log_file = cmd[cmd.index("--json") - 1]
+                    content = Path(log_file).read_text()
+                    self.parser_saw_load_tensors = "load_tensors" in content
+                    payload = json.dumps({
+                        "devices": (
+                            [{"device": "CUDA0", "model": 3524, "kv": 1238,
+                              "state": 231, "compute": 5329, "pool": 11714,
+                              "used": 22938, "total": 24576,
+                              "unaccounted": 902}]
+                            if self.parser_saw_load_tensors else []),
+                        "warnings": [],
+                    })
+                    return RunResult(returncode=0, stdout=payload, stderr="")
+                if "docker" in joined and "logs" in joined:
+                    return RunResult(returncode=0, stdout=self._out,
+                                     stderr=self._err)
+                return RunResult(returncode=0, stdout="", stderr="")
+        runner = _StreamsRunner(
+            stdout="later traffic line (stdout)\n",
+            stderr=("0.12.593.897 I load_tensors:        CUDA0 model buffer "
+                    "size =  3524.46 MiB\n"),
+        )
         app, _, _ = make_app(runner=runner)
         app._active_mode = 1                  # keep the mode-0 estate poll out
         app._periodic_estate_refresh = lambda: None   # freeze the poll for assertions
@@ -3237,6 +3264,15 @@ class TestEstateVramSplit:
             await app.workers.wait_for_complete()
             await pilot.pause()
             assert app._vram_split and app._vram_split["ok"]
+            # #1118 follow-up regressions: the docker-logs read carries NO
+            # --tail (the boot lines live at the head of a long log), and the
+            # parser's temp log merged BOTH streams (stderr, where llama.cpp
+            # announces the buffers).
+            docker_logs_cmds = [c for c in runner.calls
+                                if c[:2] == ["docker", "logs"]]
+            assert docker_logs_cmds
+            assert all("--tail" not in c for c in docker_logs_cmds)
+            assert runner.parser_saw_load_tensors is True
             rail = app.query_one("#rail-status", RailStatus)
             assert "VRAM split · estate" in rail.render().plain
             app.action_estate_vram_cycle()           # estate -> CUDA0

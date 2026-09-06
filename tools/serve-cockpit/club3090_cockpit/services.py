@@ -2452,27 +2452,37 @@ class CockpitData:
 
     # ── READ: container logs ──────────────────────────────────────────────────────
 
-    async def vram_breakdown(self, container: str, *, tail: int = 4000) -> dict[str, Any]:
+    async def vram_breakdown(self, container: str) -> dict[str, Any]:
         """Per-GPU VRAM component split for the serving container (#1118, READ).
 
-        Same seam as bootlog_solve: ``docker logs --tail <N> <container>``
-        through the injected read runner, then
-        ``scripts/lib/vram_breakdown.py <log> --json`` (the parser bench.sh
-        uses; the packaged TUI never imports repo internals).
+        Same seam as bootlog_solve: ``docker logs <container>`` through the
+        injected read runner, then ``scripts/lib/vram_breakdown.py <log>
+        --json`` (the parser bench.sh uses; the packaged TUI never imports
+        repo internals).
 
-        Returns ``{"ok": bool, "container", "devices": [...], "warnings":
-        [...], "error"}``.  Honest failures (no container, docker logs
-        unavailable, parser garbage) return ``ok=False`` with the reason;
-        the caller renders last-known + a staleness cue instead of guessing."""
+        Reads the FULL log, both streams, and is cached by the caller (600 s
+        stride): the component lines live at the HEAD of the log (boot-time
+        load_tensors / sched_reserve), and a tail window on a long-running
+        container drops them entirely -- measured 578k lines with the boot in
+        the first ~70 on glm53-flash-dual.  Boot lines are on STDERR, and
+        ``container_logs`` only surfaces stderr when stdout is empty, so this
+        method reads the runner directly and merges both streams."""
         if not container:
             return {"ok": False, "container": container, "devices": [],
                     "warnings": [], "error": "no serving container resolved"}
-        res = await self.container_logs(container, tail=tail)
-        if res.get("error"):
+        res = await self._runner.run(
+            ["docker", "logs", container],
+            cwd=str(self.repo_root), timeout=60.0,
+        )
+        if res.timed_out:
             return {"ok": False, "container": container, "devices": [],
                     "warnings": [],
-                    "error": f"docker logs unavailable: {res['error']}"}
-        lines = res.get("lines") or []
+                    "error": f"timed out reading logs for {container}"}
+        # docker logs splits app output across stdout/stderr; llama.cpp
+        # announces the buffers on stderr while later traffic lands on
+        # stdout -- both are needed, so merge unconditionally.
+        text = f"{res.stdout or ''}\n{res.stderr or ''}"
+        lines = text.splitlines()
         import tempfile
 
         fd, path = tempfile.mkstemp(prefix="c3-vram-", suffix=".log")
