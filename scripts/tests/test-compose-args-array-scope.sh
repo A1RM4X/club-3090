@@ -17,6 +17,9 @@
 # at the same column as a block nudged inside the branch. Depth is tracked from the
 # shell keywords instead.
 set -uo pipefail
+# #779: this gate parses compose YAML through python3; without PYTHONUTF8 a
+# non-UTF8 locale mangles the entrypoint text and the scan silently misreads.
+export PYTHONUTF8="${PYTHONUTF8:-1}"
 cd "$(dirname "$0")/../.." || exit 1
 
 python3 - <<'PY' || exit 1
