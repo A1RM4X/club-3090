@@ -24,7 +24,6 @@ arches:
         enables: [tq3-kv, mtp, cliff2-mitigations]
     required_patches:
       - qwen-vllm-marlin-pad
-      - qwen-vllm-pr35936-required-fallback
       - qwen-qwen3coder-tool-parser-deferred-commit
       - qwen-vllm-pr41800-truncate-prompt-tokens
     valid_tp:
