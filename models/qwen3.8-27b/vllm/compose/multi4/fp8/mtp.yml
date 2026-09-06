@@ -18,24 +18,26 @@
 #              (vLLM has no literal `fp16` value for --kv-cache-dtype; `auto`
 #              following a bf16 model dtype IS the 16-bit KV path, and matches
 #              `kv_format="bf16"` in the registry.)
-#   Vision:    ⚠️ UNVERIFIED HERE — the checkpoint is vision-capable (the FP8 quant
-#              skips every visual.blocks.* module, and preprocessor_config.json +
-#              video_preprocessor_config.json ship in-repo, so no separate projector
-#              is needed), but the profile records it as NEVER EXERCISED on this
-#              stack. club-3090#1181 reports it answering correctly for two different
-#              images on a 2x3090; that has not been reproduced here.
-#              ⚠️ prompt_tokens rising is NOT evidence of working vision (the vision
-#              placeholders tokenize identically whether or not an encoder runs), and
-#              the registry.py:117 multimodal warning is logged by seeing tiers too.
-#              INPUT ONLY: it consumes media and emits TEXT. No image/video
-#              generation — the arch has no VAE/UNet/diffusion head.
-#              Image: colour+layout described correctly at temp 0 (red/blue/green
-#              discriminated, ~66-70 prompt tokens). Video: 3.25s clip, correct
-#              temporal order + the blended transition frame. Smoke test only —
-#              no vision quality gate, no resolution/duration limits explored.
-#              Video cost ~72.7 tok/s @256x256 (36 tok/frame at default fps=2),
-#              scaling with pixel count: 23 @128px, 263 @512px, 583 @768px.
-#              So ~61 min of 256x256 video fits the 262144 window; ~17 min @512px.
+#   Vision:    ⚠️ UNPROBED ON THIS TOPOLOGY — the 2-card slug of this same weight
+#              variant measured working 2026-09-06; this multi-GPU topology cannot
+#              be booted on a 2-GPU rig, so it is inference, not measurement.
+#              Probe: three solid-colour 256x256 PNGs (red/blue/green), temp=0,
+#              thinking off, "answer with one word: what colour is this image?".
+#              All three tiers answered 3/3 DISTINCT and 3/3 CORRECT:
+#                  dual-fast (Frozenlock INT4)  Red / Blue / Green
+#                  dual-max  (official FP8)     Red / Blue / Green
+#                  dual-nvfp4                   Red / Blue / Green
+#              ⚠️ club-3090#1181 reported dual-fast BLIND (identical '🙂' for every
+#              image) on a different 2x3090. NOT REPRODUCED here; cause unknown, so
+#              treat vision as rig-dependent and re-probe rather than assuming.
+#              ⚠️ VIDEO is NOT covered by this probe, and the INT4 export ships no
+#              video_preprocessor_config.json (FP8/NVFP4 do) — assume video untested.
+#              ⚠️ Do NOT diagnose from prompt_tokens: every request above read
+#              EXACTLY 90 regardless of tier, because the template expands the vision
+#              placeholders textually whether or not an encoder runs.
+#              ⚠️ Nor from the registry.py:117 "no registered multimodal processor"
+#              warning — all three tiers log it, and all three see. The only sound
+#              test is whether DIFFERENT images produce DIFFERENT output.
 #   Template:  native + club-3090 alias — the model's own chat_template.jinja
 #              with `high` remapped to `medium` (patches/qwen38-reasoning-effort-template)
 #              See the dual sibling's "Chat template" section for the full diff.
