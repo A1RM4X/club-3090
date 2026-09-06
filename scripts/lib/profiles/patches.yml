@@ -90,12 +90,20 @@ patches:
     model: [qwen3.6-27b]
     files:
       - models/qwen3.6-27b/vllm/patches/vllm-pr35936-required-fallback
-    load_bearing_when:
-      - composes:
-          - vllm/minimal
-          - vllm/dual
-        reason: "Qwen3-Coder tool_choice=required returns empty tool_calls[] unless the configured parser fallback is honored."
-        evidence: "docs/UPSTREAM.md#35936 row; models/qwen3.6-27b/vllm/patches/vllm-pr35936-required-fallback/README.md"
+    # ⛔ NOT LOAD-BEARING -- was claimed for [vllm/minimal, vllm/dual] until
+    # 2026-09-06 (club-3090#1012). Three independent reasons, all verified:
+    #   1. HALF THE OVERLAY CANNOT LAND. install.sh copies two files; its second
+    #      target, vllm/entrypoints/openai/engine/serving.py, is GONE on BOTH
+    #      v0.25.1 and v0.27.1. The script warns to stderr and exits 0, so the
+    #      failure is invisible in a multi-thousand-line boot.
+    #   2. NEITHER NAMED COMPOSE MOUNTS IT (0 references in
+    #      dual/autoround-int4/fp8-mtp.yml and single/autoround-int4/minimal.yml).
+    #   3. Upstream #35936 is closed unmerged and its replacement flag is not set
+    #      for qwen -- see upstream.drop_when below.
+    # ⚠️ The underlying capability question is NOT resolved by this: whether
+    # tool_choice="required" actually works on Qwen3-Coder today is untested.
+    # Tracked separately rather than implied by a patch entry that does nothing.
+    load_bearing_when: []
     delivery:               # DEPRECATED/READ-ONLY (test-only) — see header
       dockerfile_bake: true
       entrypoint_invoke: true
@@ -116,8 +124,13 @@ patches:
     foundational: false
     upstream:
       ref: vllm-project/vllm#35936
-      status: open
-      drop_when: "merged or equivalent behavior lands in the selected vLLM nightly"
+      status: dead-upstream
+      drop_when: "n/a -- verified 2026-09-06 (club-3090#1012). #35936 was CLOSED
+        WITHOUT MERGING; the author redirected to structural tags plus a
+        supports_required_and_named fallback flag. That flag EXISTS in v0.27.1
+        (abstract_tool_parser + glm47_moe, mistral, rust, gemma4_engine,
+        poolside_v1, kimi_k3, inkling) but NO QWEN PARSER DECLARES IT, so the
+        upstream replacement does not cover our case either."
     status: verified
 
   - id: qwen-vllm-pr40798-rebased
@@ -170,12 +183,18 @@ patches:
     model: [qwen3.6-27b]
     files:
       - models/qwen3.6-27b/vllm/patches/local/qwen3coder_tool_parser_deferred_commit.py
-    load_bearing_when:
-      - composes:
-          - vllm/minimal
-          - vllm/dual
-        reason: "Qwen3-Coder streaming parser can silence SSE when prose mentions literal <tool_call>."
-        evidence: "docs/UPSTREAM.md#qwen3coder-tool-parser-sse-silence-on-prose-tool_call"
+    # ⛔ NOT LOAD-BEARING -- was claimed for [vllm/minimal, vllm/dual] until
+    # 2026-09-06 (club-3090#1012). Verified:
+    #   1. THE TARGET FILE DOES NOT EXIST. The sidecar patches
+    #      vllm/tool_parsers/qwen3coder_tool_parser.py, GONE on BOTH v0.25.1 and
+    #      v0.27.1 -- and the parser was REPLACED, not moved: `qwen3_coder` now
+    #      resolves through the lazy registry to
+    #      vllm.tool_parsers.qwen3_engine_tool_parser:Qwen3EngineToolParser.
+    #      The sidecar's ORIG anchor cannot match on either pin.
+    #   2. NEITHER NAMED COMPOSE MOUNTS IT (0 references).
+    # ⚠️ Whether the SSE-silencing behaviour recurs on the replacement parser is
+    # untested; tracked separately rather than implied by a dead sidecar.
+    load_bearing_when: []
     delivery:
       dockerfile_bake: false
       entrypoint_invoke: true
@@ -199,7 +218,7 @@ patches:
     foundational: false
     upstream:
       ref: club-3090#72
-      status: local-workaround
+      status: dead-target
       drop_when: "upstream vLLM parser fixes the deferred-start state machine and pinned engines include it"
     status: verified
 
