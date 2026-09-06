@@ -45,12 +45,20 @@
 {%- set reasoning_instructions = '' %}
 {%- if enable_thinking is undefined or enable_thinking is true %}
     {%- set resolved_reasoning_effort = reasoning_effort|default('xhigh') %}
-    {#- club-3090 PATCH: Qwen3.8's ladder is low/medium/xhigh with no `high`, so
-        the stock template hard-raises on the value generic OpenAI/Anthropic
-        clients send. Map it onto `medium` -- the un-nudged baseline -- rather
-        than xhigh, whose preamble is slow and timeout-prone. Otherwise upstream. -#}
+    {#- club-3090 PATCH: Qwen3.8's ladder is low/medium/xhigh with no `high`, which
+        OpenAI- and Anthropic-shaped clients send as their TOP rung. Map it onto
+        `xhigh` -- the real top rung -- so the three standard values map bijectively
+        onto the three real ones and the caller's ordinal intent survives.
+        NOT `medium`: these are not a scale with a middle. `medium` has NO branch
+        and injects NOTHING, so mapping the top rung there hands a caller asking
+        for maximum reasoning the un-nudged baseline, and leaves `xhigh`
+        unreachable through standard vocabulary entirely.
+        xhigh's preamble is slower -- that is the caller's trade to make, and it is
+        opt-in per request. Callers that send nothing are unaffected: the server
+        default (`low`, via --default-chat-template-kwargs) still governs them.
+        Otherwise upstream. -#}
     {%- if resolved_reasoning_effort == 'high' %}
-        {%- set resolved_reasoning_effort = 'medium' %}
+        {%- set resolved_reasoning_effort = 'xhigh' %}
     {%- endif %}
     {%- if resolved_reasoning_effort not in ('xhigh', 'medium', 'low') %}
         {{- raise_exception('Unexpected reasoning effort ' ~ reasoning_effort ~ '. Supported types are xhigh (default), medium, and low.') }}
