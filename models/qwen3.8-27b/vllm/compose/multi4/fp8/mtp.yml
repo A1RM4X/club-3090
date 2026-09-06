@@ -18,7 +18,15 @@
 #              (vLLM has no literal `fp16` value for --kv-cache-dtype; `auto`
 #              following a bf16 model dtype IS the 16-bit KV path, and matches
 #              `kv_format="bf16"` in the registry.)
-#   Vision:    ✅ WORKING — image + video INPUT, no extra flags (measured 2026-08-16).
+#   Vision:    ⚠️ UNVERIFIED HERE — the checkpoint is vision-capable (the FP8 quant
+#              skips every visual.blocks.* module, and preprocessor_config.json +
+#              video_preprocessor_config.json ship in-repo, so no separate projector
+#              is needed), but the profile records it as NEVER EXERCISED on this
+#              stack. club-3090#1181 reports it answering correctly for two different
+#              images on a 2x3090; that has not been reproduced here.
+#              ⚠️ prompt_tokens rising is NOT evidence of working vision (the vision
+#              placeholders tokenize identically whether or not an encoder runs), and
+#              the registry.py:117 multimodal warning is logged by seeing tiers too.
 #              INPUT ONLY: it consumes media and emits TEXT. No image/video
 #              generation — the arch has no VAE/UNet/diffusion head.
 #              Image: colour+layout described correctly at temp 0 (red/blue/green

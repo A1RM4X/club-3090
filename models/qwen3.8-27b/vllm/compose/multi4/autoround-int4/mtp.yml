@@ -13,7 +13,21 @@
 #   Drafter:   MTP n=4 built-in (SPEC_N override; SPEC_N=0 disables)
 #              Toggle: SPEC_N=<n> sets depth; SPEC_N=0 (or SPEC=off) disables
 #   KV:        fp8 -> e4m3 (KV_CACHE_DTYPE override)
-#   Vision:    ✅ WORKING — image + video INPUT, no extra flags (measured 2026-08-16).
+#   Vision:    ⚠️ NOT SERVED on this tier — the vision tower is present (bf16) but
+#              has never been served. The ✅ WORKING claim here was measured
+#              2026-08-16 on the **Avuja** AutoRound export; the fast tier swapped to
+#              **Frozenlock** on 2026-08-20 (#1052 / PR #1070) and vision was never
+#              re-verified across that swap. The profile has said "VISION tower
+#              present (bf16), never served" for this variant all along
+#              (profiles/models/qwen3.8-27b.yml), and `switch.sh --explain` reports
+#              `vision no`. club-3090#1181 reports this tier answering identically
+#              for two DIFFERENT images on a 2x3090.
+#              ⚠️ Do NOT diagnose vision from prompt_tokens: a 256x256 image adds
+#              exactly 66 tokens ((256/16/2)^2 + 2 markers) whether or not an encoder
+#              runs, because the template expands the vision placeholders textually.
+#              ⚠️ Nor from the registry.py:117 "no registered multimodal processor"
+#              warning: tiers that DO see log it too. The only sound test is whether
+#              two different images produce different output.
 #              INPUT ONLY: it consumes media and emits TEXT. No image/video
 #              generation — the arch has no VAE/UNet/diffusion head.
 #              Image: colour+layout described correctly at temp 0 (red/blue/green
