@@ -86,53 +86,6 @@ patches:
       drop_when: "DONE — #40361 closed-superseded by #45295 (native in v0.24.0); vllm-stable pinned v0.24.0; no live compose mounts it. Entry retained as history."
     status: verified
 
-  - id: qwen-vllm-pr35936-required-fallback
-    model: [qwen3.6-27b]
-    files:
-      - models/qwen3.6-27b/vllm/patches/vllm-pr35936-required-fallback
-    # ⛔ NOT LOAD-BEARING -- was claimed for [vllm/minimal, vllm/dual] until
-    # 2026-09-06 (club-3090#1012). Three independent reasons, all verified:
-    #   1. HALF THE OVERLAY CANNOT LAND. install.sh copies two files; its second
-    #      target, vllm/entrypoints/openai/engine/serving.py, is GONE on BOTH
-    #      v0.25.1 and v0.27.1. The script warns to stderr and exits 0, so the
-    #      failure is invisible in a multi-thousand-line boot.
-    #   2. NEITHER NAMED COMPOSE MOUNTS IT (0 references in
-    #      dual/autoround-int4/fp8-mtp.yml and single/autoround-int4/minimal.yml).
-    #   3. Upstream #35936 is closed unmerged and its replacement flag is not set
-    #      for qwen -- see upstream.drop_when below.
-    # ⚠️ The underlying capability question is NOT resolved by this: whether
-    # tool_choice="required" actually works on Qwen3-Coder today is untested.
-    # Tracked separately rather than implied by a patch entry that does nothing.
-    load_bearing_when: []
-    delivery:               # DEPRECATED/READ-ONLY (test-only) — see header
-      dockerfile_bake: true
-      entrypoint_invoke: true
-      genesis: false
-    delivery_gaps: []
-    delivery_mechanism: install_script
-    delivery_spec:
-      script: models/qwen3.6-27b/vllm/patches/vllm-pr35936-required-fallback/install.sh
-      mounted_at: /etc/club3090/install-pr35936.sh
-      invoke: "bash /etc/club3090/install-pr35936.sh"
-      invoked_before: vllm-import
-      wired_at: [volumes, entrypoint]
-    drift_guard:
-      kind: behavioral
-      check: "tool_choice=required returns non-empty tool_calls[] on the selected nightly after the overlay copies the fallback serving.py"
-      on_fail: capability-degraded
-    capability: tool-choice-required
-    foundational: false
-    upstream:
-      ref: vllm-project/vllm#35936
-      status: dead-upstream
-      drop_when: "n/a -- verified 2026-09-06 (club-3090#1012). #35936 was CLOSED
-        WITHOUT MERGING; the author redirected to structural tags plus a
-        supports_required_and_named fallback flag. That flag EXISTS in v0.27.1
-        (abstract_tool_parser + glm47_moe, mistral, rust, gemma4_engine,
-        poolside_v1, kimi_k3, inkling) but NO QWEN PARSER DECLARES IT, so the
-        upstream replacement does not cover our case either."
-    status: verified
-
   - id: qwen-vllm-pr40798-rebased
     deprecated_on: "2026-06-05"
     deprecation_reason: "negative-local-result; abandoned, no functional compose uses it (#254)."

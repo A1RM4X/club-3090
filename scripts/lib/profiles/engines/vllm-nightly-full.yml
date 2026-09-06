@@ -58,9 +58,21 @@ vendored_overlays:
     purpose: "DFlash and quantized target KV coexistence (provided by the pinned nightly image; no on-disk overlay to mount)."
   - id: vllm-pr35936-qwen3coder-tool-parser
     pr_url: https://github.com/vllm-project/vllm/pull/35936
-    upstream_status: filed
+    upstream_status: closed-unmerged
     upstream_merged_in_version: null
-    local_status: vendored
+    local_status: dropped
+    dropped_on: "2026-09-06"
+    dropped_reason: >-
+      club-3090#1189 measured tool_choice=required WORKING on the replacement
+      parser (Qwen3EngineToolParser, what qwen3_coder now resolves to) with NO
+      overlay: non-streaming tool_calls=1, streaming 4 deltas with
+      finish_reason=tool_calls. Upstream #35936 was closed unmerged and its
+      successor flag supports_required_and_named is declared by 8 parsers in
+      v0.27.1, none of them qwen -- so neither the overlay nor the upstream
+      replacement is what makes this work. The overlay was half-inert anyway: its
+      second target entrypoints/openai/engine/serving.py has been gone since
+      before v0.25.1 and install.sh exits 0 on the miss (club-3090#1012).
+      Artifacts and the patches.yml / arch_patches.yml entries were removed.
     purpose: "Respect configured Qwen3 Coder tool parser for required tool choice."
 required_genesis: true
 genesis_pin: v7.72.2
