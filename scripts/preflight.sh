@@ -697,6 +697,20 @@ preflight_compose_gpu_fit() {
   echo "[preflight]        Fix: free that VRAM, or lower the ceiling —" >&2
   echo "[preflight]             GPU_MEMORY_UTILIZATION=0.90 bash scripts/switch.sh <variant>" >&2
   echo "[preflight]        — then retry.  (Bypass this check with --force.)" >&2
+    # club-3090#1134: on WSL the advice above is a dead end. nvidia-smi INSIDE the
+    # VM reports "No running processes found" while the card is nearly full,
+    # because the VRAM is held by WINDOWS-side processes it cannot see -- and
+    # `docker ps` will not show them either. A user following the Linux advice
+    # finds nothing and concludes the gate is wrong, then reaches for --force.
+    if grep -qiE 'microsoft|wsl' /proc/version 2>/dev/null; then
+      echo "[preflight]        WSL DETECTED -- the advice above needs adjusting:" >&2
+      echo "[preflight]          nvidia-smi in WSL says 'No running processes found' even when the card" >&2
+      echo "[preflight]          is full. The VRAM is held on the WINDOWS side and is invisible here;" >&2
+      echo "[preflight]          'docker ps' will not show it. Check Windows Task Manager > Performance" >&2
+      echo "[preflight]          > GPU instead, and close browsers (hardware acceleration), games and" >&2
+      echo "[preflight]          launchers, and anything driving the display." >&2
+      echo "[preflight]          --force does NOT free memory: vLLM will still abort after loading." >&2
+    fi
   if [[ "$force" == "1" ]]; then
     echo "[preflight] WARN:  --force set — launching anyway; vLLM may still abort at the free-memory check." >&2
     return 0
