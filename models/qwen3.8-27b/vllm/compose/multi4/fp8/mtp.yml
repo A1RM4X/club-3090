@@ -285,6 +285,8 @@ services:
       # ⚠️ The supporting A/B is a QWEN3.6 measurement. Nothing is benched on 3.8.
       - VLLM_USE_FLASHINFER_SAMPLER=${VLLM_USE_FLASHINFER_SAMPLER:-0}
       - OMP_NUM_THREADS=1
+      - MAMBA_BLOCK_SIZE=${MAMBA_BLOCK_SIZE:-}
+      - MAMBA_CACHE_DTYPE=${MAMBA_CACHE_DTYPE:-}
       # DeepGEMM (vLLM's fp8-GEMM path) is built for Hopper (sm_90) + datacenter
       # Blackwell. Consumer Blackwell (sm_120/121) has no recipe and hard-fails
       # "recipe not found" at boot (disc #571). switch.sh/launch.sh auto-inject
@@ -358,10 +360,28 @@ services:
           echo "[sampler] instruct row (default): temp=$$_temp top_p=$${TOP_P} presence=$${PRESENCE_PENALTY}" >&2
         fi
         SAMPLER_ARGS=(--override-generation-config "{\"temperature\":$$_temp,\"top_p\":$${TOP_P},\"top_k\":$${TOP_K:-20},\"min_p\":$${MIN_P:-0.0},\"presence_penalty\":$${PRESENCE_PENALTY},\"repetition_penalty\":$${REPEAT_PENALTY:-1.0}}")
+        # -- Mamba/GDN cache knobs (hybrid-model KV headroom) --
+        #   MAMBA_BLOCK_SIZE=<tokens>  checkpoint SSM state every N tokens (align mode; multiple of 8)
+        #   MAMBA_CACHE_DTYPE=bfloat16 store conv+ssm state in bf16 instead of fp32
+        # Ported from dual/autoround-int4 (#1170). In align mode the GDN/SSM state is
+        # checkpointed at EVERY attention block and those pages come out of the same pool
+        # as attention KV WITHOUT appearing in vLLM's "GPU KV cache size" figure, so the
+        # nominal token count overstates usable capacity. A larger block means fewer
+        # state pages per sequence.
+        # MUST be defined BEFORE the NVLink if/else below: BOTH exec branches reference
+        # MAMBA_ARGS, so defining it inside the then-branch would leave the else-branch
+        # (the no-NVLink path, i.e. most rigs) expanding an unset array -- the knob would
+        # be silently dead exactly where it is most likely to be used.
+        # UNMEASURED ON THIS SLUG: #1170 measured ~20% recovery on dual/autoround-int4
+        # only. The block size align pads to is per-slug, so neither the gap nor the right
+        # value transfers -- probe with live kv_cache_usage_perc first. Off by default.
+        MAMBA_ARGS=()
+        if [ -n "$${MAMBA_BLOCK_SIZE:-}" ]; then MAMBA_ARGS+=(--mamba-block-size "$${MAMBA_BLOCK_SIZE}"); echo "[mamba] block size $${MAMBA_BLOCK_SIZE}" >&2; fi
+        if [ -n "$${MAMBA_CACHE_DTYPE:-}" ]; then MAMBA_ARGS+=(--mamba-cache-dtype "$${MAMBA_CACHE_DTYPE}"); echo "[mamba] cache dtype $${MAMBA_CACHE_DTYPE}" >&2; fi
         if [ "$${_NVLINK_ENABLED:-0}" = "1" ]; then
-          exec vllm serve $${VLLM_ENFORCE_EAGER:+--enforce-eager} "$$@" "$${SPEC_ARGS[@]}" "$${SAMPLER_ARGS[@]}"
+          exec vllm serve $${VLLM_ENFORCE_EAGER:+--enforce-eager} "$$@" "$${SPEC_ARGS[@]}" "$${MAMBA_ARGS[@]}" "$${SAMPLER_ARGS[@]}"
         else
-          exec vllm serve $${VLLM_ENFORCE_EAGER:+--enforce-eager} --disable-custom-all-reduce "$$@" "$${SPEC_ARGS[@]}" "$${SAMPLER_ARGS[@]}"
+          exec vllm serve $${VLLM_ENFORCE_EAGER:+--enforce-eager} --disable-custom-all-reduce "$$@" "$${SPEC_ARGS[@]}" "$${MAMBA_ARGS[@]}" "$${SAMPLER_ARGS[@]}"
         fi
       - --
     command:

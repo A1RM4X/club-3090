@@ -152,6 +152,8 @@ services:
       - VLLM_NO_USAGE_STATS=1
       - VLLM_USE_FLASHINFER_SAMPLER=${VLLM_USE_FLASHINFER_SAMPLER:-0}
       - OMP_NUM_THREADS=1
+      - MAMBA_BLOCK_SIZE=${MAMBA_BLOCK_SIZE:-}
+      - MAMBA_CACHE_DTYPE=${MAMBA_CACHE_DTYPE:-}
       # DeepGEMM: no recipe on consumer Blackwell (5090 / PRO 6000 / GB10,
       # sm_120/121) — the launchers auto-inject VLLM_USE_DEEP_GEMM=0 there
       # (disc #571/#580, NVFP4 follow-up #613). THIS BARE PASS-THROUGH LINE IS
@@ -208,7 +210,22 @@ services:
           echo "[sampler] instruct row (default): temp=$$_temp top_p=$${TOP_P} presence=$${PRESENCE_PENALTY}" >&2
         fi
         SAMPLER_ARGS=(--override-generation-config "{\"temperature\":$$_temp,\"top_p\":$${TOP_P},\"top_k\":$${TOP_K:-20},\"min_p\":$${MIN_P:-0.0},\"presence_penalty\":$${PRESENCE_PENALTY}}")
-        exec vllm serve $$AR "$$@" "$${SPEC_ARGS[@]}" "$${SAMPLER_ARGS[@]}"
+        # -- Mamba/GDN cache knobs (hybrid-model KV headroom) --
+        #   MAMBA_BLOCK_SIZE=<tokens>  checkpoint SSM state every N tokens (align mode; multiple of 8)
+        #   MAMBA_CACHE_DTYPE=bfloat16 store conv+ssm state in bf16 instead of fp32
+        # Ported from dual/autoround-int4 (#1170). In align mode the GDN/SSM state is
+        # checkpointed at EVERY attention block and those pages come out of the same
+        # pool as attention KV WITHOUT appearing in vLLM's "GPU KV cache size" figure,
+        # so the nominal token count overstates usable capacity. Raising the block size
+        # cuts the number of state pages per sequence.
+        # UNMEASURED ON THIS SLUG: #1170 measured ~20%% recovery on dual/autoround-int4
+        # only. The block size that align pads to is per-slug, so neither the gap nor
+        # the right value transfers -- probe with live kv_cache_usage_perc before
+        # trusting a number here. Off by default: upstream behaviour is unchanged.
+        MAMBA_ARGS=()
+        if [ -n "$${MAMBA_BLOCK_SIZE:-}" ]; then MAMBA_ARGS+=(--mamba-block-size "$${MAMBA_BLOCK_SIZE}"); echo "[mamba] block size $${MAMBA_BLOCK_SIZE}" >&2; fi
+        if [ -n "$${MAMBA_CACHE_DTYPE:-}" ]; then MAMBA_ARGS+=(--mamba-cache-dtype "$${MAMBA_CACHE_DTYPE}"); echo "[mamba] cache dtype $${MAMBA_CACHE_DTYPE}" >&2; fi
+        exec vllm serve $$AR "$$@" "$${SPEC_ARGS[@]}" "$${MAMBA_ARGS[@]}" "$${SAMPLER_ARGS[@]}"
       - --
     command:
       - --model
