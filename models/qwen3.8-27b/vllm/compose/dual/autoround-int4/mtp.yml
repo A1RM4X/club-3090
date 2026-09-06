@@ -13,30 +13,24 @@
 #   Drafter:   MTP n=4 built-in (SPEC_N override; SPEC_N=0 disables)
 #              Toggle: SPEC_N=<n> sets depth; SPEC_N=0 (or SPEC=off) disables
 #   KV:        fp8 -> e4m3 (KV_CACHE_DTYPE override)
-#   Vision:    ⚠️ NOT SERVED on this tier — the vision tower is present (bf16) but
-#              has never been served. The ✅ WORKING claim here was measured
-#              2026-08-16 on the **Avuja** AutoRound export; the fast tier swapped to
-#              **Frozenlock** on 2026-08-20 (#1052 / PR #1070) and vision was never
-#              re-verified across that swap. The profile has said "VISION tower
-#              present (bf16), never served" for this variant all along
-#              (profiles/models/qwen3.8-27b.yml), and `switch.sh --explain` reports
-#              `vision no`. club-3090#1181 reports this tier answering identically
-#              for two DIFFERENT images on a 2x3090.
-#              ⚠️ Do NOT diagnose vision from prompt_tokens: a 256x256 image adds
-#              exactly 66 tokens ((256/16/2)^2 + 2 markers) whether or not an encoder
-#              runs, because the template expands the vision placeholders textually.
+#   Vision:    ✅ MEASURED WORKING on 2 x RTX 3090, 2026-09-06 — image INPUT.
+#              Probe: three solid-colour 256x256 PNGs (red/blue/green), temp=0,
+#              thinking off, "answer with one word: what colour is this image?".
+#              All three tiers answered 3/3 DISTINCT and 3/3 CORRECT:
+#                  dual-fast (Frozenlock INT4)  Red / Blue / Green
+#                  dual-max  (official FP8)     Red / Blue / Green
+#                  dual-nvfp4                   Red / Blue / Green
+#              ⚠️ club-3090#1181 reported dual-fast BLIND (identical '🙂' for every
+#              image) on a different 2x3090. NOT REPRODUCED here; cause unknown, so
+#              treat vision as rig-dependent and re-probe rather than assuming.
+#              ⚠️ VIDEO is NOT covered by this probe, and the INT4 export ships no
+#              video_preprocessor_config.json (FP8/NVFP4 do) — assume video untested.
+#              ⚠️ Do NOT diagnose from prompt_tokens: every request above read
+#              EXACTLY 90 regardless of tier, because the template expands the vision
+#              placeholders textually whether or not an encoder runs.
 #              ⚠️ Nor from the registry.py:117 "no registered multimodal processor"
-#              warning: tiers that DO see log it too. The only sound test is whether
-#              two different images produce different output.
-#              INPUT ONLY: it consumes media and emits TEXT. No image/video
-#              generation — the arch has no VAE/UNet/diffusion head.
-#              Image: colour+layout described correctly at temp 0 (red/blue/green
-#              discriminated, ~66-70 prompt tokens). Video: 3.25s clip, correct
-#              temporal order + the blended transition frame. Smoke test only —
-#              no vision quality gate, no resolution/duration limits explored.
-#              Video cost ~72.7 tok/s @256x256 (36 tok/frame at default fps=2),
-#              scaling with pixel count: 23 @128px, 263 @512px, 583 @768px.
-#              So ~61 min of 256x256 video fits the 262144 window; ~17 min @512px.
+#              warning — all three tiers log it, and all three see. The only sound
+#              test is whether DIFFERENT images produce DIFFERENT output.
 #   Template:  native + club-3090 alias — the model's own chat_template.jinja
 #              with `high` remapped to `medium` (patches/qwen38-reasoning-effort-template)
 #   Max ctx:   262144 — architectural ceiling, NOT measured on this checkpoint
