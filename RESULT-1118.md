@@ -137,3 +137,32 @@ rig's default `ESTATE_GPUS=0,1`), and the aggregate view is always correct.
   number). The panel surfaces the parser's moe-cache *warning* only.
 - **`test-bench-capture.sh` failure on master** (#1137, reopened): pre-existing,
   reproduced on `origin/master`; not touched.
+
+
+---
+
+## Follow-up (post-merge fix, `fix/1118-full-bootlog`)
+
+The merged panel rendered `other 0G ⚠` with **no component rows** on the live
+glm53-flash-dual container. Root cause (both mine, in the service seam):
+
+1. `vram_breakdown` read `docker logs --tail 4000` — the component lines
+   (`load_tensors`/`sched_reserve`) live at the HEAD of the log, and the
+   container's log had grown to **578,740 lines** (boot in the first ~70):
+   the tail window contained **zero** component lines.
+2. `container_logs` only surfaces stderr when stdout is empty, and
+   llama.cpp announces the buffers on **stderr** — stdout traffic alone
+   dropped them even inside the window.
+
+Fix: `vram_breakdown` reads the **full log, both streams** through the same
+runner seam (no `--tail`; the caller already caches it on the 600 s stride).
+`container_logs` itself is untouched for its Containers-tab consumers.
+
+**Evidence:** `docker logs --tail 4000 <glm container> | grep -c load_tensors`
+→ **0**; full log → **67**. Guard regression in
+`test-pull-download-ladder.sh`'s sibling — a streams-aware runner in
+`TestEstateVramSplit.test_worker_populates_split_and_G_cycles` (component
+lines on stderr, later traffic on stdout) asserts: no `--tail` in the
+docker-logs command, the parser's temp log saw `load_tensors` (both streams
+merged), and the rail renders the split. Cockpit suite re-run:
+**1124 passed, 1 skipped.**
