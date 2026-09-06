@@ -6,7 +6,12 @@
 #   Drafter:   MTP n=3 built-in (SPEC_N override; SPEC_N=0 disables)
 #              Toggle: SPEC_N=<n> sets depth; SPEC_N=0 (or SPEC=off) disables
 #   KV:        fp8 -> e4m3 (KV_CACHE_DTYPE override)
-#   Vision:    ✅ WORKING — image + video INPUT, no extra flags (measured 2026-08-16).
+#   Vision:    ⚠️ UNVERIFIED — no vision measurement exists for this variant, and the
+#              profile carries no vision note for it at all. The previous
+#              ✅ WORKING line was inherited from the 2026-08-16 FP8/Avuja
+#              measurement and never applied to this export. Treat as unknown until
+#              probed with two DIFFERENT images (see #1181 for the method and for
+#              why prompt_tokens and the registry.py:117 warning both mislead).
 #              INPUT ONLY: it consumes media and emits TEXT. No image/video
 #              generation — the arch has no VAE/UNet/diffusion head.
 #              Image: colour+layout described correctly at temp 0 (red/blue/green
