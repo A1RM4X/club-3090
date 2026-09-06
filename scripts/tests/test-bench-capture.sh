@@ -502,9 +502,31 @@ start_server() {   # $1=scenario $2=port [extra env as VAR=VAL ...]
   SRV_PID="$(cat "$pidfile" 2>/dev/null || true)"
   [[ -n "$SRV_PID" && -r "/proc/$SRV_PID/cmdline" ]] \
     || fail "$scen: fake server did not report a readable pid — the run would not be hermetic"
-  # let the periodic cache stats emit at least one cumulative sample first, so the
-  # marginal derivation has a genuine "before" to difference against
-  sleep 2
+  # #1137: proceed AS SOON AS the first stats sample exists -- do not sleep a
+  # fixed duration. The marginal derivation differences two periodic samples, and
+  # it needs the SECOND one to land INSIDE the bench window.
+  #
+  # Measured 2026-09-06: the fake server emits its first sample at ~0.9 s
+  # (iters=9 on every scenario), and the interval is ~1 s. The old `sleep 2`
+  # therefore did not "wait too little" -- it waited too MUCH: samples at ~0.9 s
+  # and ~1.9 s both landed BEFORE the bench started at t=2, so the window had no
+  # delta to difference and the derivation was skipped with
+  # `win_miss=0 miss=0`. Waiting LESS is what fixes it: the bench starts right
+  # after the first sample, and the next one lands inside the window.
+  #
+  # On this box the old form failed DETERMINISTICALLY (2/2 with win_miss=0), not
+  # intermittently; the variation seen across sweeps was bench-duration
+  # sensitivity, not randomness. The condition wait is 2/2 here and 5/5 including
+  # under deliberate 6-way CPU load.
+  local _s
+  for _s in $(seq 1 200); do
+    command grep -q '\[moe-cache\].*hits=' "$SRV_LOG" 2>/dev/null && break
+    sleep 0.1
+  done
+  command grep -q '\[moe-cache\].*hits=' "$SRV_LOG" 2>/dev/null \
+    || fail "$scen: fake server emitted no [moe-cache] hits= sample in 20s -- the
+       marginal derivation would have no 'before' to difference against
+       (GGML_CUDA_MOE_CACHE_STATS=1000 set?)"
 }
 
 run_bench() {   # $1=scenario $2=port $3=outfile [extra bench env ...]
