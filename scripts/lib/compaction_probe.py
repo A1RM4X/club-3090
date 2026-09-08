@@ -42,7 +42,13 @@ def _metrics(url):
     return out
 
 
-def _gen(url, model, msgs, max_tokens=200):
+# ⚠️ 2000, not 200. On a THINKING model a small budget is consumed by reasoning
+# and leaves a stub of content — which this probe's own thin-reply detector then
+# flags as possible degeneration. Measured 2026-09-08: 3/6 post-compaction replies
+# under 40 chars at max_tokens=200, entirely a budget artifact. Same trap as
+# bench-agentic (#1218) and gdn-mtp-apc-repro. Give reasoning room, or the
+# instrument reports on itself.
+def _gen(url, model, msgs, max_tokens=2000):
     m0 = _metrics(url)
     t0 = time.time()
     d = _post(url, {"model": model, "messages": msgs, "max_tokens": max_tokens,
@@ -69,8 +75,17 @@ def _gen(url, model, msgs, max_tokens=200):
             "preemptions": pre, "text": msg.get("content") or ""}
 
 
-def _phase(url, model, msgs, reps, label):
+def _phase(url, model, msgs, reps, label, continue_session=False):
+    """`continue_session=True` APPENDS each reply and a fresh user turn, so the
+    conversation keeps growing the way a real agent does after a compaction.
+
+    Without it this sent the SAME message list `reps` times and measured
+    steady-state throughput at a fixed depth — which cannot see the reported
+    symptom at all. The report (#1052) is "drop to around 25 and STAY [there]";
+    persistence only shows up if the session actually continues.
+    """
     rows = []
+    msgs = list(msgs)
     for i in range(reps):
         try:
             r = _gen(url, model, msgs)
@@ -78,6 +93,11 @@ def _phase(url, model, msgs, reps, label):
             print(f"  {label} rep {i+1}: FAILURE — {e}", flush=True)
             return rows, e
         rows.append(r)
+        if continue_session:
+            msgs.append({"role": "assistant", "content": r["text"] or "ok"})
+            msgs.append({"role": "user",
+                         "content": f"[post-compaction turn {i+1}] Continue: describe "
+                                    f"one more component of that system in detail."})
         eng = f"{r['engine_tps']:.1f}" if r["engine_tps"] else "n/a"
         warn = "  ⚠ preempted" if r["preemptions"] else ""
         print(f"  {label} rep {i+1}: ctx={r['prompt']:,} client={r['client_tps']:.1f} "
@@ -131,7 +151,22 @@ def main():
 
     filler = ("The scheduler batches requests by token budget while the allocator pages "
               "expert weights across the link and the drafter proposes tokens ahead. ") * 60
+    # ── CORRECTNESS CANARIES ──────────────────────────────────────────────
+    # Throughput is only half of "behaves correctly after a compaction". Two
+    # facts are planted in the pre-compaction history:
+    #   KEPT    — carried INTO the summary. The model SHOULD still recall it;
+    #             failing to means the compacted context is not being used.
+    #   DROPPED — left behind in the discarded history and NOT in the summary.
+    #             The model should NOT be able to state it. If it does, stale KV
+    #             is being reused across the compaction boundary — which would be
+    #             actual corruption, not slowness, and a far more serious finding
+    #             than the reported TPS drop.
+    CANARY_KEPT = "the deployment codename is SILVER-HARRIER-41"
+    CANARY_DROPPED = "the fallback shard identifier is TEAL-PANGOLIN-77"
     msgs = [{"role": "system", "content": "You are a senior systems engineer. Be concise."}]
+    msgs.append({"role": "user", "content": f"Remember two facts: {CANARY_KEPT}, "
+                                            f"and {CANARY_DROPPED}."})
+    msgs.append({"role": "assistant", "content": "Noted both facts."})
 
     print(f"=== 1. GROW to ~{target:,} ctx ===")
     ctx = turn = 0
@@ -159,7 +194,8 @@ def main():
 
     probe = [{"role": "user", "content": "Summarise the last chunk in one line."}]
     print(f"=== 2. BEFORE compaction ({a.reps} reps at depth) ===")
-    before, err = _phase(a.url, a.model, msgs + probe, a.reps, "before")
+    before, err = _phase(a.url, a.model, msgs + probe, a.reps, "before",
+                         continue_session=True)
     if err:
         print("VERDICT: crashed BEFORE compaction — not a compaction finding")
         return 2
@@ -168,16 +204,42 @@ def main():
     compacted = [msgs[0],
                  {"role": "user", "content": "Earlier context is summarised: a GPU "
                   "inference scheduler, a paged KV allocator, expert offload, and "
-                  "speculative decoding."},
+                  f"speculative decoding. Also, {CANARY_KEPT}."},
                  {"role": "assistant", "content": "Understood — summary noted."}]
     compacted += msgs[-2:]
     print(f"  history {len(msgs)} msgs -> {len(compacted)} msgs")
 
     print(f"=== 4. AFTER compaction ({a.reps} reps) ===")
-    after, err = _phase(a.url, a.model, compacted + probe, a.reps, "after")
+    after, err = _phase(a.url, a.model, compacted + probe, a.reps, "after",
+                        continue_session=True)
     if err:
         print("VERDICT: CRASHED AFTER COMPACTION — this is the reported shape (#1052)")
         return 2
+
+    # ── correctness, not just speed ──────────────────────────────────────
+    print("=== 5. CORRECTNESS after compaction ===")
+    try:
+        q_kept = _gen(a.url, a.model, compacted + [
+            {"role": "user", "content": "What is the deployment codename? Answer with just the codename."}])
+        q_drop = _gen(a.url, a.model, compacted + [
+            {"role": "user", "content": "What is the fallback shard identifier? If it is not in "
+                                        "our conversation, reply exactly: NOT PRESENT."}])
+        kept_ok = "SILVER-HARRIER-41" in (q_kept["text"] or "").upper()
+        leaked  = "TEAL-PANGOLIN-77" in (q_drop["text"] or "").upper()
+        print(f"  summary-carried fact recalled : {'YES' if kept_ok else 'NO'}"
+              f"   {'' if kept_ok else '⚠️  compacted context is not being used'}")
+        print(f"  dropped fact leaked           : {'YES' if leaked else 'no'}"
+              f"   {'⚠️⚠️  STALE KV ACROSS THE COMPACTION BOUNDARY — corruption, not slowness' if leaked else ''}")
+        print(f"    kept-probe reply : {(q_kept['text'] or '')[:90]!r}")
+        print(f"    drop-probe reply : {(q_drop['text'] or '')[:90]!r}")
+    except Exception as e:
+        print(f"  correctness probe FAILED — {e}")
+
+    # a reply that is merely SHORT is also a correctness signal
+    thin = sum(1 for r in after if len((r["text"] or "").strip()) < 40)
+    if thin:
+        print(f"  ⚠️  {thin}/{len(after)} post-compaction replies were under 40 chars — "
+              f"check for truncation/degeneration, not just throughput")
 
     bc, ac = _median([r["client_tps"] for r in before]), _median([r["client_tps"] for r in after])
     be, ae = _median([r["engine_tps"] for r in before]), _median([r["engine_tps"] for r in after])
