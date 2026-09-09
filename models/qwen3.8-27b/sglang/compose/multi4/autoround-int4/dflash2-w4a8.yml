@@ -1,0 +1,261 @@
+# ===========================================================================
+# Profile (at-a-glance):
+#   Model:     Qwen3.8-27B (Avuja AutoRound INT4 — 4-bit, group 128, sym,
+#              18.23 GiB. Vision tower + MTP head ship UNQUANTIZED at bf16.)
+#              Served **W4A8** — int8 activations via the vendored patch
+#              (the SGLang-side twin of the vLLM w4a8-int8-act overlay the
+#              sibling vLLM composes ship).
+#   Topology:  Quad 3090 (TP=4). ⚠ NVLink-aware: the bench rig has 2× NVLink
+#              pairs (0,2)/(1,3) and runs NCCL_P2P_LEVEL=NVL; the maintainer
+#              reference rig is PCIe-only and must NOT copy that.
+#   Drafter:   DFlash2 N=8 (incoai/Qwen3.8-27B-DFlash2) — **UPSTREAM in SGLang
+#              v0.5.19** (PR #35371), so this compose needs NO drafter patch —
+#              just the draft model path + depth. Toggle: SPEC_N=<n> sets depth;
+#              SPEC_N=0 (or SPEC=off) disables.
+#   KV:        fp8_e4m3 (KV_CACHE_DTYPE override). Same quantize-at-store /
+#              dequant-at-read semantics as the vLLM prod stacks on this
+#              checkpoint; one benign boot warning ("no scaling factors ...
+#              Defaulting to 1.0") is expected — the AutoRound ckpt carries
+#              no KV calibration scales.
+#   SSM:       bfloat16 (MAMBA_SSM_DTYPE) — halves each GDN state slot so 84
+#              slots fit the 0.77 static budget. NEW precision trade vs fp32;
+#              validate output before treating results as equivalent.
+#   Vision:    none (text path)
+#   Template:  native by default (CHAT_TEMPLATE=). Set CHAT_TEMPLATE to a
+#              mounted .jinja path to pin a specific one (e.g. the froggeric
+#              low-think template the vLLM lowthink prod stacks use).
+#   Max ctx:   262144 (the model's NATIVE ceiling; gmu 0.77)
+#   Genesis:   N/A — Genesis is vLLM-specific
+#   Status:    🧪 Experimental — community-validated on a 4× 3090 rig (bench
+#              in results/sglang-q38-ar-w4a8-dflash2-tp4-20260908/).
+#   Best for:  4-card INT4 with a heavy block-diffusion drafter on SGLang,
+#              or an SGLang-vs-vLLM engine A/B of the SAME model/quant/drafter
+#              (see the paired bench dir).
+# ---------------------------------------------------------------------------
+# THE W4A8 DENSE-GEMM PATCH — what it does and why it needed a re-cut.
+#
+# jb-seo's 0004-autoround-w4a8.patch (club-3090) delivers W4A8 on SGLang:
+# INT4 weights (AutoRound) + INT8 activations, using the Marlin kernel path
+# (gptq_kernels.py + a new marlin_w4a8 CUDA dir). It was cut against
+# **v0.5.18**. We re-cut it onto **v0.5.19** (the first release with DFlash2
+# upstream, so we can ship W4A8 + DFlash2 in one engine):
+#   - gptq_kernels.py  byte-identical v0.5.18→v0.5.19 → applies verbatim
+#   - auto_round.py    1-line context fix (isinstance(...) -> is_linear)
+#   - 8 new files (w4a8.py + 7 CUDA) — new files, no context dependency
+#
+# ⚠️⚠️ THE SHAPE GUARD (this PR's real fix, NOT in jb-seo's cut):
+#   AutoRound's eligibility gate omitted the per-shard K%128==0 / N%64==0
+#   constraint that prepare_w4a8 hard-asserts. On the Qwen3.8-27B GDN layers
+#   the merged `in_proj_ba` tensor is N=96 → 48/rank at TP4, which is NOT
+#   64-divisible, so a naive W4A8 pass crashes in gptq_marlin_repack with
+#   "size_n=48 is not divisible by 64". The guard pre-checks each shard's
+#   K/N before routing it to the W4A8 path; non-conformant shards log
+#   "[Marlin] W4A8 skipped (shard ...)" and fall back to standard Marlin
+#   W4A16 — no crash. Proven necessary by an isolation run (stock v0.5.19
+#   WITHOUT the guard crashes identically, exonerating the rest of the patch).
+#
+# ⚠️⚠️ THE CHECKPOINT DATA FIX (separate from the patch — DO NOT SKIP):
+#   Stock SGLang crashes on this checkpoint at weight-load EVEN without W4A8:
+#   the GDN in_proj_a/in_proj_b layers are BF16 in the checkpoint (extra_config
+#   bits:16) but SGLang builds a merged in_proj_ba and routes it through
+#   GPTQ-Marlin, which asserts size_n%64==0. The fix is DATA-side, in the
+#   target's config.json: add `".*in_proj_ba.*": {"bits":16,"data_type":"fp"}`
+#   to `extra_config`. Avuja's checkpoint already carries it (backup:
+#   config.json.bak-sglang-test). If you point TARGET at another AutoRound
+#   checkpoint, apply the same one-liner first or the stack crash-loops. This
+#   is a checkpoint property, not a patch property — it is documented here so
+#   it is not lost in a re-cut.
+#
+# ⚠️ TWO-POLLS memory model (hybrid GDN: 48 linear + 16 full-attention layers):
+#   the post-weight budget splits into a STATE pool (GDN recurrent state,
+#   per-request → caps CONCURRENCY) and a FULL-KV pool (attention KV,
+#   per-token → caps context × concurrency). The state pool is the one that
+#   binds on this model: SGLang's default overlap scheduler divides it by
+#   S=5 (1 base + 4 ping-pong/track), so a naive boot caps concurrency at
+#   ~10. The four sizing flags below (fp8 KV + bf16 SSM + mamba pin +
+#   max-running-requests) raise that to 16 with headroom; see the header's
+#   PRECISION CAVEAT for the bf16-SSM trade.
+# ---------------------------------------------------------------------------
+# To run:
+#   cd models/qwen3.8-27b/sglang/compose
+#   TARGET=<path to AutoRound INT4 ckpt> DRAFT=<path to DFlash2 ckpt> \
+#     docker compose -f multi4/autoround-int4/dflash2-w4a8.yml up -d
+#   (Defaults point at /models/... — set TARGET/DRAFT, or the CHAT_TEMPLATE
+#   mount, to wherever YOUR weights live; the bench rig uses HF-cache paths.)
+#
+#   Sibling (same model/quant, vLLM engine): models/qwen3.8-27b/vllm/compose/
+#   multi4/autoround-int4/dflash2.yml — the vLLM side of the engine A/B.
+#
+# Verify after boot (see the compose's inline checklist):
+#   - "[w4a8] applied + verified OK"
+#   - per-rank "[Marlin] W4A8 prepared: ... arch=sm86 ..." (many, 0 skips
+#     expected with the shape guard + the in_proj_ba data fix)
+#   - "DFlash2DraftModel" load + draft runner ready (DFlash2 is upstream)
+#   - "KV Cache is allocated. dtype: torch.float8_e4m3fn"
+#   - "Mamba Cache is allocated. max_mamba_cache_size: 84"
+#   - NO "capped to ... by the mamba state cache" line
+#   - smoke gen: math answer exact, prose coherent (W4A8 numerics)
+# ===========================================================================
+# Hardware metadata (parsed by scripts/preflight.sh):
+# Requires-min-vram-gb: 24
+# Engine-profile: sglang
+# Requires-min-gpu-count: 4
+# Tensor-parallel: 4
+services:
+  sglang-qwen38-27b-multi4-dflash2-w4a8:
+    image: ${SGLANG_IMAGE:-lmsysorg/sglang:v0.5.19}
+    container_name: "${ESTATE_CONTAINER:-sglang-qwen38-27b-multi4-dflash2-w4a8}"
+    # Repo contract (test-compose-restart-policy): every shipped compose uses
+    # the reboot-surviving knob. ⚠ WHEN DEBUGGING A BOOT FAILURE set
+    # CLUB3090_RESTART=no — under unless-stopped a failing container
+    # restart-loops and reports "Up 1 second" forever.
+    restart: ${CLUB3090_RESTART:-unless-stopped}
+    ipc: host
+    shm_size: 16gb
+    mem_limit: 64gb
+    memswap_limit: 64gb
+    runtime: nvidia
+    ports:
+      - "${BIND_HOST:-0.0.0.0}:${PORT:-8099}:8000"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    volumes:
+      # Target weights (AutoRound INT4). Must already carry the in_proj_ba
+      # data fix (see header) — the patch does NOT fix this.
+      - ${MODEL_DIR:-/models}/Avuja_Qwen3.8-27B-int4-AutoRound:/models/Avuja_Qwen3.8-27B-int4-AutoRound:ro
+      # DFlash2 draft model (upstream drafter, no patch needed).
+      - ${MODEL_DIR:-/models}/incoai_Qwen3.8-27B-DFlash2:/models/incoai_Qwen3.8-27B-DFlash2:ro
+      # W4A8 patch + idempotent installer (read-only).
+      - ../../../patches/sglang-autoround-w4a8-v0.5.19:/etc/club3090/w4a8:ro
+      # Optional chat template — set CHAT_TEMPLATE to a host .jinja path and
+      # it is mounted + passed to --chat-template (the compose below reads
+      # ${CHAT_TEMPLATE}). Leave unset for the checkpoint-native template.
+      - ${CHAT_TEMPLATE_HOST:-/dev/null}:/etc/chat_template.jinja:ro
+      # Warm JIT/compile caches (twin the vLLM sibling's cache/ layout).
+      - ${CACHE_DIR:-../../../cache}/triton:/root/.cache/triton
+      - ${CACHE_DIR:-../../../cache}/torch_compile:/root/.cache/torch_compile
+    environment:
+      # TP4 — explicit card list. The bench rig is 0,1,2,3; override to your
+      # own 4 cards (or leave "all" via NVIDIA_VISIBLE_DEVICES=all).
+      # ⚠ #610: a compose that sets NVIDIA_VISIBLE_DEVICES MUST also pass
+      # CUDA_VISIBLE_DEVICES through (bare form, no value) — CDI runtimes
+      # (NixOS / nvidia-ctk cdi) ignore NVIDIA_VISIBLE_DEVICES, so the CUDA
+      # mask is the only thing that pins cards there. launch.sh exports both
+      # as GPU UUIDs; test-compose-gpu-mask-passthrough enforces this.
+      - NVIDIA_VISIBLE_DEVICES=${GPUS:-0,1,2,3}
+      - CUDA_VISIBLE_DEVICES
+      # ⚠ NVLink is RIG-SPECIFIC. The bench rig has 2× NVLink pairs (0,2)/(1,3)
+      # and sets this; the maintainer reference rig is PCIe-only and must NOT.
+      # Set NCCL_P2P_LEVEL=NVL only on an NVLink-paired rig.
+      - NCCL_P2P_LEVEL=${NCCL_P2P_LEVEL:-}
+      - OMP_NUM_THREADS=1
+      - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN:-}
+      - HF_HUB_OFFLINE=${HF_HUB_OFFLINE:-${OFFLINE:-0}}
+      - TRANSFORMERS_OFFLINE=${TRANSFORMERS_OFFLINE:-${OFFLINE:-0}}
+      # ----------------------------------------------------------------------
+      # Forward the entrypoint knobs so they are host-overridable. Docker only
+      # passes into the container what is declared here; the *default* for each
+      # lives in the entrypoint (not here) so it cannot drift — an unset var
+      # forwards empty and the entrypoint fills its default. Same pattern as the
+      # vLLM dflash2 sibling (SPEC_N / SPEC forwarding).
+      - SPEC_N=${SPEC_N:-}
+      - SPEC=${SPEC:-}
+      - TP=${TP:-}
+      - GPU_MEM_FRACTION=${GPU_MEM_FRACTION:-}
+      - KV_CACHE_DTYPE=${KV_CACHE_DTYPE:-}
+      - MAMBA_SSM_DTYPE=${MAMBA_SSM_DTYPE:-}
+      - MAX_MAMBA_CACHE_SIZE=${MAX_MAMBA_CACHE_SIZE:-}
+      - MAX_RUNNING_REQUESTS=${MAX_RUNNING_REQUESTS:-}
+      - MAX_CTX=${MAX_CTX:-}
+      - CHUNKED_PREFILL_SIZE=${CHUNKED_PREFILL_SIZE:-}
+      - REASONING_PARSER=${REASONING_PARSER:-}
+      - TOOL_CALL_PARSER=${TOOL_CALL_PARSER:-}
+      - SERVED_MODEL_NAME=${SERVED_MODEL_NAME:-}
+      - CHAT_TEMPLATE=${CHAT_TEMPLATE:-}
+      - CHAT_TEMPLATE_HOST=${CHAT_TEMPLATE_HOST:-}
+      - MODEL_DIR=${MODEL_DIR:-}
+      - CACHE_DIR=${CACHE_DIR:-}
+      - DEFAULT_CHAT_TEMPLATE_KWARGS=${DEFAULT_CHAT_TEMPLATE_KWARGS:-}
+      - PREFERRED_SAMPLING_PARAMS=${PREFERRED_SAMPLING_PARAMS:-}
+    command:
+      # W4A8 installer first (idempotent, hard-fails on drift), then serve.
+      # The first token MUST be a program name (nvidia_entrypoint `exec "$@"`).
+      - bash
+      - -lc
+      - |
+        set -euo pipefail
+        bash /etc/club3090/w4a8/install.sh
+        # ---- Drafter toggle: the same contract on every club-3090 compose ----
+        #   SPEC_N=<n>  drafter depth (this compose defaults to 8); SPEC_N=0 disables
+        #   SPEC=off    back-compat alias for SPEC_N=0
+        # Turning the drafter off is the documented mitigation for a heavy drafter
+        # OOM and must never require editing this file. A non-numeric SPEC_N is a
+        # hard error, so a typo can never masquerade as a silent "drafter off".
+        _spec_n="$${SPEC_N:-8}"
+        case "$${SPEC:-}" in off|OFF|Off|false|no|0) _spec_n=0 ;; esac
+        case "$$_spec_n" in ""|*[!0-9]*)
+          echo "[spec] SPEC_N='$$_spec_n' is not a non-negative integer." >&2
+          echo "[spec] Fix: SPEC_N=<n> sets depth; SPEC_N=0 (or SPEC=off) disables." >&2
+          exit 1 ;;
+        esac
+        SPEC_ARGS=()
+        if [ "$$_spec_n" -gt 0 ]; then
+          SPEC_ARGS=(--speculative-algorithm DFLASH
+                     --speculative-draft-model-path /models/incoai_Qwen3.8-27B-DFlash2
+                     --speculative-num-draft-tokens "$$_spec_n")
+          echo "[spec] drafter ON - DFlash2 n=$$_spec_n (incoai Qwen3.8-27B-DFlash2, upstream)" >&2
+        else
+          echo "[spec] drafter OFF (SPEC_N=0 / SPEC=off) - no speculative decoding" >&2
+        fi
+        # ---------------------------------------------------------------------
+        # Optional chat template: only pass --chat-template when CHAT_TEMPLATE
+        # is set (a missing file hard-fails the boot, so don't pass it by default).
+        CT_ARGS=()
+        if [ -n "$${CHAT_TEMPLATE:-}" ]; then
+          CT_ARGS=(--chat-template "$${CHAT_TEMPLATE}")
+          echo "[template] --chat-template $${CHAT_TEMPLATE}" >&2
+        fi
+        # ---------------------------------------------------------------------
+        # JSON-valued flags: default them only if unset (single-quoted = literal
+        # JSON, overridable via env), in this block scalar so the double-quotes
+        # are plain. The command chain below then passes a bare "$$VAR".
+        if [ -z "$${DEFAULT_CHAT_TEMPLATE_KWARGS:-}" ]; then
+          DEFAULT_CHAT_TEMPLATE_KWARGS='{"enable_thinking": true, "reasoning_effort": "low"}'
+        fi
+        if [ -z "$${PREFERRED_SAMPLING_PARAMS:-}" ]; then
+          PREFERRED_SAMPLING_PARAMS='{"temperature":0.7,"top_p":0.8,"top_k":20,"min_p":0.0,"presence_penalty":1.5}'
+        fi
+        # ---------------------------------------------------------------------
+        # !!! KEEP THE FLAG CHAIN BELOW COMMENT-FREE. A `#` line placed BETWEEN
+        #     backslash-continued flags terminates the logical line and
+        #     SILENTLY DROPS every flag after it (host / port / served-name +
+        #     the sizing flags) — the server then binds 127.0.0.1:30000 instead
+        #     of the requested port. This is the exact failure that hit a real
+        #     boot; do not "tidy" it by adding inline comments.
+        # ---------------------------------------------------------------------
+        exec sglang serve \
+          --model-path /models/Avuja_Qwen3.8-27B-int4-AutoRound \
+          --tp-size "$${TP:-4}" \
+          "$${SPEC_ARGS[@]}" \
+          --trust-remote-code \
+          --reasoning-parser "$${REASONING_PARSER:-qwen3}" \
+          --tool-call-parser "$${TOOL_CALL_PARSER:-qwen3_coder}" \
+          "$${CT_ARGS[@]}" \
+          --context-length "$${MAX_CTX:-262144}" \
+          --mem-fraction-static "$${GPU_MEM_FRACTION:-0.77}" \
+          --chunked-prefill-size "$${CHUNKED_PREFILL_SIZE:-2048}" \
+          --kv-cache-dtype "$${KV_CACHE_DTYPE:-fp8_e4m3}" \
+          --mamba-ssm-dtype "$${MAMBA_SSM_DTYPE:-bfloat16}" \
+          --max-mamba-cache-size "$${MAX_MAMBA_CACHE_SIZE:-84}" \
+          --max-running-requests "$${MAX_RUNNING_REQUESTS:-16}" \
+          --enable-metrics \
+          --default-chat-template-kwargs "$$DEFAULT_CHAT_TEMPLATE_KWARGS" \
+          --preferred-sampling-params "$$PREFERRED_SAMPLING_PARAMS" \
+          --served-model-name "$${SERVED_MODEL_NAME:-qwen3.8-27b}" \
+          --host 0.0.0.0 \
+          --port 8000

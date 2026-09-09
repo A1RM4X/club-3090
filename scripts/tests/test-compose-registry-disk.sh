@@ -36,7 +36,7 @@ def check(cond, msg):
         failures.append(msg)
 
 check(len(COMPOSE_REGISTRY) == 111, f"registry expects 111 entries (got {len(COMPOSE_REGISTRY)})")
-check(len(disk_paths) == 112, f"disk expects 112 compose files (got {len(disk_paths)})")
+check(len(disk_paths) == 113, f"disk expects 113 compose files (got {len(disk_paths)})")
 check(registry_paths <= disk_paths, "all registry compose_path values exist on disk")
 parked_disk_only = disk_paths - registry_paths
 # Disk-only (non-registry) composes allowed: parked SGLang archives, plus the experimental
