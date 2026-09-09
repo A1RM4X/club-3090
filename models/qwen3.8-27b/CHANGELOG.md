@@ -2,6 +2,52 @@
 
 Dated history for Qwen3.8-27B configs in this repo. Append-only — add a new entry, don't rewrite past ones.
 
+## 2026-09-08 — SGLang W4A8 + DFlash2 (multi4 INT4): re-cut W4A8 patch + shape guard, engine A/B
+
+New `sglang/qwen38-27b-multi4-dflash2-w4a8` compose (TP=4, AutoRound INT4 **W4A8**,
+fp8 KV, gmu 0.77, **max-ctx 262144**, bf16 SSM, mamba 84 / max-running 16) on
+**SGLang v0.5.19** with the **incoai/Qwen3.8-27B-DFlash2** drafter (n=8,
+*upstream* — no drafter patch) — the SGLang-side twin of the vLLM
+`vllm/qwen38-27b-multi4-dflash2` compose, so the same model/quant/drafter can be
+served by either engine and A/B'd.
+
+**Why a patch, and which one.** SGLang has no env-gated W4A8 path (vLLM needs
+`VLLM_MARLIN_INPUT_DTYPE=int8`); here applying the patch *is* the activation.
+The patch is a **re-cut of jb-seo's `0004-autoround-w4a8.patch` (v0.5.18) onto
+v0.5.19** — v0.5.19 is the first release with DFlash2 upstream, so one engine
+carries W4A8 + DFlash2. The re-cut's real fix is the **shape guard**: jb-seo's
+eligibility gate omitted the per-shard `K%128==0 / N%64==0` constraint that
+`prepare_w4a8` hard-asserts. On the Qwen3.8-27B GDN merged `in_proj_ba` tensor
+(N=96 → 48/rank at TP4, not 64-divisible) a naive W4A8 pass crashes in
+`gptq_marlin_repack` with `size_n=48 is not divisible by 64`; the guard pre-checks
+each shard and routes non-conformant layers to standard Marlin W4A16 (no crash).
+Proven necessary by an isolation run: stock v0.5.19 *without* the guard crashes
+identically, exonerating the rest of the patch.
+
+**Checkpoint data fix (separate from the patch, DO NOT SKIP).** Stock SGLang
+crashes on the Avuja AutoRound checkpoint at weight-load *even without* W4A8:
+the GDN `in_proj_a`/`in_proj_b` layers are BF16 in the checkpoint but SGLang
+builds a merged `in_proj_ba` and routes it through GPTQ-Marlin. The fix is
+data-side in the target's `config.json`
+(`".*in_proj_ba.*": {"bits":16,"data_type":"fp"}`) — the Avuja checkpoint already
+carries it (backup `config.json.bak-sglang-test`). The patch does **not** fix
+this; it is a checkpoint property. See the patch README for the full story.
+
+**Bench (2026-09-08, 4× 3090 Turbo NVLink, 220 W, fp8 KV)** — raw in
+`results/sglang-q38-ar-w4a8-dflash2-tp4-20260908/`, paired against the vLLM dflash2
+baseline (sibling PR). Headline: **SGLang wins c=1 decode +45%** (146.6 narr /
+267.4 code vs vLLM 100.8 / 185.0); the win narrows to +6%/+4% by c=8 (vLLM's
+batching scales harder, crossover c=4→8) and +16%/+11% at c=16; prefill
+−2%…−17% (a wash); no saturation knee at c=16 on either engine. Peak VRAM
+22,835 MiB/card, 0 MiB leak. Caveats (kept in the BENCHMARKS row): this run had
+no `--enable-metrics` (no Prometheus accept deltas) and one c=16 narrative
+round hit a ~26 s prefill/scheduler stall (mean TTFT inflated, median fine).
+
+**Status: 🧪 Experimental.** Not yet community-gated (no verify-stress / soak /
+8-pack on this SGLang config); the first community boot is the validation, same
+policy as the vLLM dflash2 compose. Engine pinned to `lmsysorg/sglang:v0.5.19`
+(vendored patch ⇒ pin per AGENTS.md).
+
 ## 2026-09-04 — dual-fast: `MAMBA_BLOCK_SIZE` knob — the "2.17×/2.49× concurrency" pool figures were ~20% optimistic; 8192-token SSM checkpoints recover it (2×242K concurrent, 0 preemptions)
 
 **Finding.** vLLM's "GPU KV cache size: N tokens" counts attention KV only. In `--mamba-cache-mode align` (the shipped default) the GDN/SSM state is checkpointed at **every attention block** — 1,616 tokens on this slug, since align pads the attention block up to the mamba page — and those state pages are carved out of the *same* pool at runtime without appearing in N. Measured on the ref 2×3090 (v0.27.1, W4A8, MTP n=4, util 0.92, 4 seqs): pool reported **530,081 tokens (2.02×)**, but two ~200K prompts filled it (`kv_cache_usage_perc` → 0.98) at ~400K live tokens, preempted twice and serialized (TTFT 292 s / 481 s). Effective capacity ≈ **80% of nominal**, so the header's 652,346 → 2.49× and 567,737 → 2.17× read as ~2.0× / ~1.75× in practice. `max_num_seqs` (4→2: +0.8%), util 0.90→0.92 (+3%), `MAX_NUM_BATCHED_TOKENS` 8192→4096 (0 — the 1.96 GiB "peak activation" reserve is fixed) and `MAMBA_CACHE_MODE=none` (a no-op while prefix caching is on) do not move it.

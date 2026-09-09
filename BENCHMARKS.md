@@ -361,6 +361,12 @@ Dense 27B, Qwen3-Next hybrid (16 full-attention + 48 linear-attention layers, 24
 
 ⚠️ **Do not diff these against the Qwen3.6-27B rows.** Different checkpoint, different sampler defaults (this tier follows the 3.8 model card's Instruct row), and cross-session TPS comparison is invalid on this rig — single boots swing ~5 TPS on the code leg, which is wider than most tier gaps. Same-session A/B only.
 
+
+### Quad-card (4× RTX 3090, TP=4) — SGLang
+
+| Compose | Rig | KV | Max ctx | Narr / Code TPS | PP tok/s | Peak VRAM | Date | Notes |
+| --- | --- | --- | ---: | ---: | ---: | ---: | --- | --- |
+| `sglang/compose/multi4/autoround-int4/dflash2-w4a8.yml` (`sglang-qwen38-27b-multi4-dflash2-w4a8`, DFlash2 n=8, W4A8) | @A1RM4X (4× 3090 Turbo 24 GB, **NVLink** (0,2)/(1,3), 220 W cap) | fp8 e4m3 | 262144 | **146.6 / 267.4** (c=1, CV 1.5% / ~1%) | 1815 @16K (flat 1K–16K) | **22,835 MiB/card** (0 MiB leak) | 2026-09-08 | 🧪 Experimental. **SGLang v0.5.19** — the *engine A/B* of the vLLM dflash2 run (sibling PR `a1rm4x/dflash2-qwen38-27b`, `vllm/multi4/autoround-int4/dflash2.yml`, n=7). Same model/quant/DFlash2/FP8 KV/TP4/262K/220 W; only engine + drafter depth 7→8 differ, so the decode delta is an engine comparison. **SGLang wins c=1 decode +45%** (146.6 narr / 267.4 code vs vLLM 100.8 / 185.0) — single-stream is where its DFlash2 drafter + overlap scheduler is most efficient (ITL p50 21.9 ms vs vLLM ~31 ms). **The win narrows as concurrency rises:** +45% at c=1 → +6%/+4% by c=8 (vLLM's batching scales harder, crossover between c=4 and c=8) → +16%/+11% at c=16. **No knee at c=16 on either engine** (combined decode still climbs c=8→c=16: narr 313→576, code 592→975). Prefill a wash-to-slightly-slower (−2%…−17%), flat 1K→16K. **caveats:** this run had **no `--enable-metrics`** (SGLang `enable_metrics` was off), so no Prometheus accept-length deltas — only the qualitative SGLang `accept len` log (≈2.7–3.8); and one c=16 narrative round hit a ~26 s prefill/scheduler stall that inflates that one mean TTFT (median fine). **Read against the vLLM dflash2 row (sibling PR), not the Qwen3.6-27B tier.** Engine pin `lmsysorg/sglang:v0.5.19` (first release with DFlash2 upstream). Raw: [`results/sglang-q38-ar-w4a8-dflash2-tp4-20260908/`](results/sglang-q38-ar-w4a8-dflash2-tp4-20260908/). Detail: [`models/qwen3.8-27b/sglang/README.md`](models/qwen3.8-27b/sglang/README.md). |
 ---
 
 ## Qwen3.6-40B-Deckard
