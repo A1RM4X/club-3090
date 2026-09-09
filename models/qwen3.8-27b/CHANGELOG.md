@@ -33,15 +33,17 @@ data-side in the target's `config.json`
 carries it (backup `config.json.bak-sglang-test`). The patch does **not** fix
 this; it is a checkpoint property. See the patch README for the full story.
 
-**Bench (2026-09-08, 4× 3090 Turbo NVLink, 220 W, fp8 KV)** — raw in
-`results/sglang-q38-ar-w4a8-dflash2-tp4-20260908/`, paired against the vLLM dflash2
-baseline (sibling PR). Headline: **SGLang wins c=1 decode +45%** (146.6 narr /
-267.4 code vs vLLM 100.8 / 185.0); the win narrows to +6%/+4% by c=8 (vLLM's
-batching scales harder, crossover c=4→8) and +16%/+11% at c=16; prefill
-−2%…−17% (a wash); no saturation knee at c=16 on either engine. Peak VRAM
-22,835 MiB/card, 0 MiB leak. Caveats (kept in the BENCHMARKS row): this run had
-no `--enable-metrics` (no Prometheus accept deltas) and one c=16 narrative
-round hit a ~26 s prefill/scheduler stall (mean TTFT inflated, median fine).
+**Bench (2026-09-09, 4× 3090 Turbo NVLink, 220 W, fp8 KV)** — raw in
+`results/sglang-q38-ar-w4a8-dflash2-tp4-20260909/`, paired against the vLLM dflash2
+baseline (sibling PR). Headline: **SGLang wins c=1 decode +43%** (144.6 narr /
+244.8 code vs vLLM 100.8 / 185.0); the win narrows to +4%/+6% by c=8 (vLLM's
+batching scales harder, crossover c=4→8) and +11%/+10% at c=16; prefill raw TPS
+−2%…−17% but **SGLang TTFT is lower at 4K+** (5.0s vs 8.6s @16K); no
+saturation knee at c=16. Peak VRAM ~22.0–22.4 GB/card, 0 MiB leak. **This run
+has `--enable-metrics`:** spec_accept_length=5.65 tok/step, accept_rate=66%
+(54 accepted / 56 drafts, 6 reqs, 6.5 s window). Caveats: c=1 code decode is
+short-completion (646–800 tok actual vs 800 target); c=8 codeln TTFT=1069 ms
+and c=16 codeln TTFT=2356 ms are single-outlier rounds (median fine).
 
 **Status: 🧪 Experimental.** Not yet community-gated (no verify-stress / soak /
 8-pack on this SGLang config); the first community boot is the validation, same

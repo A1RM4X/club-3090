@@ -46,7 +46,7 @@ and fall back to standard Marlin W4A16 for that layer. Consequence on
 Qwen3.8-27B at TP4: the GDN merged-projection layers run W4A16 (their N is
 the problem), everything else (the bulk of the dense FFN/attention weight)
 runs W4A8. That is the measured configuration the benches in
-`results/sglang-q38-ar-w4a8-dflash2-tp4-20260908/` were taken with.
+`results/sglang-q38-ar-w4a8-dflash2-tp4-20260909/` were taken with.
 
 **Necessity was proven by isolation:** stock v0.5.19 *without* the guard,
 run on the same checkpoint, crashes identically at `gptq_marlin_repack.cuh:
@@ -105,7 +105,7 @@ the `auto_round.py` anchor the moment upstream touches that gate again.
   KV pool 731,047 tokens (fp8), mamba pool 84 slots (bf16), `max_running
   requests = 16` not capped. Coherent output verified (math exact, prose
   coherent) — W4A8 numerics are clean on this checkpoint.
-- **Bench:** `results/sglang-q38-ar-w4a8-dflash2-tp4-20260908/` — full
+- **Bench:** `results/sglang-q38-ar-w4a8-dflash2-tp4-20260909/` — full
   bench-ultimate run (prefill ladder 512→16K, decode saturation c=1..16,
   narrative + code) head-to-head vs the vLLM 0.27.1 baseline on the same
   model/quant/drafter. SGLang wins c=1 decode by ~45%; vLLM closes the gap

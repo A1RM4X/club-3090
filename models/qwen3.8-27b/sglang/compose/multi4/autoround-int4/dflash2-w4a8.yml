@@ -27,7 +27,7 @@
 #   Max ctx:   262144 (the model's NATIVE ceiling; gmu 0.77)
 #   Genesis:   N/A — Genesis is vLLM-specific
 #   Status:    🧪 Experimental — community-validated on a 4× 3090 rig (bench
-#              in results/sglang-q38-ar-w4a8-dflash2-tp4-20260908/).
+#              in results/sglang-q38-ar-w4a8-dflash2-tp4-20260909/).
 #   Best for:  4-card INT4 with a heavy block-diffusion drafter on SGLang,
 #              or an SGLang-vs-vLLM engine A/B of the SAME model/quant/drafter
 #              (see the paired bench dir).
