@@ -107,7 +107,10 @@ class H(BaseHTTPRequestHandler):
             cached = min(ptok, max([toks(p) for p in SEEN if prompt.startswith(p)] or [0]))
             COUNTER["cache"] += cached
             if prompt not in SEEN: SEEN.append(prompt)
-        time.sleep(min(1.0, (ptok - cached) * 0.0001))          # emulated prefill
+        # nocache: reuse is observable and reports ZERO, and the re-query gets no
+        # speed-up either — cached==0 with a cold-cost TTFT. That is the branch
+        # that returned "CLEAN eviction" regardless of pressure (#1299).
+        time.sleep(min(1.0, (ptok if REPORT == "nocache" else ptok - cached) * 0.0001))
         maxtok = int(req.get("max_tokens", 16))
         self.send_response(200); self.send_header("Content-Type", "text/event-stream"); self.end_headers()
         def chunk(o): self.wfile.write(b"data: " + json.dumps(o).encode() + b"\n\n"); self.wfile.flush()
@@ -132,7 +135,8 @@ class H(BaseHTTPRequestHandler):
                             "finish_reason": ("length" if SHAPE == "truncated" else "stop")}],
                "usage": None})
         chunk({"choices": [], "usage": {"prompt_tokens": ptok, "completion_tokens": ctok, "total_tokens": ptok + ctok,
-               "prompt_tokens_details": ({"cached_tokens": cached} if (REPORT == "usage" and cached > 0) else None)}})
+               "prompt_tokens_details": ({"cached_tokens": 0} if REPORT == "nocache" else
+                                         {"cached_tokens": cached} if (REPORT == "usage" and cached > 0) else None)}})
         self.wfile.write(b"data: [DONE]\n\n"); self.wfile.flush()
 ThreadingHTTPServer(("127.0.0.1", PORT), H).serve_forever()
 PYEOF
@@ -266,12 +270,35 @@ sys.exit(0 if got == want else 1)
 PYEOF
 ok "the four decode bases are chained in descending fidelity (chunk-count below both token-counted bases)"
 
-# --- contract 7: breadth without eviction pressure says so, and re-queries verdict
+# --- contract 7: a breadth run UNDER the nominal pool must not claim there is no
+# eviction pressure, and must not let any verdict name eviction as the cause.
+#
+# Nominal pool is not the reusable radix budget: measured on SGLang, a
+# 30,895-token prefix that reused perfectly (30,848 tok, 0.23s vs a 24.62s cold
+# cost) was gone after five unrelated ~28K sessions — ~66% of
+# max_total_num_tokens. The old wording said "no KV eviction pressure ... the
+# verdicts below are NOT an eviction test" and so told a reader to discard a
+# result that was right, while verdict() separately printed "CLEAN eviction" on
+# the very same rows. Both halves are #1299.
 run_fake usage breadth SESSIONS=2 SESSION_CTX=600 KV_POOL=100000
 [[ $rc -eq 0 ]] || bad "breadth run exits 0" "0" "$rc: $(tail -3 <<<"$out")"
-command grep -q 'do NOT exceed the pool' <<<"$out" || bad "breadth warns when planned tokens fit the pool" "a no-pressure warning" "absent: $out"
+command grep -qi 'no KV eviction pressure' <<<"$out" \
+  && bad "sub-pool run must not claim there is no eviction pressure" "no such claim" "the old wording is back"
+command grep -q 'does NOT mean there is no' <<<"$out" \
+  || bad "sub-pool run states that nominal pool does not rule out eviction" "the ~66% caveat" "absent: $out"
 command grep -qc 'HEALTHY reuse' <<<"$out" || bad "breadth re-query verdicts rendered" "HEALTHY reuse rows" "absent: $out"
-ok "breadth warns when there is no eviction pressure and classifies re-queries"
+ok "a sub-pool breadth run does not claim 'no eviction pressure', and still classifies re-queries"
+
+# --- contract 7b (the negative control #1299 asks for): with reuse absent and a
+# cold-cost TTFT, a run that CANNOT establish pressure must report the
+# observation without naming a cause. The fake reports cached=0 via a pool it
+# cannot exceed, so "eviction" must not appear anywhere in a verdict cell.
+run_fake nocache breadth SESSIONS=2 SESSION_CTX=600 KV_POOL=100000
+[[ $rc -eq 0 ]] || bad "breadth run (cached=0, no speed-up) exits 0" "0" "$rc: $(tail -3 <<<"$out")"
+verdict_cells="$(awk -F'   ' '/^ +[0-9]+ +[0-9,]+/ {print $NF}' <<<"$out")"
+command grep -qi 'eviction' <<<"$verdict_cells" \
+  && bad "an unpressured run must not name eviction" "no 'eviction' in any verdict" "$(tr '\n' '|' <<<"$verdict_cells")"
+ok "with pressure unestablished, verdicts report the observation and name no mechanism"
 
 if [[ $FAIL -ne 0 ]]; then echo "FAIL: test-deep-context-probe" >&2; exit 1; fi
 echo "PASS: test-deep-context-probe (club-3090#1259)"

@@ -437,11 +437,18 @@ def run_depth():
         if turn > 200:
             print("  stopping: 200 turns without reaching target"); break
 
-def verdict(m, cold_ttft):
-    """Breadth verdict. cold_ish = TTFT within 30% of the cold reference. The
-    cached fraction matters: a small cached count with a cold-cost TTFT is a
-    PARTIAL eviction, not a stranding — only a mostly-cached prefix that still
-    costs a cold prefill is the shape jb-seo describes."""
+def verdict(m, cold_ttft, pressure_known):
+    """Breadth verdict. cold_ish = TTFT within 30% of the cold reference.
+
+    ⭐ A verdict may only name a MECHANISM the probe can actually observe. What a
+    row observes is "no reuse, and it cost a cold prefill". *Eviction* is one
+    EXPLANATION for that, licensed only when the cache is known to be pressured.
+    This took (m, cold_ttft) — no pressure input at all — and returned "CLEAN
+    eviction" unconditionally, so the identical string appeared whether or not
+    eviction was possible and carried no information either way (#1299).
+
+    pressure_known is False when the probe cannot establish pressure; the wording
+    then stays agnostic about cause."""
     if m["ttft"] is None:
         return "NO RESPONSE (no choices chunk)"
     cold_ish = m["ttft"] > cold_ttft * 0.7
@@ -449,11 +456,16 @@ def verdict(m, cold_ttft):
     if cached is None:
         return ("cold-like TTFT" if cold_ish else "warm-like TTFT") + " — reuse count unobservable (see self-test)"
     if cached == 0:
-        return "CLEAN eviction" if cold_ish else "fast despite cached=0 (?)"
+        if not cold_ish:
+            return "fast despite cached=0 (?)"
+        return ("CLEAN eviction" if pressure_known
+                else "NO REUSE, cold cost — cause NOT established (pressure unknown)")
     frac = cached / m["ptok"] if m["ptok"] else 0.0
     if cold_ish:
-        return (f"STRANDED — {frac:.0%} reported cached but cold-cost" if frac >= 0.5
-                else f"PARTIAL eviction — {frac:.0%} cached, cold-cost expected")
+        if frac >= 0.5:
+            return f"STRANDED — {frac:.0%} reported cached but cold-cost"
+        return (f"PARTIAL eviction — {frac:.0%} cached, cold-cost expected" if pressure_known
+                else f"{frac:.0%} cached but cold-cost — cause NOT established (pressure unknown)")
     return f"HEALTHY reuse ({frac:.0%} cached)"
 
 def run_breadth():
@@ -462,15 +474,28 @@ def run_breadth():
     pool = KV_POOL or (int(p["kv_total"]) if p and p.get("kv_total") else 0)
     total = SESSIONS * SESSION_CTX
     print(f"  BREADTH — {SESSIONS} sessions x ~{SESSION_CTX:,} tok = ~{total:,}")
+    # ⭐ The nominal pool is NOT the reusable radix budget. Measured on SGLang
+    # (#1299): a 30,895-token prefix that reused perfectly (30,848 tok, 0.23s vs
+    # a 24.62s cold cost) was GONE after five unrelated ~28K sessions — about 66%
+    # of max_total_num_tokens. Running-request working space and the eviction
+    # watermark come out of the nominal figure first.
+    #
+    # So `total <= pool` does NOT mean "no eviction pressure". The old wording
+    # asserted exactly that and told a reader to discard verdicts that were right.
+    # Nominal pool is a PLANNING ratio only; it never licenses a claim about
+    # cause in either direction.
+    pressure_known = False
     if pool:
         print(f"  KV pool {pool:,} tok ({'KV_POOL' if KV_POOL else 'from /metrics'}): "
-              f"planned {total / pool:.2f}x pool")
-        if total <= pool:
-            print("  ⚠️ planned tokens do NOT exceed the pool — no KV eviction pressure, so the verdicts "
-                  "below are NOT an eviction test. Raise SESSIONS or SESSION_CTX.")
+              f"planned {total / pool:.2f}x nominal pool")
+        pressure_known = total > pool
+        if not pressure_known:
+            print("  note: planned tokens are under the NOMINAL pool, but that does NOT mean there is no "
+                  "eviction pressure — eviction has been measured at ~66% of nominal (#1299). Verdicts "
+                  "below will not name a cause; raise SESSIONS or SESSION_CTX to exceed the pool outright.")
     else:
-        print("  ⚠️ KV pool unknown (KV_POOL unset and no pool gauge on /metrics) — cannot confirm "
-              "eviction pressure; verdicts below are only meaningful if you know the pool was exceeded.")
+        print("  ⚠️ KV pool unknown (KV_POOL unset and no pool gauge on /metrics) — verdicts below will "
+              "report what was observed without naming a cause.")
     if p and p.get("mamba_total"):
         print(f"  mamba pool: {int(p['mamba_total'])} state slots — one distinct prefix per slot, so "
               f"breadth can exhaust it long before KV fills (compose header arithmetic).")
@@ -505,7 +530,8 @@ def run_breadth():
             m = measure(s, max_tokens=8)
         except Exception as e:
             print(f"  {idx + 1:>8}: ERROR {http_error_text(e)}"); continue
-        print(f"  {idx + 1:>8} {m['ptok']:>11,} {fmt_cached(m):>9} {fmt_ttft(m):>8}   {verdict(m, cold['ttft'])}",
+        print(f"  {idx + 1:>8} {m['ptok']:>11,} {fmt_cached(m):>9} {fmt_ttft(m):>8}   "
+              f"{verdict(m, cold['ttft'], pressure_known)}",
               flush=True)
 
 detect_reuse_counter()
