@@ -97,7 +97,7 @@ services:
     container_name: "${ESTATE_CONTAINER:-vllm-thinkingcap-27b-dual-w4a8}"
     restart: ${CLUB3090_RESTART:-unless-stopped}
     ports:
-      - "${BIND_HOST:-0.0.0.0}:${PORT:-8099}:8000"
+      - "${BIND_HOST:-0.0.0.0}:${ESTATE_PORT:-${PORT:-8099}}:8000"
     volumes:
       - ${MODEL_DIR:-../../../../../../models-cache}:/root/.cache/huggingface
       # W4A8 int8-activation patches (Bug A INC input_dtype + Bug B negscale fold) —
