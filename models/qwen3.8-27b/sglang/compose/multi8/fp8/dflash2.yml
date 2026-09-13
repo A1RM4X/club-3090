@@ -522,7 +522,24 @@ services:
           --served-model-name qwen3.8-27b \
           "$${SPEC[@]}"
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:30000/health || exit 1"]
+      # ⚠️ club-3090#1295 — probe the container's ROUTABLE address, NEVER
+      # loopback. The old probe was `curl -sf http://localhost:30000/health`,
+      # which runs INSIDE the container against 127.0.0.1 — the one path that
+      # stays up when the bind address is wrong. When #1292 silently dropped
+      # `--host 0.0.0.0` this compose bound 127.0.0.1 and `docker ps` reported
+      # "healthy" for 27 minutes while every external client got an instant
+      # connection reset. It would have passed identically with the port mapping
+      # deleted outright: it tested that the process was alive and READ as "the
+      # service is reachable".
+      # $${HOSTNAME} resolves (via the /etc/hosts entry docker writes) to the
+      # address docker's port forward actually targets, so this check fails when
+      # the server is bound somewhere a client cannot reach.
+      # ⚠️ There is deliberately NO loopback fallback: degrading to the old probe
+      # would restore the silent pass. Nothing in this repo gates on container
+      # health (no depends_on: service_healthy, and switch.sh's ready probe curls
+      # the endpoint from the HOST), so an unhealthy mark is a visible signal
+      # rather than a boot blocker.
+      test: ["CMD-SHELL", "curl -sf \"http://$${HOSTNAME:-$$(hostname)}:30000/health\" || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 60
