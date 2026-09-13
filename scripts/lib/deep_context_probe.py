@@ -8,6 +8,9 @@ import json, os, sys, time, urllib.error, urllib.request
 
 URL, MODEL, MODE = sys.argv[1], sys.argv[2], sys.argv[3]
 TARGET_CTX, TURN_TOKENS = int(sys.argv[4]), int(sys.argv[5])
+# Depth reply cap. Big enough that the decode window clears the floor even at
+# DFlash speeds; a reply shorter than this is flagged, not silently averaged.
+DEPTH_MAX_TOK = 48
 SESSIONS, SESSION_CTX, KV_POOL = int(sys.argv[6]), int(sys.argv[7]), int(sys.argv[8])
 BASE = URL.rstrip("/")
 
@@ -149,12 +152,22 @@ def measure(msgs, max_tokens=24):
                       On a reasoning model the content field stays empty through the
                       reasoning phase, and timing on it charges reasoning to prefill
                       (the #1096 retraction). None if no choices chunk ever arrived.
-        dtps          decode tokens/s over the window from the first generated token to
-                      the last usage chunk, counted from usage.completion_tokens — NOT
-                      from chunks: under DFlash one chunk carried 8 tokens (measured),
-                      so chunk-counting read ~5x low. None when unmeasurable (#1267).
-        dtps_approx   True when the engine sent no per-chunk usage and the fallback
-                      (completion_tokens-1)/(wall-ttft) was used instead.
+        dtps          decode tokens/s. Four bases are tried in descending fidelity and
+                      the one used is reported in dtps_basis; None only when every one
+                      is unmeasurable, and then dtps_why says what the stream carried.
+                        usage-delta   engine-counted tokens over the usage-chunk window.
+                                      Exact. Needs TWO DIFFERENT completion_tokens
+                                      values, which is what the 141K depth run stopped
+                                      getting from turn 17 on.
+                        usage-window  engine-counted tokens over the CONTENT-chunk
+                                      window. Survives an engine that sends usage once.
+                        chunk-count   chunks over the content window. Reads LOW under
+                                      speculative decoding — one DFlash chunk carried 8
+                                      tokens (measured) — so it is a floor, not a rate.
+                        wall          engine-counted tokens over (wall - ttft). Last
+                                      resort: charges the inter-chunk tail to decode.
+        dtps_approx   True for every basis except usage-delta (rendered as a '~' prefix).
+        dtps_basis    which of the four above produced dtps, or None.
         ptok, ctok    usage.prompt_tokens / completion_tokens (0 if usage missing)
         cached_usage  prompt_tokens_details.cached_tokens, or None when ABSENT
         cached_metrics  delta of the engine's prefix-hit counter across this
@@ -164,6 +177,10 @@ def measure(msgs, max_tokens=24):
     m_before = fetch_metrics() if REUSE["counter"] else None
     t0 = time.time(); ttft = None; text = ""; usage = None
     first = None; last = None   # (t, cumulative completion_tokens) at the first token / last usage chunk
+    # Content-chunk timing, tracked INDEPENDENTLY of usage: an engine that sends
+    # usage once still streams its tokens, and that window is a real decode window.
+    c_first = None; c_last = None
+    nchunks = 0; ncontent = 0; finish = None
     with urllib.request.urlopen(_post(msgs, max_tokens), timeout=1800) as r:
         for raw in r:
             line = raw.decode("utf-8", "replace").strip()
@@ -181,20 +198,48 @@ def measure(msgs, max_tokens=24):
                     last = (now, c)
             ch = (d.get("choices") or [{}])[0]
             if ch:
+                nchunks += 1
                 if ttft is None: ttft = time.time() - t0
-                text += (ch.get("delta") or {}).get("content") or ""
+                delta = ch.get("delta") or {}
+                piece = delta.get("content") or ""
+                # Reasoning tokens are decode work too, so they open the decode
+                # window — timing on `content` alone charges them to prefill (#1096).
+                if piece or delta.get("reasoning_content"):
+                    ncontent += 1
+                    if c_first is None: c_first = now
+                    c_last = now
+                text += piece
+                finish = ch.get("finish_reason") or finish
     wall = time.time() - t0
     u = usage or {}
     ctok = u.get("completion_tokens") or 0
-    dtps = None; approx = False
-    if first and last and last[1] > first[1]:
-        window = last[0] - first[0]; dtok = last[1] - first[1]
-    else:   # no per-chunk usage from this engine: assume the first chunk was one token
-        window = wall - (ttft or 0); dtok = ctok - 1; approx = True
+    dtps = None; approx = False; why = None; basis = None
+    cwin = (c_last - c_first) if (c_first is not None and c_last is not None) else 0.0
+    # Two tokens is the minimum that defines a rate, and a window under 50ms is
+    # scheduler noise rather than decode; below either, fall through to the next
+    # basis instead of publishing a number built from one inter-chunk gap.
+    def ok(win, tok): return win > 0.05 and tok >= 2
+    if first and last and ok(last[0] - first[0], last[1] - first[1]):
+        window = last[0] - first[0]; dtok = last[1] - first[1]; basis = "usage-delta"
+    elif ok(cwin, ctok - 1):
+        window = cwin; dtok = ctok - 1; basis = "usage-window"; approx = True
+    elif ok(cwin, ncontent - 1):
+        window = cwin; dtok = ncontent - 1; basis = "chunk-count"; approx = True
+    elif ok(wall - (ttft or 0), ctok - 1):
+        window = wall - (ttft or 0); dtok = ctok - 1; basis = "wall"; approx = True
     # Report n/a rather than 0.0 for an unmeasurable window (#1267): a zero here
-    # is indistinguishable from a genuine silent-empty turn.
-    if window > 0.1 and dtok > 0:
+    # is indistinguishable from a genuine silent-empty turn. ⭐ But an n/a with NO
+    # REASON is the same ambiguity one level up — it reads as "slow rig" when it
+    # actually means "instrument failed". So state what the stream actually carried;
+    # that is what separates "the model stopped early" from "the probe went blind".
+    if basis is not None:
         dtps = dtok / window
+    else:
+        useen = "none" if last is None else (
+            f"one value ({last[1]})" if (first is None or last[1] == first[1]) else "ok")
+        why = (f"{ctok} completion tok, {nchunks} chunk(s) / {ncontent} with content "
+               f"over {cwin*1000:.0f}ms, finish_reason={finish or 'none'}, "
+               f"usage deltas={useen}")
     ptd = u.get("prompt_tokens_details")
     cached_usage = ptd.get("cached_tokens") if isinstance(ptd, dict) else None
     cached_metrics = None
@@ -202,7 +247,10 @@ def measure(msgs, max_tokens=24):
         a = metric_sum(m_before, *REUSE["counter"]); b = metric_sum(fetch_metrics(), *REUSE["counter"])
         if a is not None and b is not None:
             cached_metrics = int(b - a)
-    return {"ttft": ttft, "dtps": dtps, "dtps_approx": approx, "ptok": u.get("prompt_tokens") or 0,
+    return {"ttft": ttft, "dtps": dtps, "dtps_approx": approx, "dtps_why": why,
+            "dtps_basis": basis, "nchunks": nchunks, "ncontent": ncontent,
+            "finish_reason": finish,
+            "ptok": u.get("prompt_tokens") or 0,
             "ctok": ctok, "cached_usage": cached_usage, "cached_metrics": cached_metrics,
             "text": text.strip()}
 
@@ -320,8 +368,9 @@ def run_depth():
     if os.environ.get("CONTAINER"):
         print("  note: CONTAINER is no longer used — the batch log line reports ACTIVE occupancy, "
               "not residency (see pool_view in the source).")
-    print("  decode_tps: usage.completion_tokens over first-token->last-chunk; a '~' prefix means "
-          "the engine sent no per-chunk usage and the first chunk was assumed to be 1 token.")
+    print("  decode_tps: engine-counted tokens over the decode window. A '~' prefix means the "
+          "exact basis (two differing usage chunks) was unavailable and a fallback window was "
+          "used; the basis is named per row. 'chunk-count' reads LOW under spec-dec.")
     print(f"  {'turn':>4} {'prompt_tok':>11} {'cached':>9} {'ttft_s':>8} "
           f"{'decode_tps':>11} {'kv_res':>8} {'mamba_res':>10}")
     msgs = []; turn = 0; ptok = 0; prev_ttft = None
@@ -329,11 +378,11 @@ def run_depth():
         turn += 1
         # The reply must be long enough to open a decode window: "reply OK" gave
         # 1-2 tokens and the decode column was n/a on every turn, by construction.
-        # 48 tokens is ~0.3s even at 170 tok/s (DFlash), above the 0.1s floor.
+        # 48 tokens is ~0.3s even at 170 tok/s (DFlash), well above the window floor.
         msgs.append({"role": "user", "content": chunk(TURN_TOKENS, turn)
                      + f"\n\nTurn {turn}: count from one to sixty in words, comma separated."})
         try:
-            m = measure(msgs, max_tokens=48)
+            m = measure(msgs, max_tokens=DEPTH_MAX_TOK)
         except Exception as e:
             print(f"  turn {turn}: ERROR {http_error_text(e)}"); return
         ptok = m["ptok"]
@@ -347,6 +396,18 @@ def run_depth():
             flags += "   <- EMPTY TURN (0 completion tokens)"
         elif not m["text"]:
             flags += f"   <- {m['ctok']} tokens but no content (reasoning-only or parser ate it)"
+        # The prompt asks for sixty numbers, so a reply SHORTER than the cap means
+        # the model stopped early — which shrinks the decode window and is itself
+        # the finding at depth. Without this the row just reads as a slow turn.
+        if 0 < m["ctok"] < DEPTH_MAX_TOK:
+            flags += (f"   <- short reply: {m['ctok']}/{DEPTH_MAX_TOK} tok"
+                      f" (finish={m.get('finish_reason') or 'none'})")
+        # ⭐ An n/a with no reason reads as "slow rig" when it means "instrument
+        # failed" — the same ambiguity #1267 closed one level down. Name it.
+        if m["dtps"] is None and m.get("dtps_why"):
+            flags += f"   <- decode n/a: {m['dtps_why']}"
+        elif m.get("dtps_approx") and m.get("dtps_basis"):
+            flags += f"   <- decode basis: {m['dtps_basis']}"
         print(f"  {turn:>4} {ptok:>11,} {fmt_cached(m):>9} {fmt_ttft(m):>8} "
               f"{fmt_dtps(m):>11}{pool_cols(pool_view())}{flags}", flush=True)
         prev_ttft = m["ttft"]

@@ -47,7 +47,7 @@ ok "refuses a dead endpoint and names the #1293 port trap"
 
 # --- static contract: an unmeasurable decode window must not render as 0.0
 command grep -q "'n/a'" "$P" || bad "unmeasurable decode renders n/a" "an 'n/a' branch (#1267)" "absent"
-command grep -q 'window > 0.1' "$P" || bad "decode window floor present" "a window guard" "absent"
+command grep -q 'def ok(win, tok)' "$P" || bad "decode window/token floor present" "a window+token guard" "absent"
 ok "unmeasurable decode reports n/a, not a 0.0 that reads as silent-empty (#1267)"
 
 # --- static contract: TTFT must be taken on the first chunk carrying choices,
@@ -73,6 +73,11 @@ cat > "$TMP/fake_engine.py" <<'PYEOF'
 import json, sys, time, threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 PORT, REPORT = int(sys.argv[1]), sys.argv[2]
+# Two REPORT values change the STREAM SHAPE rather than the cached-token source;
+# both reproduce a decode n/a seen on a real 141K run. They report cached tokens
+# exactly like "usage" so only the decode path is under test.
+SHAPE = REPORT if REPORT in ("usage_once", "one_token") else "normal"
+if SHAPE != "normal": REPORT = "usage"
 SEEN = []; COUNTER = {"cache": 0}; LOCK = threading.Lock(); KV_TOTAL = 10000
 def toks(s): return len(s) // 4 + 10
 class H(BaseHTTPRequestHandler):
@@ -108,9 +113,13 @@ class H(BaseHTTPRequestHandler):
         def chunk(o): self.wfile.write(b"data: " + json.dumps(o).encode() + b"\n\n"); self.wfile.flush()
         chunk({"choices": [{"index": 0, "delta": {"role": "assistant", "content": ""}, "finish_reason": None}], "usage": None})
         steps = [(1, "OK")] if maxtok <= 8 else [(1, "one"), (9, ", two, three, four, five"), (16, ", six, seven, eight,")]
+        if SHAPE == "one_token" and maxtok > 8: steps = [(1, "one")]   # model stops early: no window at all
         for cum, piece in steps:
             chunk({"choices": [{"index": 0, "delta": {"content": piece}, "finish_reason": None}],
-                   "usage": {"prompt_tokens": ptok, "completion_tokens": cum, "total_tokens": ptok + cum}})
+                   # usage_once: content streams but per-chunk usage never arrives,
+                   # so there is no usage DELTA to difference (the turn-17 shape).
+                   "usage": (None if SHAPE == "usage_once" else
+                             {"prompt_tokens": ptok, "completion_tokens": cum, "total_tokens": ptok + cum})})
             time.sleep(0.15)
         ctok = steps[-1][0]
         chunk({"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}], "usage": None})
@@ -175,6 +184,34 @@ python3 -c "import sys; v=float(sys.argv[1].lstrip('~')); sys.exit(0 if v > 20 e
   || bad "decode_tps derives from completion_tokens" ">20 tok/s for 16 tokens in 3 chunks" "'$d'"
 [[ "$d" != ~* ]] || bad "per-chunk usage honoured (no '~' approx marker)" "exact rate" "'$d'"
 ok "decode_tps counts tokens from continuous usage, not chunks (spec-dec safe)"
+
+# --- contract 6b (the gap the 141K run hit): an engine that streams content but
+# sends usage ONCE has no usage DELTA to difference. The old code stopped there
+# and printed a bare n/a for every turn past 104K — the one number the report was
+# commissioned to produce. It must now fall through to the content-chunk window,
+# still count TOKENS from usage, mark the row '~', and name the basis it used.
+run_fake usage_once depth TARGET_CTX=2500 TURN_TOKENS=800
+[[ $rc -eq 0 ]] || bad "depth run against fake(usage_once) exits 0" "0" "$rc: $(tail -3 <<<"$out")"
+d="$(col_decode "$out" | head -1)"
+[[ "$d" != "n/a" ]] || bad "usage-once stream still yields a decode rate" "a number" "n/a: $out"
+[[ "$d" == ~* ]] || bad "a fallback basis is marked approximate" "'~NN.N'" "'$d'"
+python3 -c "import sys; v=float(sys.argv[1].lstrip('~')); sys.exit(0 if v > 20 else 1)" "$d" 2>/dev/null \
+  || bad "fallback still counts TOKENS not chunks" ">20 tok/s for 16 tokens in 3 chunks" "'$d'"
+command grep -q 'decode basis: usage-window' <<<"$out" || bad "the fallback basis is named on the row" "'decode basis: usage-window'" "absent: $out"
+ok "usage sent ONCE still measures decode (content-chunk window), marked '~' and basis named"
+
+# --- contract 6c: when decode is genuinely unmeasurable (one token, no window),
+# n/a is correct — but it must carry the stream shape that caused it, so a reader
+# can tell "the model stopped early" from "the probe went blind". An n/a with no
+# reason is the #1267 ambiguity one level up.
+run_fake one_token depth TARGET_CTX=2500 TURN_TOKENS=800
+[[ $rc -eq 0 ]] || bad "depth run against fake(one_token) exits 0" "0" "$rc: $(tail -3 <<<"$out")"
+d="$(col_decode "$out" | head -1)"
+[[ "$d" == "n/a" ]] || bad "a single-token reply is not timeable" "n/a" "'$d'"
+command grep -q 'decode n/a: 1 completion tok' <<<"$out" || bad "n/a names the token count" "'decode n/a: 1 completion tok'" "absent: $out"
+command grep -q 'finish_reason=stop' <<<"$out" || bad "n/a names the finish_reason" "finish_reason=stop" "absent: $out"
+command grep -q 'short reply: 1/48 tok' <<<"$out" || bad "a reply under the cap is flagged" "'short reply: 1/48 tok'" "absent: $out"
+ok "unmeasurable decode reports n/a WITH the stream shape, and flags the short reply"
 
 # --- contract 7: breadth without eviction pressure says so, and re-queries verdict
 run_fake usage breadth SESSIONS=2 SESSION_CTX=600 KV_POOL=100000
