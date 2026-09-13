@@ -12,7 +12,7 @@ If you're adding a new compose that depends on an unmerged upstream patch (volum
 
 | Dependency | Status | Local dependency / removal condition |
 |---|---|---|
-| [fa2-fp8kv-sm86, ef08ffb](https://github.com/AntonProkopyev/fa2-fp8kv-sm86/tree/ef08ffb9a23f9493435fdd81e3addba6ad4f5fff) | ⚫ Experimental external fork | `vllm/qwen38-27b-dual-hypermax` builds this pinned source plus CUTLASS `62750a2b75c802660e4894434dc55e839f322277`. FP8 E4M3 is KV storage; attention uses BF16 on SM86. The local sidecar checks the vLLM 0.29.0 backend hash before installing. Remove when stock vLLM provides a validated equivalent. DFlash quantized-KV and GDN patches remain separate dependencies tracked below. |
+| [fa2-fp8kv-sm86, 0fa02cb](https://github.com/AntonProkopyev/fa2-fp8kv-sm86/tree/0fa02cbb760fbcc4a94ba1ee376e89825f8f43f4) | ⚫ Experimental external fork | `vllm/qwen38-27b-dual-ultramax` installs prebuilt kernels and a native `FLASH_ATTN` plugin offline. No FlashInfer backend substitution or serving-time CUDA build. SM86 GPU-tested; SM89/SM120 compiled but not GPU-validated. Stock native FlashAttention retained on SM90/SM100. The source repo contains the upstream FA2 submodule and a reproducible mapped diff. Artifact integrity, ABI and SM checks precede weights loading. Remove when stock vLLM provides a validated equivalent. DFlash quantized-KV and GDN patches remain separate dependencies tracked below. |
 
 
 ## How rows work

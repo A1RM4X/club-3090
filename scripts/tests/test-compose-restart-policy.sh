@@ -2,10 +2,12 @@
 # Test: vLLM composes use the reboot-surviving restart knob.
 #
 # Contract:
-#   1. Every shipped vLLM compose declares
+#   1. Every serving service in a shipped vLLM compose declares
 #        restart: ${CLUB3090_RESTART:-unless-stopped}
 #      — none ships restart: "no" (which would NOT come back after a host
 #      reboot, defeating launch.sh-as-a-service usage).
+#      Init services required via service_completed_successfully use "no";
+#      restarting a completed init service would repeatedly rerun its job.
 #   2. The pull/derived emitter (generate_compose.py generate_from_profile)
 #      emits the same knob, so newly-derived composes don't reintroduce "no".
 #
@@ -40,10 +42,19 @@ for f in sorted(glob.glob("models/*/vllm/compose/**/*.yml", recursive=True)):
         d = yaml.safe_load(open(f)) or {}
     except Exception as e:
         print(f"{f}: YAML parse error: {e}"); continue
-    for name, body in (d.get("services") or {}).items():
+    services = d.get("services") or {}
+    completed = {name for service in services.values() if isinstance(service, dict)
+                 for name, dependency in (service.get("depends_on") or {}).items()
+                 if isinstance(dependency, dict)
+                 and dependency.get("condition") == "service_completed_successfully"}
+    for name, body in services.items():
         if not isinstance(body, dict):
             continue
         r = body.get("restart")
+        if name in completed and not body.get("ports"):
+            if str(r) != "no":
+                print(f"{f}: completed init service '{name}' restart={r!r} (want 'no')")
+            continue
         if r is None:
             print(f"{f}: service '{name}' has no restart: key")
         elif str(r) != knob:

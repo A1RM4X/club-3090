@@ -1,30 +1,36 @@
-# FA2 FP8 KV on SM86
+# FlashAttention with FP8 KV
 
-Experimental sidecar for `vllm/qwen38-27b-dual-hypermax` on vLLM 0.29.0.
+Experimental plugin for `vllm/qwen38-27b-dual-ultramax` on vLLM 0.29.0.
 The target and DFlash2 drafter retain FP8 E4M3 KV storage. Attention computes
 in BF16; Ampere has no native FP8 arithmetic. GDN and vision are unchanged.
 
-The stock `FLASHINFER` registry entry supplies the KV-cache update/layout
-contract. A small subclass replaces attention execution and metadata planning.
-No FlashInfer attention kernel runs on this path. Native FA2 prefill unpacks
+The plugin registers `FLASH_ATTN` through vLLM's public backend API for both
+target and draft. It does not edit or subclass the FlashInfer backend.
+Native FA2 prefill unpacks
 one bounded KV block at a time and merges partial results in FP32. If its
 workspace allocation fails, paged FA2 handles the same request.
 
-The installer checks the vLLM version and stock backend SHA256 before adding
-one import at the end of that module. It downloads SHA256-checked source
-archives at the revisions in `install.py`, builds both extensions in the stock
-image, and caches them under the model's engine cache. The build key includes
-the source revisions, PyTorch, CUDA, FlashInfer and vLLM versions. A manifest
-checks cached libraries and Python helpers before reuse. First boot needs
-network access and a CUDA compiler; later boots reuse the verified cache.
+The init service extracts two compiled libraries and a plugin wheel from a
+pinned artifact image into a named volume. The serving container mounts it
+read-only. `install_artifact.py` checks the artifact identity, payload SHA256,
+PyTorch/CUDA/Python/C++ ABI, compiled SM and vLLM metadata/layout interface
+before installing the wheel offline. Startup needs no source download,
+compiler or GPU build. The artifact manifest records the source revision
+and build dependency pins.
 
-Sources and upstream notices remain in the cache. Kernel licensing and source
-provenance are in the downloaded project's `LICENSE` and `NOTICE`; CUTLASS
-retains its own license. The local vLLM adapter is Apache-2.0, derived from the
-stock vLLM metadata/attention contract. See the FA2 row in
+The image includes `LICENSE`, `NOTICE` and the upstream licenses. The source
+repository contains an upstream FlashAttention submodule, a file map and a
+patch that reproduces the exact diff against upstream FA2. See the FA2 row in
 [`docs/UPSTREAM.md`](../../../../../docs/UPSTREAM.md) for the dependency pin.
 
-Only SM86, LBNHC (NHD) layout, BF16 queries and E4M3 KV are supported. The
+SM86 has GPU validation. SM89 and SM120 binaries are included, but those
+targets have compilation coverage only. SM90 and SM100 retain stock native
+FlashAttention without installing the plugin; no new GPU measurements cover
+that route. Other SMs and mixed architectures are refused before weights load.
+Registry `required_sm` remains a lower bound; `supported_sm` provides the
+explicit set for launcher gates.
+
+The extension uses LBNHC (NHD) layout, BF16 queries and E4M3 KV. The
 backend advertises one layout and uses it for both target and draft. This
 avoids reading the drafter's copied CacheConfig before the target's layout RPC
 has reached it in vLLM 0.29.0. The tested head
@@ -32,26 +38,33 @@ geometries are `(head_size, local_kv_heads)` = `(256, 1)`, `(256, 2)` and
 `(128, 4)`. DCP, attention sinks and other geometries are rejected. The compose
 targets TP=2 and one sequence. Fixed split counts preserve CUDA Graph replay.
 
-Launch with `bash scripts/switch.sh --force vllm/qwen38-27b-dual-hypermax`.
-The compose filename remains `dflash2-fp8-fa2.yml`. Set `MODEL_DIR` to a directory
+Launch with `bash scripts/switch.sh --force vllm/qwen38-27b-dual-ultramax`.
+The compose filename is `dflash2.yml`. Set `MODEL_DIR` to a directory
 containing `qwen3.8-27b-fp8` and `qwen3.8-27b-dflash2-w4a16`.
 Use `SPEC_N=0` or `SPEC=off` to disable speculative decoding. Set
 `NCCL_P2P_DISABLE=0` only on a host with proven peer access.
 
-The 262K context, one 4 MP image and fixed KV allocation leave little memory
-headroom on a 24 GB card. This is an experimental profile, not a production
-recommendation. Results from vLLM 0.27.1 are historical and must not be labeled
-as measurements of this 0.29.0 sidecar.
+The 262144-token limit comes from fixed KV reservation
+(`KV_CACHE_MEMORY_BYTES=6267967898` per card), batch size 2048 and scheduler
+settings. `gpu_memory_utilization` does not constrain this fixed reservation.
+`long_prefill_token_threshold=0` disables the separate long-prefill threshold;
+chunked prefill still obeys the batch budget. These settings affect memory and
+scheduling, and do not establish a kernel-specific context-capacity gain.
+The profile allows one sequence and one image up to about 4 MP.
+
+The adapter for vLLM 0.27.1 and the plugin for vLLM 0.29 use different
+integration methods. Measurements must identify which one ran.
 
 The API boundary probes are included beside the adapter. Run from the repo
 root after the model is ready; each full-context request takes several minutes:
 
 ```bash
-python3 models/qwen3.8-27b/vllm/patches/fa2-fp8kv-sm86/check_context.py --url http://127.0.0.1:8144
-python3 models/qwen3.8-27b/vllm/patches/fa2-fp8kv-sm86/check_vision_context.py --url http://127.0.0.1:8144
+python3 models/qwen3.8-27b/vllm/patches/fa2-fp8kv-sm86/check_context.py --url http://127.0.0.1:8110
+python3 models/qwen3.8-27b/vllm/patches/fa2-fp8kv-sm86/check_vision_context.py --url http://127.0.0.1:8110
 ```
 
 The first sends exactly 261000 input tokens and rejects a 263000-token request.
 The second uses the repository's vision fixture, exercises about 4 MP of image
 processing, fills about 260K combined tokens, and checks two follow-up turns.
-See `VALIDATION.md` for the measured scope and limitations.
+`VALIDATION.md` records the September 12 adapter run. `REVIEW_VALIDATION.md`
+records the native plugin comparison and artifact checks.

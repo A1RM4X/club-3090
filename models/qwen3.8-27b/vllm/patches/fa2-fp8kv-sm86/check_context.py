@@ -9,7 +9,7 @@ import urllib.error
 import urllib.request
 
 parser = argparse.ArgumentParser(description=__doc__)
-parser.add_argument("--url", default="http://127.0.0.1:8144")
+parser.add_argument("--url", default="http://127.0.0.1:8110")
 parser.add_argument("--model", default="qwen3.8-27b")
 args = parser.parse_args()
 endpoint = args.url.rstrip("/")

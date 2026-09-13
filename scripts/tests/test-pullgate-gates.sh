@@ -211,6 +211,17 @@ check(
     "[C0]: engine-supported carries no bypass tag",
 )
 
+exact_registry = dict(COMPOSE_REGISTRY)
+exact_registry["vllm/minimal"] = {**exact_registry["vllm/minimal"], "supported_sm": [8.6]}
+for sm in (8.6, 8.9, 12.0):
+    result = G.c0_engine_support("vllm/minimal", CURATED, path="A", hardware_sm=sm, registry=exact_registry)
+    if sm == 8.6:
+        check(result.state == G.C0State.ENGINE_SUPPORTED, "[C0] exact SM set accepts listed architecture")
+    else:
+        check(result.sub_reason == G.C0SubReason.RUNTIME_INCOMPATIBLE
+              and "supports only SM" in result.detail and result.bypassable_by == (),
+              f"[C0] exact SM set rejects higher sm_{sm} before loading")
+
 # Missing loads:true arch row -> runtime-incompatible (non-bypassable). The MoE
 # arch Qwen3_5MoeForConditionalGeneration has no loads:true row for the
 # vllm-gemma-stable engine (gemma4-swa-dense only). Path-B: arch comes from

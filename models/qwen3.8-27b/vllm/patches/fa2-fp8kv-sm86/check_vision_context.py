@@ -109,7 +109,7 @@ class MeasuredRequest:
 
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--url', default='http://127.0.0.1:8144')
+parser.add_argument('--url', default='http://127.0.0.1:8110')
 parser.add_argument('--model', default='qwen3.8-27b')
 parser.add_argument('--target', type=int, default=260000)
 parser.add_argument('--calibration-only', action='store_true')

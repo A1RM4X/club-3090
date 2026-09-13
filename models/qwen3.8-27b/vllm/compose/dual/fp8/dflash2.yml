@@ -1,114 +1,56 @@
 # ===========================================================================
 # Profile (at-a-glance):
-#   Model:     Qwen3.8-27B (official Qwen FP8, ~29 GiB; lm_head + embed bf16).
-#              FIDELITY series. Served bf16 KV on the FLASH_ATTN fast path.
-#   Topology:  2× 3090 PCIe (TP=2, no NVLink)
-#   Drafter:   DFlash2 EXTERNAL block-drafter n=7 (syv-ai W4A16, method=dflash).
-#              Valid on fp8 (bf16 lm_head/embed; base-arch-keyed drafter). Output
-#              fidelity is the fp8 TARGET's; drafter only affects accept-len.
-#   KV:        bf16 → FLASH_ATTN (the DFlash2 non-causal drafter's preferred path;
-#              on Ampere FLASH_ATTN takes bf16/fp16 KV only — fp8 forces FlashInfer).
-#   Vision:    ✅ tower present (input-only, bf16); untested on this tier.
-#   Template:  native + club-3090 alias — the model's own chat_template.jinja
-#              with `high` remapped to `xhigh` (patches/qwen38-reasoning-effort-template)
-#   Max ctx:   131072 (bf16 KV ceiling — MEASURED at boot; fp8 weights are ~29 GiB so bf16
-#              KV fits LESS than the int4 ultrafast's ~200K. Set from the KV pool.)
+#   Model:     Qwen3.8-27B (official FP8 weights)
+#   Topology:  Dual NVIDIA GPUs, Linux x86-64 (TP=2, homogeneous SM)
+#   Drafter:   DFlash2 W4A16 n=7; FlashAttention and FP8 KV
+#   KV:        fp8_e4m3; BF16 compute on the FA2 extension path
+#   Vision:    yes; one image up to about 4 MP, no video
+#   Max ctx:   262144
 #   Genesis:   none
 #   Status:    🧪 Experimental
-# ⛔⛔ #1096 RETRACTED 2026-09-08 — THERE IS NO ACCUMULATED-CTX DECODE CLIFF. The collapse
-#    figures came from OUR harness, not the engine: bench-agentic set TTFT on the first
-#    `content` delta, so a thinking model's entire reasoning phase was charged to prefill and
-#    the decode window fell under its 5%-of-wall "degenerate" rule. Fixed in #1218. That rule
-#    flags whatever has slow prefill relative to decode, which is also why the pattern looked
-#    hardware-dependent (Blackwell prefills fast -> "clean"; Ampere -> "collapsed").
-#    Re-test, both arms, same v0.27.1 pin, cross-checked against vLLM's OWN histograms:
-#    MTP n=3 -> 110.2 tok/s @ 21,443 ctx; DFlash2 n=7 -> 159.4 @ 12,275. Decode FLAT across
-#    1.2K->35.3K, zero degenerate turns, zero preemptions. ⛔ Do NOT set SPEC_N=0 or prefer the
-#    MTP tier for long contexts on this basis — that advice was wrong and costs you the drafter.
-# ⚠️ What DOES survive: vllm#35387 — a real spec tax that scales with drafter DEPTH, not
-#    context (29K: no-spec 57.0 -> n=1 40.6 / n=2 36.0 / n=3 32.7 tok/s), profiled to the
-#    cudagraph downgrade FULL_AND_PIECEWISE -> PIECEWISE. A steady tax, not a cliff.
-#   Best for:  MAX decode on the fidelity weights — FA2 fast path (sacrifices ctx).
+#   Best for:  ULTRAMAX — FP8 weights, DFlash2 and FlashAttention
 # ---------------------------------------------------------------------------
-# Sibling              KV          Attention         Default context
-# dflash2.yml          bf16        stock FA2         65536
-# dflash2-fp8.yml      fp8_e4m3    stock FlashInfer  147456
-# dflash2-fp8-fa2.yml  fp8_e4m3    custom FA2 SM86   262144 (hypermax, experimental)
+# Sibling          Tier      KV          Attention         Default context
+# dflash2-fp8.yml  supermax  fp8_e4m3    FlashInfer        147456
+# dflash2.yml      ultramax  fp8_e4m3    FlashAttention    262144
 #
-# ULTRAMAX = the MAX tier (official FP8) with DFlash2 on the bf16/FLASH_ATTN fast
-# path — the fidelity counterpart to ultrafast. Fastest decode on fp8 weights, but
-# bf16 KV + the larger fp8 weights cap context well below supermax's 262K. Boot-
-# validate + MEASURE the ctx ceiling on dual before quoting. ⚠️ Spec-decode exposed
-# to OPEN vllm#50021; SPEC_N=0 mitigates. Launch --force. See learnings/qwen3.8-27b.md
-# for the FA2⊕fp8-KV Ampere constraint.
+# SM86 is tested. SM89/SM120 are build targets; physical-GPU validation is
+# pending. SM90/SM100 retain stock native FlashAttention. Other SMs are refused.
+# The init image provides compiled kernels and the plugin wheel. Serving boot
+# verifies ABI and checksums; it does not download source or compile CUDA.
+# Fixed KV bytes bypass utilization-based profiling. Capacity comes from that
+# reservation. See the patch README and VALIDATION.md for validation scope.
+# Requires-homogeneous-arch: true
 # ===========================================================================
 services:
   vllm-qwen38-27b-dual-ultramax:
-    # Pinned to a vLLM STABLE release (immutable — never purged, unlike
-    # nightlies; the #407 pin-drift fix). The launchers resolve the real image
-    # from the `vllm-stable` engine profile and inject it over this default,
-    # so this literal only bites a raw `docker compose` invocation (#254).
     image: ${VLLM_IMAGE:-vllm/vllm-openai:v0.29.0}
-    container_name: "${ESTATE_CONTAINER:-vllm-qwen38-27b-dual-ultramax}"
+    container_name: ${ESTATE_CONTAINER:-vllm-qwen38-27b-dual-ultramax}
     user: "0:${DOCKER_GID:-1000}"
     restart: ${CLUB3090_RESTART:-unless-stopped}
+    depends_on:
+      vllm-qwen38-27b-dual-ultramax-kernels:
+        condition: service_completed_successfully
+    ipc: host
+    shm_size: "16gb"
     ports:
       - "${BIND_HOST:-0.0.0.0}:${ESTATE_PORT:-${PORT:-8110}}:8000"
     volumes:
-      - ${MODEL_DIR:-../../../../../../models-cache}:/root/.cache/huggingface
-      # torch.compile + Triton kernel caches — first boot warms (~60-90 sec);
-      # subsequent boots reuse the compiled graphs.
+      - ${MODEL_DIR:-../../../../../../models-cache}:/root/.cache/huggingface:ro
       - ../../../cache/torch_compile:/root/.cache/vllm/torch_compile_cache
       - ../../../cache/triton:/root/.triton/cache
-      # The only chat-template mount here is the model's OWN template plus the
-      # club-3090 `high` -> `medium` alias (below) — see "Chat template" in the
-      # header for why the froggeric override that the qwen3.6/Tess composes
-      # carry is WRONG here.
-      # NVLink auto-detection — runs inside the container at boot.
+      - fa2-kernels:/opt/club3090/fa2-artifacts:ro
       - ../../../../../../scripts/detect_nvlink.sh:/etc/club3090/detect_nvlink.sh:ro
-      # Chat template: the model's OWN, plus seven lines mapping the standard
-      # OpenAI/Anthropic rung `high` onto `xhigh`. Qwen3.8's ladder is
-      # low/medium/xhigh with NO `high`, and the stock template
-      # raise_exception()s on anything else, so a client sending the standard top
-      # rung gets HTTP 500 while /v1/models still returns 200. Observed live via
-      # /v1/messages?beta=true.
-      # ⭐ MOUNTED OVER the checkpoint's own chat_template.jinja: vLLM auto-loads
-      # the template from the model dir, so this needs NO --chat-template arg
-      # (the same wiring style as the carnice override -- see patches.yml).
-      # That is deliberate, not incidental: upstream edits the args list
-      # constantly (11 commits touched these composes in the last 7 days), and
-      # every edit there collides with an inserted flag. The volumes block is
-      # quiet by comparison, so wiring here is what keeps this patch rebasable.
-      # DATA-ONLY mount, not an engine-code overlay, so the engine's overlay-free
-      # contract is unaffected. See patches.yml qwen38-reasoning-effort-template.
+      - ../../../patches/fa2-fp8kv-sm86:/etc/club3090/fa2:ro
       - ../../../patches/qwen38-reasoning-effort-template/chat_template.jinja:/root/.cache/huggingface/qwen3.8-27b-fp8/chat_template.jinja:ro
-      # Vendored vllm#48375 (MambaManager drop_eagle_block) — SHARED from the
-      # qwen3.6-27b tree (same Qwen3-Next hybrid family), exactly as the
-      # Tess-4-27B compose shares it. Load-bearing because this compose ships
-      # BOTH MTP and prefix caching, which is the pair vllm#43559 corrupts.
-      # Anchor drift => the install script REFUSES the boot rather than
-      # half-wiring it. See patches.yml.
       - ../../../../../qwen3.6-27b/vllm/patches/vllm-pr48375-mamba-drop-eagle-block:/etc/club3090/pr48375:ro
       - ../../../../../qwen3.6-27b/vllm/patches/vllm-gdn-mtp-async-spec-order:/etc/club3090/gdn-async-order:ro
-      - ../../../patches/vllm-flashinfer-decode-pin:/etc/club3090/flashinfer-decode-pin:ro
-      # DFlash2 external-drafter support — vLLM PR#52816 backport (syv-ai).
-      # DFlash2 model classes are NATIVE since vLLM v0.29.0 (vllm#52816, merged
-      # 2026-08-21) so the old dflash2 backport is gone. What is NOT upstream is
-      # vllm#51581 (OPEN): the fused-KV slice `a.qkv_proj.weight[a.q_size:]` has no
-      # quantization awareness, so a W4A16 drafter either AttributeErrors at load
-      # or — worse — slices packed rows and corrupts SILENTLY. This mount restores
-      # only that dequant fix. Anchor drift → boot refused.
       - ../../../patches/vllm-51581-dflash-dense-kv:/etc/club3090/dflash-dense-kv:ro
     environment:
-      # Drafter toggle — docker only forwards what is declared here. The DEFAULT
-      # lives in the entrypoint, not in these lines, so it cannot drift.
+      - NVIDIA_VISIBLE_DEVICES=${ESTATE_GPUS:-${NVIDIA_VISIBLE_DEVICES:-all}}
+      - CUDA_VISIBLE_DEVICES
       - SPEC_N=${SPEC_N:-}
       - SPEC=${SPEC:-}
-      # Sampler env passthrough (#984/#1014): the ENTRYPOINT — not compose
-      # interpolation, which has no if/else — derives --override-generation-config
-      # from the model-card row matching ENABLE_THINKING, so these must reach the
-      # container. Absent -> empty -> the entrypoint's `:=` row default applies;
-      # an explicit value crosses unchanged and still wins over both rows.
       - ENABLE_THINKING=${ENABLE_THINKING:-true}
       - TEMP=${TEMP:-}
       - TEMPERATURE=${TEMPERATURE:-}
@@ -117,57 +59,22 @@ services:
       - MIN_P=${MIN_P:-}
       - PRESENCE_PENALTY=${PRESENCE_PENALTY:-}
       - REPEAT_PENALTY=${REPEAT_PENALTY:-}
-      - NVIDIA_VISIBLE_DEVICES=${ESTATE_GPUS:-${NVIDIA_VISIBLE_DEVICES:-all}}
-      # CUDA-level GPU mask — the runtime-agnostic half of GPU selection (#610).
-      # CDI runtimes (NixOS, nvidia-ctk cdi) IGNORE NVIDIA_VISIBLE_DEVICES, so
-      # this is what actually pins cards there. Unset => absent (no masking).
-      - CUDA_VISIBLE_DEVICES
+      - FA2_ARTIFACT_ID=${FA2_ARTIFACT_ID:-731d1942112a7cf35be4f0add0919072c06cac47e3bad4f674ff0157edad0e3f}
+      - NVLINK_MODE=${NVLINK_MODE:-auto}
       - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN:-}
       - HF_HUB_OFFLINE=${HF_HUB_OFFLINE:-${OFFLINE:-0}}
       - TRANSFORMERS_OFFLINE=${TRANSFORMERS_OFFLINE:-${OFFLINE:-0}}
       - VLLM_WORKER_MULTIPROC_METHOD=spawn
-      - NVLINK_MODE=${NVLINK_MODE:-auto}
-      # Opt-in transfer check: VLLM_SKIP_P2P_CHECK=0 makes vLLM PROVE peer access
-      # by moving bytes. Bare passthrough — absent unless set. docs/PCIE_P2P.md §7.
-      - VLLM_SKIP_P2P_CHECK
-      # CUDA-graph kill switch (Cliff-2 GDN spike mitigation). Bare passthrough —
-      # absent unless set. ⚠️ It was READ by the entrypoint but never DECLARED, so
-      # `$${VLLM_ENFORCE_EAGER:+--enforce-eager}` always expanded to nothing and the
-      # knob could not be turned on at all. Fixed 2026-08-31.
+      - VLLM_USE_DEEP_GEMM
+      - VLLM_USE_FLASHINFER_SAMPLER=0
+      - VLLM_NO_USAGE_STATS=1
       - VLLM_ENFORCE_EAGER
       - NCCL_CUMEM_ENABLE=0
-      # Safe PCIe-only default (the reference rig has no NVLink and no working
-      # P2P). Rigs with proven working P2P set NCCL_P2P_DISABLE=0.
+      # Set to 0 only after proving PCIe peer access on the host.
       - NCCL_P2P_DISABLE=${NCCL_P2P_DISABLE:-1}
-      - VLLM_NO_USAGE_STATS=1
-      # FlashInfer sampler OFF by default, but env-overridable (the qwen3.6
-      # composes hardcode it, and they disagree with each other: their dual sets
-      # 0, their multi4 sets 1). The reason to default 0 is MECHANISM, not a
-      # measurement on this model: with MTP active, sampling routes through the
-      # rejection-sampler path where the FlashInfer kernel adds overhead rather
-      # than removing it, and it also trims sampler workspace, which is
-      # load-bearing on a 24 GB card at 262K. ⚠️ The -3.0% narrative / -1.7% code
-      # that justified this on qwen3.6-27b is a QWEN3.6 measurement. Nothing has
-      # been benched on 3.8 — re-run the A/B before treating 0 as tuned.
-      - VLLM_USE_FLASHINFER_SAMPLER=${VLLM_USE_FLASHINFER_SAMPLER:-0}
+      - NCCL_P2P_LEVEL
+      - PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}
       - OMP_NUM_THREADS=1
-      # DeepGEMM (vLLM's fp8-GEMM path) is built for Hopper (sm_90) + datacenter
-      # Blackwell. Consumer Blackwell (5090 / PRO 6000 / GB10, sm_120/121) has no
-      # recipe and hard-fails "recipe not found" at boot (disc #571).
-      # switch.sh/launch.sh auto-inject VLLM_USE_DEEP_GEMM=0 there; a raw
-      # `docker compose` user on those cards must set it. Unset = vLLM's arch
-      # default. Irrelevant on the Ampere reference rig (no FP8 compute at all).
-      - VLLM_USE_DEEP_GEMM
-      # SPEC=off drops the built-in MTP drafter at boot. This is the documented
-      # mitigation for vllm#50021 (see the Caveats / Upstream-risk header) and
-      # the fallback if the head turns out net-negative on this model, as the
-      # built-in head is on the 35B-A3B MoE sibling. Bare passthrough; default on.
-      # expandable_segments:True crashes boot on some setups (cuMemMap path):
-      # known on NVLink rigs and WSL2/WDDM. Override via .env:
-      # PYTORCH_CUDA_ALLOC_CONF=expandable_segments:False
-      - PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True,max_split_size_mb:512}
-    shm_size: "16gb"
-    ipc: host
     deploy:
       resources:
         reservations:
@@ -179,72 +86,44 @@ services:
       - bash
       - -c
       - |
+        set -euo pipefail
         umask 0002
-        # VLLM_ENFORCE_EAGER=1 in .env disables CUDA graphs — the mitigation if
-        # you see mid-generation hangs at depth on this hybrid family. Costs
-        # ~20-30% TPS in exchange for stability. UNTESTED on this model.
-        # NVLink auto-detection (sets NCCL env vars, _NVLINK_ENABLED).
+        _alloc_conf="$${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
         source /etc/club3090/detect_nvlink.sh
-        bash /etc/club3090/pr48375/install.sh || exit 1
-        bash /etc/club3090/gdn-async-order/install.sh || exit 1
-        bash /etc/club3090/dflash-dense-kv/install.sh || exit 1
-        FI_PINQ_LIB_ALL="${FI_PINQ_LIB_ALL:-0}" bash /etc/club3090/flashinfer-decode-pin/install.sh || exit 1
-        # -- Drafter toggle: the same contract on every club-3090 compose --------
-        #   SPEC_N=<n>  drafter depth (this compose defaults to 3); SPEC_N=0 disables
-        #   SPEC=off    back-compat alias for SPEC_N=0
-        # Turning the drafter off is the documented mitigation for vllm#50021 and must
-        # never require editing this file. A non-numeric SPEC_N is a hard error, so a
-        # typo can never masquerade as a silent "drafter off".
+        AR_ARGS=()
+        # The detector also enables PCIe P2P. Custom all-reduce in this profile
+        # requires NVLink; NCCL peer access remains available on PCIe.
+        if [ "$${_NVLINK_ENABLED:-0}" != 1 ] || [ "$${NCCL_P2P_LEVEL:-}" != NVL ]; then
+          AR_ARGS=(--disable-custom-all-reduce)
+          export PYTORCH_CUDA_ALLOC_CONF="$$_alloc_conf"
+          echo "[fa2] custom all-reduce disabled; preserving the requested allocator"
+        fi
+        export PYTHONUTF8="$${PYTHONUTF8:-1}"
+        bash /etc/club3090/pr48375/install.sh
+        bash /etc/club3090/gdn-async-order/install.sh
+        bash /etc/club3090/dflash-dense-kv/install.sh
+        bash /etc/club3090/fa2/install.sh
+        source /etc/club3090/fa2-runtime.env
         _spec_n="$${SPEC_N:-7}"
         case "$${SPEC:-}" in off|OFF|Off|false|no|0) _spec_n=0 ;; esac
         case "$$_spec_n" in ""|*[!0-9]*)
-          echo "[spec] SPEC_N='$$_spec_n' is not a non-negative integer." >&2
-          echo "[spec] Fix: SPEC_N=<n> sets depth; SPEC_N=0 (or SPEC=off) disables." >&2
-          exit 1 ;;
+          echo "[spec] Fix: SPEC_N must be a non-negative integer." >&2; exit 1 ;;
         esac
         DRAFTER=/root/.cache/huggingface/qwen3.8-27b-dflash2-w4a16
         SPEC_ARGS=()
         if [ "$$_spec_n" -gt 0 ]; then
-          SPEC_ARGS=(--speculative-config "{\"method\":\"dflash\",\"model\":\"$$DRAFTER\",\"num_speculative_tokens\":$$_spec_n}")
-          echo "[spec] DFlash2 EXTERNAL drafter ON - n=$$_spec_n ($$DRAFTER)" >&2
-        else
-          echo "[spec] drafter OFF (SPEC_N=0 / SPEC=off)" >&2
+          SPEC_ARGS=(--speculative-config "{\"method\":\"dflash\",\"model\":\"$$DRAFTER\",\"num_speculative_tokens\":$$_spec_n,\"attention_backend\":\"FLASH_ATTN\",\"kv_cache_dtype\":\"fp8_e4m3\"}")
         fi
-        # -- Sampler follows the reasoning mode ----------------------------------
-        # The card publishes TWO sampler rows (see "SAMPLER" in the header);
-        # ENABLE_THINKING now selects the row — one variable instead of the
-        # four-variable ritual (#1014). `:=` defaults: an explicit TEMP /
-        # TOP_P / PRESENCE_PENALTY from .env or shell STILL WINS in both
-        # branches. top_k / min_p / repetition_penalty are identical across the
-        # rows and stay mode-independent.
         _temp="$${TEMP:-$${TEMPERATURE:-}}"
-        # ⚠️ presence_penalty IS SILENTLY DROPPED — it is in the JSON below for
-        # intent, but vLLM never applies it. get_diff_sampling_param()
-        # (config/model.py) filters --override-generation-config through a fixed
-        # allowlist — repetition_penalty, temperature, top_k, top_p, min_p,
-        # max_new_tokens — with no penalties in it, and ChatCompletionRequest
-        # declares `presence_penalty: float | None = 0.0`, a hard default that is
-        # always present in the request and therefore always wins. So the instruct
-        # row's presence_penalty=1.5 resolves to 0.0 server-side. SGLang has the
-        # identical gap (same allowlist, same hard default): presence_penalty is a
-        # CLIENT-SIDE parameter on BOTH engines. That is what the model card's own
-        # non-thinking example does, and what its "support for sampling parameters
-        # varies according to inference frameworks" note is warning about.
-        # Everything else in the row DOES land — verified 2026-09-11 by resolving a
-        # bare request through to_sampling_params() inside the pinned image.
-        if [ "$${ENABLE_THINKING:-true}" = "true" ]; then
+        if [ "$${ENABLE_THINKING:-true}" = true ]; then
           : "$${_temp:=1.0}" "$${TOP_P:=0.95}" "$${PRESENCE_PENALTY:=0.0}"
-          echo "[sampler] thinking row (ENABLE_THINKING=true): temp=$$_temp top_p=$${TOP_P} presence=$${PRESENCE_PENALTY}" >&2
         else
           : "$${_temp:=0.7}" "$${TOP_P:=0.80}" "$${PRESENCE_PENALTY:=1.5}"
-          echo "[sampler] instruct row (default): temp=$$_temp top_p=$${TOP_P} presence=$${PRESENCE_PENALTY}" >&2
         fi
+        # presence_penalty must also be sent by clients; vLLM ignores this
+        # field in override-generation-config (same contract as siblings).
         SAMPLER_ARGS=(--override-generation-config "{\"temperature\":$$_temp,\"top_p\":$${TOP_P},\"top_k\":$${TOP_K:-20},\"min_p\":$${MIN_P:-0.0},\"presence_penalty\":$${PRESENCE_PENALTY},\"repetition_penalty\":$${REPEAT_PENALTY:-1.0}}")
-        if [ "$${_NVLINK_ENABLED:-0}" = "1" ]; then
-          exec vllm serve $${VLLM_ENFORCE_EAGER:+--enforce-eager} "$$@" "$${SPEC_ARGS[@]}" "$${SAMPLER_ARGS[@]}"
-        else
-          exec vllm serve $${VLLM_ENFORCE_EAGER:+--enforce-eager} --disable-custom-all-reduce "$$@" "$${SPEC_ARGS[@]}" "$${SAMPLER_ARGS[@]}"
-        fi
+        exec vllm serve "$${AR_ARGS[@]}" $${VLLM_ENFORCE_EAGER:+--enforce-eager} "$$@" "$${SPEC_ARGS[@]}" "$${SAMPLER_ARGS[@]}"
       - --
     command:
       - --model
@@ -257,91 +136,50 @@ services:
       - --dtype
       - bfloat16
       - --tensor-parallel-size
-      - "${TP:-2}"
-      - --pipeline-parallel-size
-      - "${PP:-1}"
+      - "2"
       - --max-model-len
-      - "${MAX_MODEL_LEN:-65536}"
-      - --gpu-memory-utilization
-      - "${GPU_MEMORY_UTILIZATION:-0.92}"
+      - "${MAX_MODEL_LEN:-262144}"
+      # Fixed KV bytes bypass utilization-based memory profiling. This is the
+      # reservation control; gpu_memory_utilization would not constrain it.
+      - --kv-cache-memory-bytes
+      - "${KV_CACHE_MEMORY_BYTES:-6267967898}"
       - --max-num-seqs
-      - "${MAX_NUM_SEQS:-1}"
+      - "1"
       - --max-num-batched-tokens
-      - "${MAX_NUM_BATCHED_TOKENS:-8192}"
-      # Head-of-line-blocking mitigation (Zylone's vLLM tip; qwen3.6 dual-fast precedent).
-      # Interleaves a long prefill with concurrent decodes so a short/agentic request
-      # isn't starved. Valid range [block_size ~1600, max-num-batched-tokens 8192);
-      # 4096 = qwen3.6's measured 2.7x short-TTFT point (5.8x at 2048).
-      # ⚠️ INERT at max_num_seqs=1 (the shipped default) — preparatory for concurrency.
-      # LONG_PREFILL_TOKEN_THRESHOLD=0 disables.
+      - "${MAX_NUM_BATCHED_TOKENS:-2048}"
       - --long-prefill-token-threshold
-      - "${LONG_PREFILL_TOKEN_THRESHOLD:-4096}"
-      # fp8 == e4m3 here. NOT fp8_e5m2 — hard-rejected with fp8 checkpoints.
+      - "0"
       - --kv-cache-dtype
-      - "${KV_CACHE_DTYPE:-bfloat16}"
+      - fp8_e4m3
       - --attention-backend
-      - "${ATTN_BACKEND:-FLASH_ATTN}"
+      # The plugin registers its FP8 extension through the FLASH_ATTN API.
+      - FLASH_ATTN
+      - --limit-mm-per-prompt
+      - '{"image":1,"video":0}'
+      - --mm-processor-kwargs
+      - '{"size":{"longest_edge":4194304,"shortest_edge":65536}}'
+      - --compilation-config
+      - '{"cudagraph_capture_sizes":[1,2,4,8],"max_cudagraph_capture_size":8}'
       - --trust-remote-code
       - --reasoning-parser
       - qwen3
-      # Stack-wide default: thinking ON. On this model that ALSO ENABLES the
-      # template's xhigh reasoning-effort preamble (it is gated on thinking).
-      # Callers opt in per-request; the server default below is "low", so send
-      # "reasoning_effort":"medium" (un-nudged) or "xhigh" (deliberate) to override.
-      # ⭐ THINKING GATE — flip the server default with ENABLE_THINKING=true.
-      #   The card's matching sampler row follows AUTOMATICALLY now: the
-      #   entrypoint keys --override-generation-config off the same flag, so an
-      #   explicit TEMP/TOP_P/PRESENCE_PENALTY is the only way to deviate. See
-      #   the SAMPLER header block.
-      - --default-chat-template-kwargs
-      # ⭐ reasoning_effort default = low (2026-08-16). It is a PER-REQUEST OpenAI
-      # control, so this is only the fallback for callers that send nothing — any
-      # agent still picks its own level per request.
-      # ⚠️ ACTIVE on every request since the 2026-09-01 thinking flip. The template
-      # only reads reasoning_effort inside `if enable_thinking is undefined or true`,
-      # so it goes INERT only under ENABLE_THINKING=false.
-      # ⚠️ low is an ACTIVE instruction, not "less of medium" — it injects
-      # "Keep your thinking brief and focused, moving directly to the conclusion
-      # without unnecessary elaboration." The three levels are NOT a scale with a
-      # middle: medium has NO branch and injects nothing (the un-nudged baseline),
-      # xhigh adds "think carefully, validate assumptions, consider alternatives"
-      # which is what makes it slow and timeout-prone. REASONING_EFFORT=medium if
-      # you want the model un-nudged rather than pushed toward brevity.
-      # ⚠️ Valid values are xhigh | medium | low, plus `high`, which THIS REPO
-      # maps onto XHIGH via the patched chat template mounted above. Upstream
-      # Qwen has no `high` rung and its stock template RAISES on it; the mapping
-      # is the whole point of that mount. medium is the UN-NUDGED baseline (no
-      # branch, no injected preamble), deliberately NOT xhigh — a client sending
-      # the standard top rung gets the neutral setting, not the slowest one.
-      # Anything OUTSIDE that set still RAISES at template render (HTTP 400).
-      - '{"enable_thinking": ${ENABLE_THINKING:-true}, "reasoning_effort": "${REASONING_EFFORT:-low}"}'
       - --enable-auto-tool-choice
-      # The 3.8 template emits the same <tool_call><function=…><parameter=…> XML
-      # as 3.6 (verified by reading the template), so this parser applies.
       - --tool-call-parser
       - qwen3_coder
-      # Prefix caching ON, matching the rest of this hybrid family: the
-      # vllm#43559 fix (vllm#48375) is VENDORED here and applied at boot by the
-      # entrypoint, which is what makes MTP + prefix caching safe to pair.
-      # ⚠️ The evidence for the pair being clean is qwen3.6-27b / Tess-4-27B
-      # production data, INHERITED — not measured on 3.8.
-      # Opt out: PREFIX_CACHE_ARG=--no-enable-prefix-caching
+      - --default-chat-template-kwargs
+      - '{"enable_thinking": ${ENABLE_THINKING:-true}, "reasoning_effort": "${REASONING_EFFORT:-low}"}'
       - "${PREFIX_CACHE_ARG:---enable-prefix-caching}"
       - --enable-chunked-prefill
-      # SAMPLER moved INTO the entrypoint (#984/#1014): at boot it derives
-      # --override-generation-config from the model-card row matching
-      # ENABLE_THINKING (THINKING by default since 2026-09-01; instruct when
-      # false); explicit
-      # TEMP/TOP_P/PRESENCE_PENALTY still win. Both rows: "SAMPLER" header above.
-      # prompt_tokens_details in the OpenAI `usage` block (#1246, @zhanmu-tw).
-      # Populates usage.prompt_tokens_details.cached_tokens — how much of the
-      # prompt the prefix cache served — instead of the `null` clients get by
-      # default. Pure response-shaping: _make_prompt_tokens_details() reads
-      # counters the engine already keeps, so it costs nothing in the inference
-      # path; it is off upstream only because vLLM defaults the flag to False.
-      # Opt out: PROMPT_TOKENS_DETAILS_ARG=--no-enable-prompt-tokens-details
       - "${PROMPT_TOKENS_DETAILS_ARG:---enable-prompt-tokens-details}"
       - --host
       - 0.0.0.0
       - --port
       - "8000"
+  vllm-qwen38-27b-dual-ultramax-kernels:
+    image: ${FA2_KERNEL_IMAGE:-ghcr.io/antonprokopyev/fa2-fp8kv-sm86@sha256:da040941fa048fd5fdfce520503341c0beda4ce41436a1c1fecaf3f8a99777c7}
+    restart: "no"
+    volumes:
+      - fa2-kernels:/export
+
+volumes:
+  fa2-kernels:

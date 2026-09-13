@@ -32,13 +32,13 @@
 #   Best for:  DFlash2 on the MAX/fidelity envelope — full 262K + concurrency.
 # ---------------------------------------------------------------------------
 # Sibling              KV          Attention         Default context
-# dflash2.yml          bf16        stock FA2         65536
+# dflash2.yml          fp8_e4m3    FlashAttention    262144 (ultramax, experimental)
 # dflash2-fp8.yml      fp8_e4m3    stock FlashInfer  147456
-# dflash2-fp8-fa2.yml  fp8_e4m3    custom FA2 SM86   262144 (hypermax, experimental)
 #
 # SUPERMAX = the MAX tier (official FP8, fp8 KV, 262K) with MTP → DFlash2. Immune to the #52873
-# acceptance-collapse (external drafter), NOT the #1096 ctx cliff (see below). vs ultramax (bf16/FA2): supermax keeps full 262K + fp8
-# concurrency; ultramax trades ctx for the FA2 fast path. Boot-validate on dual
+# acceptance-collapse (external drafter), NOT the #1096 ctx cliff (see below).
+# Ultramax uses FlashAttention with FP8 KV and a fixed per-card KV reservation.
+# Boot-validate on dual
 # before quoting numbers. ⚠️ Spec-decode exposed to OPEN vllm#50021; SPEC_N=0
 # mitigates. Launch --force.
 # ===========================================================================

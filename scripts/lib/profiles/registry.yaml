@@ -3846,54 +3846,6 @@ entries:
         presence_penalty: 0.0
         repetition_penalty: 1.0
     sampler_default_mode: thinking
-  vllm/qwen38-27b-dual-hypermax:
-    origin: core
-    model: qwen3.8-27b
-    weights_variant: fp8
-    workload: long-ctx-single
-    engine: vllm-stable
-    drafter: syvai-qwen38-dflash2
-    spec_method: null
-    kv_format: fp8_e4m3
-    act_format: 16bit
-    act8_capable: false
-    offload: null
-    moe_cache: false
-    host_ram_gb: null
-    chat_template: qwen38-reasoning-effort
-    tp: 2
-    max_ctx: 262144
-    max_num_seqs: 1
-    mem_util: 0.95
-    compose_path: models/qwen3.8-27b/vllm/compose/dual/fp8/dflash2-fp8-fa2.yml
-    requires_nvlink: false
-    requires_homogeneous_arch: true
-    required_engine_features: []
-    default_port: 8144
-    kvcalc_key: SKIP
-    status: experimental
-    status_note: "HYPERMAX: SM86-only FA2 target/DFlash2 attention, FP8 KV, full context and vision on vLLM 0.29.0. Measured 99.88/191.93 decode TPS; verify-full 10/10, soak PASS, 261K text and 260K combined vision checks passed. Stress failed the 1 GiB margin (299 MiB free; combined vision minimum 239 MiB). Experimental, --force. First boot builds pinned CUDA sources. Fixed KV budget; external draft/workspace costs are not modeled by kv-calc."
-    weights_companions:
-      - dflash2
-    gateway: false
-    serve_aliases: []
-    required_sm: 8.6
-    sampler_profiles:
-      instruct:
-        temperature: 0.7
-        top_p: 0.8
-        top_k: 20
-        min_p: 0.0
-        presence_penalty: 1.5
-        repetition_penalty: 1.0
-      thinking:
-        temperature: 1.0
-        top_p: 0.95
-        top_k: 20
-        min_p: 0.0
-        presence_penalty: 0.0
-        repetition_penalty: 1.0
-    sampler_default_mode: thinking
   vllm/qwen38-27b-multi4-supermax:
     origin: core
     model: qwen3.8-27b
@@ -3994,7 +3946,7 @@ entries:
     engine: vllm-stable
     drafter: syvai-qwen38-dflash2
     spec_method: null
-    kv_format: bf16
+    kv_format: fp8_e4m3
     act_format: 16bit
     act8_capable: false
     offload: null
@@ -4002,20 +3954,28 @@ entries:
     host_ram_gb: null
     chat_template: qwen38-reasoning-effort
     tp: 2
-    max_ctx: 65536
+    max_ctx: 262144
     max_num_seqs: 1
-    mem_util: 0.92
+    mem_util: null
     compose_path: models/qwen3.8-27b/vllm/compose/dual/fp8/dflash2.yml
     requires_nvlink: false
-    requires_homogeneous_arch: false
+    requires_homogeneous_arch: true
     required_engine_features: []
     default_port: 8110
     kvcalc_key: SKIP
     status: experimental
-    status_note: "Qwen3.8-27B ULTRAMAX tier (FIDELITY series), 2-card (TP=2): the MAX tier (official FP8) with DFlash2 on the bf16/FLASH_ATTN fast path (fidelity counterpart to ultrafast). Fastest decode on fp8 weights but bf16 KV + big fp8 weights cap ctx. MEASURED on-rig 2026-08-20: bf16 KV pool ~75.6K tokens on 2 cards (bf16 KV is 2x fp8 + big fp8 weights) -> ships 65536 (64K). For long ctx use supermax (144K) or max (262K); ultramax dual is the max-decode short-ctx fidelity config. multi4/8 keep 262K. ⚠️ vllm#50021; SPEC_N=0 mitigates. --force."
-    weights_companions: []
+    status_note: "ULTRAMAX: FP8 weights, DFlash2 n=7, FLASH_ATTN and FP8 KV at 262144 context. Prebuilt kernel/plugin image; no serving-time CUDA build. Fixed KV bytes bypass gpu_memory_utilization. SM86 tested; SM89/SM120 build targets with runtime validation pending; SM90/SM100 use native FlashAttention. Experimental; --force."
+    weights_companions:
+      - dflash2
     gateway: false
     serve_aliases: []
+    required_sm: 8.6
+    supported_sm:
+      - 8.6
+      - 8.9
+      - 9.0
+      - 10.0
+      - 12.0
     sampler_profiles:
       instruct:
         temperature: 0.7

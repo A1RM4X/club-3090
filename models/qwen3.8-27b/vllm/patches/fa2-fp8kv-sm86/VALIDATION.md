@@ -1,5 +1,9 @@
 # HYPERMAX validation — September 12, 2026
 
+This dated report covers the adapter and compose at commit
+`c762f38bca25c6e05c32fcd37ec61776be32ebb0`. The current `ultramax` plugin and
+artifact image are covered separately in `REVIEW_VALIDATION.md`.
+
 Status: experimental. Functional and throughput validation passed. The full
 context ladder returned correct answers but failed the 1 GiB free-VRAM margin.
 Continuous soak, quality, exact-context and combined vision/context checks
@@ -60,7 +64,7 @@ Quality (`--medium --no-thinking --sampling-from-server --strict-thinking`):
 Data Extraction 12/15, ReasonMath 9/15. Thinking validity passed for all packs.
 Runner 0.9.9; packs tc1.0.1, if1.0.0, so1.1.0, de1.2.0, rm1.0.0.
 The live server supplied temperature=0.7, top_p=0.8, top_k=20, min_p=0.
-The historical 0.27.1 run scored 62/75 with the checkpoint's 1.0/0.95 sampling
+The 0.27.1 run scored 62/75 with the checkpoint's 1.0/0.95 sampling
 defaults, so the score difference is not a controlled engine A/B.
 
 Thinking ON (`--quick --enable-thinking --sampling-from-server
@@ -91,7 +95,7 @@ the request-level thinking switch, not a restart into the thinking sampler row.
 - Continuous soak: **PASS**, 5 sessions × 5 turns, zero errors, zero measured
   VRAM growth (47656 MiB total throughout), 100% throughput retention by the
   harness metric. This is a bounded sample, not a long-term stability claim.
-- The original 0.27.1 measurements are historical; none substitute for these
+- The 0.27.1 measurements use a different adapter; none substitute for these
   0.29.0 checks.
 
 The exact context-boundary probe passed: **261000 input tokens**, zero cached

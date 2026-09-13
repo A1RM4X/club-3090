@@ -160,6 +160,41 @@ assert not r.valid
 assert any(reason.startswith("C3:") for reason in r.reasons), r.reasons
 PY
 
+run_test "C3 exact architecture set rejects higher unsupported SMs" <<'PY'
+from scripts.lib.profiles.compat import load_profiles, fits
+p = load_profiles()
+kwargs = dict(model=p.models["qwen3.8-27b"], workload=p.workloads["long-ctx-single"],
+              engine=p.engines["vllm-stable"], tp=2, weights_variant="fp8",
+              kv_format="fp8_e4m3", required_sm=8.6, project_vram=False)
+for card, expected in [("rtx-3090", True), ("rtx-4090", False), ("rtx-5090", False)]:
+    hardware = [p.hardware[card]] * 2
+    result = fits(hardware, supported_sm=[8.6], **kwargs)
+    assert ("C3" in result.diagnostics["constraints_passed"]) == expected, result.reasons
+    floor_only = fits(hardware, **kwargs)
+    assert "C3" in floor_only.diagnostics["constraints_passed"], floor_only.reasons
+mixed = fits([p.hardware["rtx-3090"], p.hardware["rtx-4090"]], supported_sm=[8.6], **kwargs)
+assert "C3" in mixed.diagnostics["constraints_failed"], mixed.reasons
+explicit_ada = fits([p.hardware["rtx-4090"]] * 2, supported_sm=[8.6, 8.9], **kwargs)
+assert "C3" in explicit_ada.diagnostics["constraints_passed"], explicit_ada.reasons
+PY
+
+run_test "registry supported_sm rejects malformed capability sets" <<'PY'
+from scripts.lib.profiles.compose_registry import _entry
+kwargs = dict(model="qwen3.8-27b", weights_variant="fp8", workload="long-ctx-single",
+              engine="vllm-stable", drafter=None, kv_format="fp8_e4m3", tp=2,
+              max_ctx=262144, max_num_seqs=1, mem_util=None,
+              compose_path="models/example.yml", default_port=8110)
+assert "supported_sm" not in _entry(**kwargs)
+assert _entry(supported_sm=[8.6, 9], **kwargs)["supported_sm"] == [8.6, 9.0]
+for value in ([], "8.6", [True], [0], [-1], [float("nan")], [float("inf")], ["8.6"]):
+    try:
+        _entry(supported_sm=value, **kwargs)
+    except ValueError as error:
+        assert "supported_sm" in str(error)
+    else:
+        raise AssertionError(f"invalid supported_sm accepted: {value!r}")
+PY
+
 run_test "C4 engine KV support: llama.cpp rejects bf16 KV" <<'PY'
 from scripts.lib.profiles.compat import load_profiles, fits
 p = load_profiles()

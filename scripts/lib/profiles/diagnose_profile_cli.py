@@ -135,6 +135,7 @@ def fits_for_entry(entry: dict[str, Any], profiles, hardware: list, nvlink_activ
         requires_nvlink=bool(entry.get("requires_nvlink", False)),
         required_engine_features=list(entry.get("required_engine_features", [])),
         required_sm=entry.get("required_sm"),
+        supported_sm=entry.get("supported_sm"),
         project_vram=project_vram,
     )
 
