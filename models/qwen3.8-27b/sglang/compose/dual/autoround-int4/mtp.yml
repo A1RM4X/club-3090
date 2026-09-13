@@ -404,6 +404,37 @@ services:
         SAMPLER=(--default-chat-template-kwargs "{\"enable_thinking\": $$_think, \"reasoning_effort\": \"$$_reff\"}"
                  --sampling-defaults model
                  --preferred-sampling-params "{\"temperature\": $$_temp, \"top_p\": $${TOP_P}, \"top_k\": $${TOP_K:-20}, \"min_p\": $${MIN_P:-0.0}, \"presence_penalty\": $${PRESENCE_PENALTY}, \"repetition_penalty\": $${REPEAT_PENALTY:-1.0}}")
+        # ⭐ MAMBA STATE SLOTS vs CONCURRENCY — measured 2026-09-13 (club-3090#1264).
+        # `--max-running-requests` is not just a concurrency cap here: each running
+        # request LOCKS 3 GDN state slots (1 active + 2 radix checkpoints — SGLang
+        # calls this a FLOOR, not headroom), plus 1 global sink slot. So:
+        #
+        #     usable warm-prefix slots = max_mamba_cache_size - 1 - 3 x max_running_requests
+        #
+        # On 2x3090 TP=2 this compose gets max_mamba_cache_size=33 (set by
+        # --mamba-full-memory-ratio, default 0.9), which gives:
+        #     max-running-requests=1  -> 29 usable      =4  -> 20 usable
+        #                          =8  ->  8 usable      =10 ->  2 usable
+        #                          =11 -> INFEASIBLE (negative)
+        #
+        # ⚠️ A slot caches ONE DISTINCT PREFIX. Depth is nearly free — measured:
+        # a 14-turn / ~33K-token conversation never evicted at 14 slots. BREADTH is
+        # what costs: at 14 slots, opening 20 distinct conversations evicted the
+        # first (re-query 1.558s == its cold 1.540s) while the newest stayed warm
+        # (0.086s). At 29 slots the same 20 conversations did NOT evict it (0.362s).
+        #
+        # So raising concurrency spends the prefix cache twice over — 3 slots per
+        # stream, and more distinct conversations competing for what is left.
+        # If you raise --max-running-requests, check the arithmetic above before
+        # assuming prefix reuse still works.
+        #
+        # --mamba-full-memory-ratio trades state slots against KV tokens within a
+        # FIXED budget (VRAM was identical in both arms, within 10 MiB):
+        #     ratio 0.9 (default) -> 33 slots, 279,595 KV tokens
+        #     ratio 0.3           -> 14 slots, 314,251 KV tokens  (+12.4% KV)
+        # Lower it only for SINGLE-STREAM work, where few distinct prefixes are kept
+        # warm and KV is the real constraint. For a multi-conversation estate the
+        # cookbook's warning applies and 0.9 is right. Not changed by default.
         exec python3 -m sglang.launch_server \
           --model-path "$$M" \
           --tp-size 2 \
@@ -415,37 +446,6 @@ services:
           --attention-backend "${ATTENTION_BACKEND:-flashinfer}" \
           --context-length "${CONTEXT_LENGTH:-262144}" \
           --mem-fraction-static "${MEM_FRACTION:-0.90}" \
-          # ⭐ MAMBA STATE SLOTS vs CONCURRENCY — measured 2026-09-13 (club-3090#1264).
-          # `--max-running-requests` is not just a concurrency cap here: each running
-          # request LOCKS 3 GDN state slots (1 active + 2 radix checkpoints — SGLang
-          # calls this a FLOOR, not headroom), plus 1 global sink slot. So:
-          #
-          #     usable warm-prefix slots = max_mamba_cache_size - 1 - 3 x max_running_requests
-          #
-          # On 2x3090 TP=2 this compose gets max_mamba_cache_size=33 (set by
-          # --mamba-full-memory-ratio, default 0.9), which gives:
-          #     max-running-requests=1  -> 29 usable      =4  -> 20 usable
-          #                          =8  ->  8 usable      =10 ->  2 usable
-          #                          =11 -> INFEASIBLE (negative)
-          #
-          # ⚠️ A slot caches ONE DISTINCT PREFIX. Depth is nearly free — measured:
-          # a 14-turn / ~33K-token conversation never evicted at 14 slots. BREADTH is
-          # what costs: at 14 slots, opening 20 distinct conversations evicted the
-          # first (re-query 1.558s == its cold 1.540s) while the newest stayed warm
-          # (0.086s). At 29 slots the same 20 conversations did NOT evict it (0.362s).
-          #
-          # So raising concurrency spends the prefix cache twice over — 3 slots per
-          # stream, and more distinct conversations competing for what is left.
-          # If you raise --max-running-requests, check the arithmetic above before
-          # assuming prefix reuse still works.
-          #
-          # --mamba-full-memory-ratio trades state slots against KV tokens within a
-          # FIXED budget (VRAM was identical in both arms, within 10 MiB):
-          #     ratio 0.9 (default) -> 33 slots, 279,595 KV tokens
-          #     ratio 0.3           -> 14 slots, 314,251 KV tokens  (+12.4% KV)
-          # Lower it only for SINGLE-STREAM work, where few distinct prefixes are kept
-          # warm and KV is the real constraint. For a multi-conversation estate the
-          # cookbook's warning applies and 0.9 is right. Not changed by default.
           --max-running-requests "${MAX_RUNNING_REQUESTS:-1}" \
           --trust-remote-code \
           --enable-metrics \
