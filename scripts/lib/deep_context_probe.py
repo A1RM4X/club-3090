@@ -48,6 +48,35 @@ _REUSE_COUNTERS = [  # (exposed counter name, required label fragment or None)
 ]
 REUSE = {"source": None, "counter": None}   # source: "usage" | "metrics" | None
 
+# ---------------------------------------------------------------------------
+# Drafter acceptance and scheduler pressure, per turn (#1259).
+#
+# The issue names these explicitly and says why: "a queue and a dead drafter both
+# read as 'slow' from the client and are indistinguishable without them." That is
+# the whole reason this matters — a user reporting "TPS fell to 25" cannot tell us
+# which one they hit, and neither can a decode column on its own.
+#
+# A dead drafter is the sharper case: you keep paying to draft tokens that are
+# then rejected, so throughput lands BELOW the no-speculation baseline. Nothing in
+# a cache metric can show that.
+#
+# Both engines expose it as counters, so the per-turn value is a DELTA across one
+# request — the same primitive the cached column already uses.
+#   accepted / drafted = acceptance rate for that turn
+# Names verified against a running SGLang v0.5.19 and vLLM v0.29.0 package source
+# on 2026-09-13.
+_SPEC_COUNTERS = {          # engine -> (accepted, drafted)
+    "sglang": ("sglang:spec_accept_length", None),   # gauge: mean accepted per step
+    "vllm": ("vllm:spec_decode_num_accepted_tokens_total",
+             "vllm:spec_decode_num_draft_tokens_total"),
+}
+_PRESSURE_COUNTERS = [      # first that resolves wins
+    ("vllm:num_preemptions_total", None),
+    ("sglang:num_queue_reqs", None),
+]
+SPEC = {"accepted": None, "drafted": None, "kind": None}
+PRESSURE = {"counter": None}
+
 FLAG_HINT = ("SGLang: --enable-cache-report (+ --enable-metrics for the counter fallback); "
              "vLLM: --enable-prompt-tokens-details")
 
@@ -87,6 +116,50 @@ def detect_reuse_counter():
             REUSE["counter"] = (name, label)
             return
     REUSE["counter"] = None
+
+def detect_spec_counters():
+    """Resolve the drafter-acceptance and scheduler-pressure counters, if live.
+
+    Absence is meaningful and must not read as zero: speculation may simply be
+    OFF on this slug, which is a different statement from "the drafter is dead".
+    The columns render n/a in that case and the header says which."""
+    body = fetch_metrics()
+    acc, drf = _SPEC_COUNTERS["vllm"]
+    if metric_sum(body, acc) is not None and metric_sum(body, drf) is not None:
+        SPEC.update(accepted=acc, drafted=drf, kind="vllm-ratio")
+    else:
+        sg, _ = _SPEC_COUNTERS["sglang"]
+        if metric_sum(body, sg) is not None:
+            # SGLang publishes a mean accepted-length GAUGE, not a pair of
+            # counters, so it is read directly rather than differenced.
+            SPEC.update(accepted=sg, drafted=None, kind="sglang-gauge")
+    for name, label in _PRESSURE_COUNTERS:
+        if metric_sum(body, name, label) is not None:
+            PRESSURE["counter"] = (name, label)
+            break
+
+def spec_view(before, after):
+    """Per-turn acceptance. Returns (text, is_alarming) or (None, False).
+
+    ⭐ A dead drafter and a queued request both present as "slow" to a client
+    (#1259). Acceptance separates them, and it is the one number that explains a
+    throughput BELOW the no-speculation baseline: draft cost is paid, nothing is
+    accepted."""
+    if SPEC["kind"] == "vllm-ratio":
+        a0, a1 = metric_sum(before, SPEC["accepted"]), metric_sum(after, SPEC["accepted"])
+        d0, d1 = metric_sum(before, SPEC["drafted"]), metric_sum(after, SPEC["drafted"])
+        if None in (a0, a1, d0, d1) or (d1 - d0) <= 0:
+            return None, False
+        rate = (a1 - a0) / (d1 - d0)
+        return f"{rate:.0%}", rate < 0.20
+    if SPEC["kind"] == "sglang-gauge":
+        v = metric_sum(after, SPEC["accepted"])
+        if v is None:
+            return None, False
+        # Mean accepted tokens per step; 1.0 means every draft was rejected and
+        # only the bonus token survived, i.e. speculation is buying nothing.
+        return f"{v:.2f}x", v < 1.2
+    return None, False
 
 # ⭐ The API's cached_tokens is ATTENTION-KV ONLY. jb-seo's question (disc #1178)
 # is about the KV and MAMBA pools diverging — KV leaf evicted, mamba checkpoint
@@ -179,7 +252,9 @@ def measure(msgs, max_tokens=24):
                       request, or None when no counter is published
         text          assistant content
     """
-    m_before = fetch_metrics() if REUSE["counter"] else None
+    # One scrape serves the reuse, acceptance and pressure deltas alike.
+    need_metrics = bool(REUSE["counter"] or SPEC["kind"] or PRESSURE["counter"])
+    m_before = fetch_metrics() if need_metrics else None
     t0 = time.time(); ttft = None; text = ""; usage = None
     first = None; last = None   # (t, cumulative completion_tokens) at the first token / last usage chunk
     # Content-chunk timing, tracked INDEPENDENTLY of usage: an engine that sends
@@ -248,12 +323,20 @@ def measure(msgs, max_tokens=24):
     ptd = u.get("prompt_tokens_details")
     cached_usage = ptd.get("cached_tokens") if isinstance(ptd, dict) else None
     cached_metrics = None
-    if REUSE["counter"] and m_before is not None:
-        a = metric_sum(m_before, *REUSE["counter"]); b = metric_sum(fetch_metrics(), *REUSE["counter"])
+    m_after = fetch_metrics() if (need_metrics and m_before is not None) else None
+    if REUSE["counter"] and m_before is not None and m_after is not None:
+        a = metric_sum(m_before, *REUSE["counter"]); b = metric_sum(m_after, *REUSE["counter"])
         if a is not None and b is not None:
             cached_metrics = int(b - a)
+    accept, accept_low = spec_view(m_before, m_after) if m_after is not None else (None, False)
+    preempt = None
+    if PRESSURE["counter"] and m_before is not None and m_after is not None:
+        a = metric_sum(m_before, *PRESSURE["counter"]); b = metric_sum(m_after, *PRESSURE["counter"])
+        if a is not None and b is not None:
+            preempt = int(b - a)
     return {"ttft": ttft, "dtps": dtps, "dtps_approx": approx, "dtps_why": why,
             "dtps_basis": basis, "nchunks": nchunks, "ncontent": ncontent,
+            "accept": accept, "accept_low": accept_low, "preempt": preempt,
             "finish_reason": finish,
             "ptok": u.get("prompt_tokens") or 0,
             "ctok": ctok, "cached_usage": cached_usage, "cached_metrics": cached_metrics,
@@ -376,8 +459,16 @@ def run_depth():
     print("  decode_tps: engine-counted tokens over the decode window. A '~' prefix means the "
           "exact basis (two differing usage chunks) was unavailable and a fallback window was "
           "used; the basis is named per row. 'chunk-count' reads LOW under spec-dec.")
+    if SPEC["kind"]:
+        print(f"  accept: per-turn drafter acceptance ({'accepted/drafted' if SPEC['kind'] == 'vllm-ratio' else 'mean accepted tokens per step'})."
+              " A dead drafter and a queued request both read as 'slow' from the client and are"
+              " indistinguishable without this (#1259); only a dead drafter puts throughput BELOW"
+              " the no-speculation baseline.")
+    else:
+        print("  accept: n/a — no drafter-acceptance counter on /metrics. That means speculation is"
+              " OFF or unreported on this slug; it does NOT mean acceptance is zero.")
     print(f"  {'turn':>4} {'prompt_tok':>11} {'cached':>9} {'ttft_s':>8} "
-          f"{'decode_tps':>11} {'kv_res':>8} {'mamba_res':>10}")
+          f"{'decode_tps':>11} {'accept':>7} {'kv_res':>8} {'mamba_res':>10}")
     msgs = []; turn = 0; ptok = 0; prev_ttft = None; base_ctok = None
     while ptok < TARGET_CTX:
         turn += 1
@@ -453,8 +544,13 @@ def run_depth():
             flags += f"   <- decode n/a: {m['dtps_why']}"
         elif m.get("dtps_approx") and m.get("dtps_basis"):
             flags += f"   <- decode basis: {m['dtps_basis']}"
+        if m.get("accept_low"):
+            flags += f"   <- DRAFTER ACCEPTANCE LOW ({m['accept']})"
+        if m.get("preempt"):
+            flags += f"   <- {m['preempt']} preemption(s) this turn"
         print(f"  {turn:>4} {ptok:>11,} {fmt_cached(m):>9} {fmt_ttft(m):>8} "
-              f"{fmt_dtps(m):>11}{pool_cols(pool_view())}{flags}", flush=True)
+              f"{fmt_dtps(m):>11} {(m.get('accept') or 'n/a'):>7}"
+              f"{pool_cols(pool_view())}{flags}", flush=True)
         prev_ttft = m["ttft"]
         if not ptok:
             print("  stopping: prompt_tokens came back 0 — usage vanished mid-run"); break
@@ -559,4 +655,5 @@ def run_breadth():
               flush=True)
 
 detect_reuse_counter()
+detect_spec_counters()
 run_depth() if MODE == "depth" else run_breadth()

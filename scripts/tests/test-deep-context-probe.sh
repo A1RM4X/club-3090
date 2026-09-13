@@ -184,7 +184,7 @@ run_fake metrics depth TARGET_CTX=2500 TURN_TOKENS=800
 command grep -q 'cached column source: metrics' <<<"$out" || bad "self-test falls back to the /metrics counter" "source: metrics" "absent: $out"
 last="$(col_cached "$out" | tail -1 | tr -d ,)"
 [[ "$last" =~ ^[0-9]+$ && "$last" -gt 0 ]] || bad "counter-delta cached is numeric and >0" ">0" "'$last'"
-command grep -qE '^ +[0-9]+ +[0-9,]+ +[0-9,n/a]+ +[0-9.]+ +[~0-9.n/a]+ +[0-9]+% +[0-9]+/33' <<<"$out" \
+command grep -qE '^ +[0-9]+ +[0-9,]+ +[0-9,n/a]+ +[0-9.]+ +[~0-9.n/a]+ +[0-9a-z/%.]+ +[0-9]+% +[0-9]+/33' <<<"$out" \
   || bad "pool residency columns come from /metrics (kv %, mamba slots/total)" "'NN% n/33' columns" "absent: $out"
 ok "absent field + /metrics counter -> counter delta, labelled 'metrics'; pool residency from /metrics"
 
