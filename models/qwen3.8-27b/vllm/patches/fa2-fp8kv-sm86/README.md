@@ -14,9 +14,9 @@ The init service extracts two compiled libraries and a plugin wheel from a
 pinned artifact image into a named volume. The serving container mounts it
 read-only. `install_artifact.py` checks the artifact identity, payload SHA256,
 PyTorch/CUDA/Python/C++ ABI, compiled SM and vLLM metadata/layout interface
-before installing the wheel offline. Startup needs no source download,
-compiler or GPU build. The artifact manifest records the source revision
-and build dependency pins.
+before installing the wheel offline. Installing FA2 needs no source download
+or CUDA C++ compiler. vLLM still performs its normal torch.compile/Triton
+warmup. The artifact manifest records the source revision and build pins.
 
 The image includes `LICENSE`, `NOTICE` and the upstream licenses. The source
 repository contains an upstream FlashAttention submodule, a file map and a
@@ -45,7 +45,7 @@ Use `SPEC_N=0` or `SPEC=off` to disable speculative decoding. Set
 `NCCL_P2P_DISABLE=0` only on a host with proven peer access.
 
 The 262144-token limit comes from fixed KV reservation
-(`KV_CACHE_MEMORY_BYTES=6267967898` per card), batch size 2048 and scheduler
+(`KV_CACHE_MEMORY_BYTES=6335076762` per card), batch size 2048 and scheduler
 settings. `gpu_memory_utilization` does not constrain this fixed reservation.
 `long_prefill_token_threshold=0` disables the separate long-prefill threshold;
 chunked prefill still obeys the batch budget. These settings affect memory and

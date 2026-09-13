@@ -17,9 +17,11 @@
 # SM86 is tested. SM89/SM120 are build targets; physical-GPU validation is
 # pending. SM90/SM100 retain stock native FlashAttention. Other SMs are refused.
 # The init image provides compiled kernels and the plugin wheel. Serving boot
-# verifies ABI and checksums; it does not download source or compile CUDA.
+# verifies ABI and checksums without downloading or compiling FA2 sources.
+# Normal vLLM torch.compile/Triton warmup remains.
 # Fixed KV bytes bypass utilization-based profiling. Capacity comes from that
-# reservation. See the patch README and VALIDATION.md for validation scope.
+# reservation. Measured minimum free VRAM is 1021 MiB, below the 1024 MiB
+# stress margin. See the patch README and REVIEW_VALIDATION.md for scope.
 # Requires-homogeneous-arch: true
 # ===========================================================================
 services:
@@ -142,7 +144,7 @@ services:
       # Fixed KV bytes bypass utilization-based memory profiling. This is the
       # reservation control; gpu_memory_utilization would not constrain it.
       - --kv-cache-memory-bytes
-      - "${KV_CACHE_MEMORY_BYTES:-6267967898}"
+      - "${KV_CACHE_MEMORY_BYTES:-6335076762}"
       - --max-num-seqs
       - "1"
       - --max-num-batched-tokens

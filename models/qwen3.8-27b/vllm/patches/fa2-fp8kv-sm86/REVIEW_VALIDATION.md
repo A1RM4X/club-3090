@@ -137,11 +137,14 @@ compose receives a separate validation pass below.
 
 ## Actual compose validation
 
-The following completed measurements used the 6335076762-byte reservation.
-After combined vision and stress warmup it left 1021 MiB free per card, below
-the unchanged 1024 MiB gate. The current compose reduces the reservation by
-64 MiB to 6267967898 bytes per card while retaining `max_model_len=262144`.
-That final reservation is undergoing a separate full validation pass.
+The final compose retains the tested 6335076762-byte reservation and a
+267493-token KV pool. Combined vision leaves 1021 MiB free per card, below
+the unchanged 1024 MiB gate. This is a disclosed experimental-profile limit.
+Reducing the reservation by 64 or 32 MiB preserved request capacity but
+evicted the near-limit prefix cache: a continuation reprocessed all 259932
+tokens in about 266 seconds instead of reusing 255440 cached tokens in about
+8 seconds. An 8 MiB reduction preserved the cache but did not increase physical
+free memory. None of those reservation changes ships.
 
 The final `dual/fp8/dflash2.yml` was booted through `switch.sh --force
 vllm/qwen38-27b-dual-ultramax` with the verified local image, loopback port
@@ -167,7 +170,19 @@ capture succeeded. Logs confirm `disable_custom_all_reduce=True` on this rig.
   255440 cached tokens and all five facts retained on each turn.
   Peak memory across these checks was 23106 / 23106 MiB (1021 MiB free).
 
-Stress, continuous soak and final-reservation measurements are still pending.
+- The concluding stress run completed all response probes and all ten fresh
+  needle depths. Its last rung recalled the secret at 240662 input tokens,
+  1014.1 prefill tok/s, with zero cached tokens. **The command exited 1 solely
+  for the memory margin:** 1021 MiB free per card versus the unchanged 1024 MiB
+  threshold. This is not a full stress PASS. The 4 MP vision path was warmed
+  before the stress run; peak memory stayed 23106 / 23106 MiB.
+
+- Continuous soak: **PASS**, five sessions × five turns. Zero errors, zero
+  silent-empty responses, zero VRAM growth (46212 MiB total throughout),
+  100.0% throughput retention. All 25 decode measurements came from the
+  engine's `/metrics` time-per-output-token counters; p50 was 168.48 tok/s.
+  This is a bounded multi-turn sample, not a production guarantee.
+
 The fixed KV reservation bypasses `gpu_memory_utilization`; the 262K capacity
 comes from reservation and scheduling settings, not a proven kernel-only gain.
 No margin threshold is reduced to obtain a passing result.
@@ -183,7 +198,9 @@ timings are excluded from the final compose numbers above.
 ## Catalog tests
 
 The full 160-script sweep completed. After fixing and rerunning the affected
-guards, 154 pass and six fail. All 15 final guards for the changed behavior
+guards, 154 pass and six fail. Two tests added by master `c4ed9ca` also pass,
+bringing coverage to 156/162. Its soak engine-rate fix is included in the
+concluding soak run. All 15 final guards for the changed behavior
 pass, including artifact installation, SM compatibility, mounts, attribution,
 sampler/spec toggles, restart policy, executable modes and launcher parity.
 
