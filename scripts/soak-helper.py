@@ -1045,13 +1045,34 @@ def cmd_summary(turn_log, summary_path, boot_vram, growth_limit, timed_out,
     sessions = sorted({r["session_id"] for r in rows})
     first = sessions[:5]
     last = sessions[-5:]
-    # Filter unrealistic TPS values (>500 t/s) — these come from streaming
-    # responses where ttft ≈ wall (no separate decode time observable),
-    # yielding a divide-by-tiny artifact. The cmd_run path now guards this
-    # for fresh runs but we filter defensively in case of future regressions
-    # or data from older runs that pre-date the fix.
+    # Filter unrealistic TPS values — these come from streaming responses where
+    # ttft ≈ wall (no separate decode time observable), yielding a
+    # divide-by-tiny artifact. The cmd_run path now guards this for fresh runs
+    # but we filter defensively in case of future regressions or data from older
+    # runs that pre-date the fix.
+    #
+    # ⚠️ club-3090#1290: the ceiling guards an artifact of CLIENT TIMING and must
+    # not be applied to an ENGINE-reported rate. An engine counter (#1268:
+    # prom-tpot / sglang-log / llamacpp-log) is computed by the engine over its
+    # own decode steps and structurally cannot divide by a tiny window. Applying
+    # 500 to those rows silently deleted correct measurements from p50 and
+    # retention — and 500 is reachable: a passing soak here reported p50 269.8 on
+    # an instrument that reads 2-3x bench.sh, and 2x5090 + spec-decode clears it.
+    CLIENT_RATE_CEILING = 500
+
+    def realistic_row(r):
+        """True if this row's decode rate belongs in the decode statistics.
+        Basis-aware: only client-inferred bases carry the artifact ceiling."""
+        t = r["decode_tps"]
+        if not t > 0:
+            return False
+        if r["decode_basis"] == "engine":
+            return True
+        return t <= CLIENT_RATE_CEILING
+
     def realistic(t):
-        return 0 < t <= 500
+        # Retained for wall-derived (canvas) rows, which ARE client-inferred.
+        return 0 < t <= CLIENT_RATE_CEILING
     # Wall-derived (canvas) turns are kept OUT of every decode statistic (#809):
     # a wall-derived figure includes prefill, so averaging it with real decode
     # rates would silently redefine what p50/p95/retention mean. They get their
@@ -1069,10 +1090,10 @@ def cmd_summary(turn_log, summary_path, boot_vram, growth_limit, timed_out,
     unmeasurable_rows = [r for r in rows if r["decode_basis"] == "unmeasurable"]
     empty_rows = [r for r in rows if r["decode_basis"] == "empty"]
     engine_sources = sorted({r["decode_source"] for r in engine_rows if r["decode_source"]})
-    tps = [r["decode_tps"] for r in measured_rows if realistic(r["decode_tps"])]
+    tps = [r["decode_tps"] for r in measured_rows if realistic_row(r)]
     ttft = [r["ttft_ms"] for r in rows if r["ttft_ms"] > 0]
-    first_tps = [r["decode_tps"] for r in measured_rows if r["session_id"] in first and realistic(r["decode_tps"])]
-    last_tps = [r["decode_tps"] for r in measured_rows if r["session_id"] in last and realistic(r["decode_tps"])]
+    first_tps = [r["decode_tps"] for r in measured_rows if r["session_id"] in first and realistic_row(r)]
+    last_tps = [r["decode_tps"] for r in measured_rows if r["session_id"] in last and realistic_row(r)]
     dtps = [r["decode_tps"] for r in derived if realistic(r["decode_tps"])]
     first_dtps = [r["decode_tps"] for r in derived if r["session_id"] in first and realistic(r["decode_tps"])]
     last_dtps = [r["decode_tps"] for r in derived if r["session_id"] in last and realistic(r["decode_tps"])]
@@ -1230,9 +1251,21 @@ def cmd_summary(turn_log, summary_path, boot_vram, growth_limit, timed_out,
         basis_seg.append(f"{len(derived)} wall-derived (canvas)")
     if empty_rows:
         basis_seg.append(f"{len(empty_rows)} silent-empty")
+    # club-3090#1290: a row the ceiling removes must not vanish silently — the
+    # summary already owes the reader a denominator, and an unexplained gap
+    # between len(rows) and len(tps) is exactly the ambiguity #1267 closed.
+    ceiling_dropped = [
+        r for r in measured_rows
+        if r["decode_tps"] > 0 and not realistic_row(r)
+    ]
+    engine_above_ceiling = [
+        r for r in measured_rows
+        if r["decode_basis"] == "engine" and r["decode_tps"] > CLIENT_RATE_CEILING
+    ]
+
     basis_lines = []
     basis_rows = []
-    if derived or engine_rows or unmeasurable_rows:
+    if derived or engine_rows or unmeasurable_rows or ceiling_dropped:
         basis_text = (
             f"- Decode-window basis: {' / '.join(basis_seg)} of {len(rows)} turn(s). "
             f"The decode percentiles and retention below are computed over the {len(tps)} "
@@ -1246,6 +1279,22 @@ def cmd_summary(turn_log, summary_path, boot_vram, growth_limit, timed_out,
                 "INCLUDES prefill and is not a decode rate."
             )
         basis_lines = [basis_text]
+    if ceiling_dropped:
+        basis_lines.append(
+            f"- ⚠️ {len(ceiling_dropped)} client-timed turn(s) exceeded "
+            f"{CLIENT_RATE_CEILING} tok/s and were excluded as a divide-by-tiny "
+            f"artifact (ttft ≈ wall, so no decode window is observable): "
+            + ", ".join(f"{r['decode_tps']:.1f}" for r in ceiling_dropped[:5])
+            + ("…" if len(ceiling_dropped) > 5 else "")
+        )
+    if engine_above_ceiling:
+        basis_lines.append(
+            f"- ℹ️ {len(engine_above_ceiling)} ENGINE-reported turn(s) exceeded "
+            f"{CLIENT_RATE_CEILING} tok/s and ARE counted (club-3090#1290). An "
+            f"engine counter is computed over real decode steps and cannot produce "
+            f"the client-timing artifact the ceiling guards; excluding them deleted "
+            f"correct measurements from p50 and retention."
+        )
     if derived:
         basis_rows = [
             f"| p50 wall-derived TPS (canvas) | {percentile(dtps, 0.50):.2f} |",
