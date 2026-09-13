@@ -76,7 +76,7 @@ PORT, REPORT = int(sys.argv[1]), sys.argv[2]
 # Two REPORT values change the STREAM SHAPE rather than the cached-token source;
 # both reproduce a decode n/a seen on a real 141K run. They report cached tokens
 # exactly like "usage" so only the decode path is under test.
-SHAPE = REPORT if REPORT in ("usage_once", "one_token", "one_chunk") else "normal"
+SHAPE = REPORT if REPORT in ("usage_once", "one_token", "one_chunk", "truncated") else "normal"
 if SHAPE != "normal": REPORT = "usage"
 SEEN = []; COUNTER = {"cache": 0}; LOCK = threading.Lock(); KV_TOTAL = 10000
 def toks(s): return len(s) // 4 + 10
@@ -126,7 +126,11 @@ class H(BaseHTTPRequestHandler):
                              {"prompt_tokens": ptok, "completion_tokens": cum, "total_tokens": ptok + cum})})
             time.sleep(0.15)
         ctok = steps[-1][0]
-        chunk({"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}], "usage": None})
+        # truncated: the reply hit the cap. The probe must SAY so — the fragment
+        # lands in the history and biases every later turn (measured: 48 -> 4 tok).
+        chunk({"choices": [{"index": 0, "delta": {},
+                            "finish_reason": ("length" if SHAPE == "truncated" else "stop")}],
+               "usage": None})
         chunk({"choices": [], "usage": {"prompt_tokens": ptok, "completion_tokens": ctok, "total_tokens": ptok + ctok,
                "prompt_tokens_details": ({"cached_tokens": cached} if (REPORT == "usage" and cached > 0) else None)}})
         self.wfile.write(b"data: [DONE]\n\n"); self.wfile.flush()
@@ -214,8 +218,29 @@ d="$(col_decode "$out" | head -1)"
 [[ "$d" == "n/a" ]] || bad "a single-token reply is not timeable" "n/a" "'$d'"
 command grep -q 'decode n/a: 1 completion tok' <<<"$out" || bad "n/a names the token count" "'decode n/a: 1 completion tok'" "absent: $out"
 command grep -q 'finish_reason=stop' <<<"$out" || bad "n/a names the finish_reason" "finish_reason=stop" "absent: $out"
-command grep -q 'short reply: 1/48 tok' <<<"$out" || bad "a reply under the cap is flagged" "'short reply: 1/48 tok'" "absent: $out"
-ok "unmeasurable decode reports n/a WITH the stream shape, and flags the short reply"
+ok "unmeasurable decode reports n/a WITH the stream shape that caused it"
+
+# --- contract 6f: a reply cut off at the cap must be called out AT THE TURN IT
+# HAPPENS. This is the probe's own worst defect, and it is silent: the fragment
+# goes into the history as what the assistant said, the model imitates it, and
+# replies decay (measured on a real 141K run: 48 -> 33 -> 21 -> 11 -> 7 -> 4,
+# stuck at 4, decode n/a from 104K). Two same-boot controls proved the engine was
+# never involved — single-turn held 48/48 to 190,670 tokens, and multi-turn with a
+# fixed well-formed history showed no trend to 144,521.
+run_fake truncated depth TARGET_CTX=2500 TURN_TOKENS=800
+[[ $rc -eq 0 ]] || bad "depth run against fake(truncated) exits 0" "0" "$rc: $(tail -3 <<<"$out")"
+command grep -q 'TRUNCATED at the 48-token cap' <<<"$out" \
+  || bad "a capped reply is flagged at its own turn" "'TRUNCATED at the 48-token cap'" "absent: $out"
+command grep -q 'biases every later turn' <<<"$out" \
+  || bad "the flag says WHY truncation matters" "the history-bias consequence" "absent: $out"
+ok "a reply truncated at the cap is flagged as history poisoning, at the turn it happens"
+
+# --- contract 6g: the depth ask must COMPLETE inside the cap. Asking for sixty
+# numbers needs ~90 tokens and truncated every early turn, which is what started
+# the decay. A static check because the failure only shows up 100K deep.
+command grep -q 'count from one to twenty in words' "$P" \
+  || bad "depth ask fits the cap" "an ask that completes inside DEPTH_MAX_TOK" "still asking for more than fits"
+ok "the depth ask completes inside the token cap (no truncation by construction)"
 
 # --- contract 6d: the LAST basis is reachable. One chunk carrying the whole
 # reply is a real speculative-decoding shape (one DFlash chunk carried 8 tokens),

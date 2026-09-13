@@ -373,19 +373,34 @@ def run_depth():
           "used; the basis is named per row. 'chunk-count' reads LOW under spec-dec.")
     print(f"  {'turn':>4} {'prompt_tok':>11} {'cached':>9} {'ttft_s':>8} "
           f"{'decode_tps':>11} {'kv_res':>8} {'mamba_res':>10}")
-    msgs = []; turn = 0; ptok = 0; prev_ttft = None
+    msgs = []; turn = 0; ptok = 0; prev_ttft = None; base_ctok = None
     while ptok < TARGET_CTX:
         turn += 1
-        # The reply must be long enough to open a decode window: "reply OK" gave
-        # 1-2 tokens and the decode column was n/a on every turn, by construction.
-        # 48 tokens is ~0.3s even at 170 tok/s (DFlash), well above the window floor.
+        # The ask must satisfy TWO constraints that pull against each other.
+        #
+        # Long enough to open a decode window: "reply OK" gave 1-2 tokens and the
+        # decode column was n/a on every turn, by construction.
+        #
+        # But it must also COMPLETE inside the cap. Asking for sixty numbers needs
+        # ~90 tokens, so every early turn was truncated mid-word ("...twen") and
+        # that fragment went into the history as what the assistant said. Measured
+        # consequence: replies fell 48 -> 33 -> 21 -> 11 -> 7 -> 4 tokens and stuck
+        # at 4, taking the decode column to n/a from 104K on. Two controls on the
+        # same boot showed the engine was never involved -- a single-turn probe
+        # held 48/48 to 190,670 tokens, and a multi-turn probe whose history was a
+        # fixed well-formed reply showed no trend to 144,521. The probe was
+        # teaching the model to be terse and then measuring the result.
+        #
+        # Twenty numbers is ~30 tokens: a complete reply, and still a ~150ms window
+        # at 200 tok/s, well clear of the floor.
         msgs.append({"role": "user", "content": chunk(TURN_TOKENS, turn)
-                     + f"\n\nTurn {turn}: count from one to sixty in words, comma separated."})
+                     + f"\n\nTurn {turn}: count from one to twenty in words, comma separated."})
         try:
             m = measure(msgs, max_tokens=DEPTH_MAX_TOK)
         except Exception as e:
             print(f"  turn {turn}: ERROR {http_error_text(e)}"); return
         ptok = m["ptok"]
+        if base_ctok is None and m["ctok"]: base_ctok = m["ctok"]
         msgs.append({"role": "assistant", "content": m["text"] or "OK"})
         flags = ""
         if m["ttft"] is None:
@@ -396,11 +411,17 @@ def run_depth():
             flags += "   <- EMPTY TURN (0 completion tokens)"
         elif not m["text"]:
             flags += f"   <- {m['ctok']} tokens but no content (reasoning-only or parser ate it)"
-        # The prompt asks for sixty numbers, so a reply SHORTER than the cap means
-        # the model stopped early — which shrinks the decode window and is itself
-        # the finding at depth. Without this the row just reads as a slow turn.
-        if 0 < m["ctok"] < DEPTH_MAX_TOK:
-            flags += (f"   <- short reply: {m['ctok']}/{DEPTH_MAX_TOK} tok"
+        # A truncated reply POISONS the history — it is the defect above, and it
+        # is silent, so say so the moment it happens rather than leaving a reader
+        # to infer it from a decode column that decays later.
+        if m.get("finish_reason") == "length":
+            flags += (f"   <- TRUNCATED at the {DEPTH_MAX_TOK}-token cap; this fragment"
+                      " goes into the history and biases every later turn")
+        # Reply length is measured against TURN 1 on this run, not against the cap:
+        # the cap is a probe constant, turn 1 is what this model actually does with
+        # this ask, so the ratio survives a change of ask or model.
+        if base_ctok and m["ctok"] and m["ctok"] < base_ctok * 0.6:
+            flags += (f"   <- reply shrank to {m['ctok']} tok vs {base_ctok} on turn 1"
                       f" (finish={m.get('finish_reason') or 'none'})")
         # ⭐ An n/a with no reason reads as "slow rig" when it means "instrument
         # failed" — the same ambiguity #1267 closed one level down. Name it.
