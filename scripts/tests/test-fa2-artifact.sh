@@ -6,6 +6,13 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 python3 - "$ROOT_DIR" <<'PY'
 from dataclasses import make_dataclass
 import hashlib
+# Imported eagerly and deliberately: the patch block below replaces pathlib.Path
+# with a function, and resolving the dotted target "importlib.metadata.version"
+# would otherwise trigger this module's FIRST import at that moment. Its chain
+# reaches importlib.resources._common, whose body runs
+# `@as_file.register(pathlib.Path)` and raises TypeError on a non-class. Loading
+# it here means the test does not depend on whether something else imported it.
+import importlib.metadata
 import json
 import os
 from pathlib import Path
