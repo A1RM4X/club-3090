@@ -77,6 +77,10 @@ done
 # Auto-detect running container + port (URL/CONTAINER env vars still win).
 # See scripts/preflight.sh::preflight_autodetect_endpoint.
 ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+# Canonical engine classification (club-3090#1282). Sourced unconditionally:
+# the rules live in ONE place and every consumer delegates to them.
+# shellcheck source=lib/engine-kind.sh
+source "${ROOT_DIR}/scripts/lib/engine-kind.sh"
 if [[ -f "${ROOT_DIR}/scripts/preflight.sh" ]]; then
   # shellcheck source=preflight.sh
   source "${ROOT_DIR}/scripts/preflight.sh"
@@ -134,11 +138,9 @@ detect_engine() {
     -H 'Content-Type: application/json' \
     -d "{\"model\":\"${MODEL}\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"max_tokens\":1}" 2>/dev/null \
     | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('system_fingerprint','') or '')" 2>/dev/null)"
-  case "$fp" in
-    vllm-*)    echo "vllm"; return 0 ;;
-    sglang-*)  echo "sglang"; return 0 ;;
-    b[0-9]*)   echo "llamacpp"; return 0 ;;   # llama-server build str: b10454[-hash]
-  esac
+  local k
+  k="$(engine_kind_from_fingerprint "$fp")"
+  [[ "$k" != "unknown" ]] && { echo "$k"; return 0; }
   # Hint 3: container name pattern as a fallback (cheap, no extra HTTP).
   # ⚠️ sglang-* was MISSING here until club-3090#1261. SGLang does not set a
   # `sglang-`-prefixed system_fingerprint, so hint 2 never matches it and every
@@ -147,12 +149,10 @@ detect_engine() {
   # SKIPPED the acceptance check. A dead DFlash2 drafter (sglang#39087) leaves
   # output correct and only collapses decode, so that skip is silent. The prefix
   # is the same one rebench-full.sh and club3090-env.sh already use.
-  case "$CONTAINER" in
-    vllm-*)      echo "vllm"; return 0 ;;
-    llama-cpp-*|ik-llama-*) echo "llamacpp"; return 0 ;;
-    sglang-*|sgl-*) echo "sglang"; return 0 ;;
-  esac
-  echo "unknown"
+  # The prefix arms themselves now live in scripts/lib/engine-kind.sh
+  # (club-3090#1282) so adding an engine is a ONE-place change.
+  engine_kind_from_container "$CONTAINER"
+  return 0
 }
 
 # True only when $CONTAINER names a real Docker container. `--type container`
@@ -319,7 +319,7 @@ check_basic() {
     }")" || { fail "completion request failed" "Check docker logs ${CONTAINER}"; return 1; }
   local content
   content="$(echo "$resp" | python3 -c "import sys,json; print(json.load(sys.stdin)['choices'][0]['message']['content'])" 2>/dev/null || true)"
-  if echo "$content" | grep -qi "Paris"; then
+  if echo "$content" | command grep -qi "Paris"; then
     pass "reply contains 'Paris'"
   else
     fail "reply didn't mention Paris: $(echo "$content" | head -c 80)" \
@@ -364,7 +364,7 @@ try:
 except Exception as e:
     print(f'__PARSE_ERROR__: {e}')
 " 2>&1)"
-  if echo "$tool_calls" | grep -q "__INLINED__"; then
+  if echo "$tool_calls" | command grep -q "__INLINED__"; then
     # This hint was hardcoded to the Qwen3.6/vLLM cause and printed on EVERY engine.
     # A GLM-on-llama.cpp reporter was told "MTP x TurboQuant incompat, use
     # docker-compose.tools.yml" — a file that does not exist for that model, naming a
@@ -382,7 +382,7 @@ except Exception as e:
         fail "model emitted <tool_call> as inline text (tool_calls[] empty)" \
              "On the Qwen3.6 vLLM tiers this is the MTP x TurboQuant incompat - use docker-compose.tools.yml or .tools-text.yml (README Known issues). On other stacks check --tool-call-parser and the chat template first." ;;
     esac
-  elif echo "$tool_calls" | grep -qi "get_weather"; then
+  elif echo "$tool_calls" | command grep -qi "get_weather"; then
     pass "tool_calls[] populated with get_weather"
   else
     fail "unexpected tool_calls structure" "Raw: $(echo "$tool_calls" | head -c 300)"
@@ -681,8 +681,8 @@ check_mtp_acceptance() {
       sleep 3
       local sgl_al
       sgl_al="$(docker logs --tail 400 "${CONTAINER}" 2>&1 \
-                | grep -oE 'accept len: [0-9]+\.[0-9]+' | tail -5 \
-                | grep -oE '[0-9]+\.[0-9]+' \
+                | command grep -oE 'accept len: [0-9]+\.[0-9]+' | tail -5 \
+                | command grep -oE '[0-9]+\.[0-9]+' \
                 | awk '{s+=$1; n++} END{if(n) printf "%.3f", s/n}')"
       if [[ -z "$sgl_al" ]]; then
         skip "no 'accept len' in the last 400 log lines (spec-dec off for this compose?)"
@@ -719,15 +719,15 @@ check_mtp_acceptance() {
   sleep 3  # let log line flush
 
   local recent
-  recent="$(docker logs --tail 200 "${CONTAINER}" 2>&1 | grep -iE "SpecDecoding|acceptance length|spec_decode" | tail -3)"
+  recent="$(docker logs --tail 200 "${CONTAINER}" 2>&1 | command grep -iE "SpecDecoding|acceptance length|spec_decode" | tail -3)"
   if [[ -z "$recent" ]]; then
     skip "no SpecDecoding metrics in logs (compose may not have spec-decode enabled)"
     return 0
   fi
 
   local al
-  al="$(echo "$recent" | grep -oiE "(mean acceptance length|acceptance length|al|mean_acceptance_length)[: ]+[0-9]+\.[0-9]+" \
-        | grep -oE "[0-9]+\.[0-9]+" | tail -1)"
+  al="$(echo "$recent" | command grep -oiE "(mean acceptance length|acceptance length|al|mean_acceptance_length)[: ]+[0-9]+\.[0-9]+" \
+        | command grep -oE "[0-9]+\.[0-9]+" | tail -1)"
   if [[ -z "$al" ]]; then
     skip "couldn't parse AL from: $(echo "$recent" | head -c 240 | tr '\n' ' ')"
     return 0
@@ -770,7 +770,7 @@ check_vision() {
   # when an mmproj is loaded but the image path does not work.
   local intended=0
   if container_is_real && command -v docker >/dev/null 2>&1; then
-    if docker logs "${CONTAINER}" 2>&1 | grep -qiE "loaded multimodal model|clip_ctx:|mmproj"; then
+    if docker logs "${CONTAINER}" 2>&1 | command grep -qiE "loaded multimodal model|clip_ctx:|mmproj"; then
       intended=1
     fi
   fi

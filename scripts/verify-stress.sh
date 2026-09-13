@@ -329,6 +329,10 @@ trap finalize_save_json EXIT
 # Auto-detect running container + port (URL/CONTAINER env vars still win).
 # See scripts/preflight.sh::preflight_autodetect_endpoint.
 ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+# Canonical engine classification (club-3090#1282). Sourced unconditionally:
+# the rules live in ONE place and every consumer delegates to them.
+# shellcheck source=lib/engine-kind.sh
+source "${ROOT_DIR}/scripts/lib/engine-kind.sh"
 
 # --- per-rig #249 record: self-tee stdout so the ceiling-ladder line (the ctx
 # ceiling this stress run validates) can be parsed at the end for the corpus
@@ -412,7 +416,7 @@ CONTAINER="${CONTAINER:-vllm-qwen36-27b}"
 EAGER_MODE_DETECTED=0
 if command -v docker >/dev/null 2>&1; then
   if docker inspect "${CONTAINER}" --format '{{range .Config.Env}}{{println .}}{{end}}' 2>/dev/null \
-       | grep -qE '^VLLM_ENFORCE_EAGER=1$'; then
+       | command grep -qE '^VLLM_ENFORCE_EAGER=1$'; then
     EAGER_MODE_DETECTED=1
   fi
 fi
@@ -469,17 +473,14 @@ detect_engine() {
     -H 'Content-Type: application/json' \
     -d "{\"model\":\"${MODEL}\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"max_tokens\":1}" 2>/dev/null \
     | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('system_fingerprint','') or '')" 2>/dev/null)"
-  case "$fp" in
-    vllm-*)   echo "vllm"; return 0 ;;
-    sglang-*) echo "sglang"; return 0 ;;
-  esac
-  # sglang-*/sgl-* added club-3090#1261 — see the long note in verify-full.sh.
-  case "$CONTAINER" in
-    vllm-*)      echo "vllm"; return 0 ;;
-    llama-cpp-*|ik-llama-*) echo "llamacpp"; return 0 ;;
-    sglang-*|sgl-*) echo "sglang"; return 0 ;;
-  esac
-  echo "unknown"
+  local k
+  k="$(engine_kind_from_fingerprint "$fp")"
+  [[ "$k" != "unknown" ]] && { echo "$k"; return 0; }
+  # Container-name fallback. sglang-*/sgl-* added club-3090#1261; the arms
+  # themselves now live in scripts/lib/engine-kind.sh (club-3090#1282) so a new
+  # engine is added in ONE place — see the long note in verify-full.sh.
+  engine_kind_from_container "$CONTAINER"
+  return 0
 }
 ENGINE_KIND="$(detect_engine)"
 
@@ -718,7 +719,7 @@ check_longctx() {
     prefill_str="${prefill_str}${cache_note}"
     local all_match=1
     for tok in $secret; do
-      echo "$content_raw" | grep -qiF "$tok" || all_match=0
+      echo "$content_raw" | command grep -qiF "$tok" || all_match=0
     done
     local outcome="recalled"
     [[ "$all_match" == "1" ]] || outcome="recall_miss"
@@ -1650,7 +1651,7 @@ with open('${cal_req}', 'w') as f:
         rm -f "$result_file"
         all_match=1
         for tok in $secret; do
-          echo "$content_raw" | grep -qiF "$tok" || all_match=0
+          echo "$content_raw" | command grep -qiF "$tok" || all_match=0
         done
         local pct=0
         [[ "$prompt_tok" -gt 0 && "$n_ctx" -gt 0 ]] && pct=$(( prompt_tok * 100 / n_ctx ))

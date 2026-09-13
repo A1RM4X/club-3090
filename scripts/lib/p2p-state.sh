@@ -18,9 +18,25 @@
 #   pcie_p2p forced, grant UNVERIFIED  -> WARN (looked engaged, wasn't — #688;
 #                                        driver didn't confirm peer access)
 
-# GPU count (host).
+# GPU count (host). Prints EXACTLY one line: a non-negative integer.
+#
+# The `|| echo 0` this used to carry was not a fallback, it was the bug (#1279):
+# `grep -c` PRINTS `0` *and* exits 1 when it matches nothing, so on any rig where
+# `nvidia-smi -L` fails or lists no GPUs, BOTH sides fired and the function
+# returned the two-line string "0\n0". Every consumer does arithmetic on it
+# (`[[ "$(p2p_gpu_count)" -ge 2 ]]`), which then dies with
+# `[[: 0 0: syntax error in expression` — pasted straight into the diagnostic
+# report a user is about to send us. A caller-side `|| echo 0` cannot rescue it
+# either: the function already exited 0, its last command having been the echo.
+#
+# So: capture the count, keep grep's no-match exit off `set -e`/pipefail, and
+# print one integer whatever happened. `command grep` because the interactive
+# shell shims grep to ugrep.
 p2p_gpu_count() {
-  nvidia-smi -L 2>/dev/null | grep -c '^GPU ' || echo 0
+  local n
+  n="$(nvidia-smi -L 2>/dev/null | command grep -c '^GPU ')" || true
+  [[ "$n" =~ ^[0-9]+$ ]] || n=0
+  printf '%s\n' "$n"
 }
 
 # Host capability: "nvlink" | "pcie_p2p" | "none".
@@ -31,7 +47,7 @@ p2p_host_capability() {
     echo none
     return 0
   fi
-  if nvidia-smi topo -m 2>/dev/null | grep -qP '\bNV[0-9]+\b'; then
+  if nvidia-smi topo -m 2>/dev/null | command grep -qP '\bNV[0-9]+\b'; then
     echo nvlink
     return 0
   fi
@@ -275,7 +291,7 @@ p2p_bar1_min() {
 # True (0) when `topo -p2p r` reports CNS on any pair — the stock GeForce
 # driver's software refusal, the one gate a patched module actually lifts.
 p2p_reports_cns() {
-  nvidia-smi topo -p2p r 2>/dev/null | grep -qE '(^|[[:space:]])CNS([[:space:]]|$)'
+  nvidia-smi topo -p2p r 2>/dev/null | command grep -qE '(^|[[:space:]])CNS([[:space:]]|$)'
 }
 
 # p2p_opportunity_hint <gpu_count> <host_capability>
