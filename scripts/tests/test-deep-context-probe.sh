@@ -264,6 +264,35 @@ sys.exit(0 if appends and all("CANNED_REPLY" in a for a in appends) else 1)
 PYEOF
 ok "the depth history is a fixed assistant turn, so replies cannot feed back on themselves"
 
+# --- contract 6i: a drafter-acceptance gauge reading exactly 0 is UNPOPULATED,
+# not collapsed, and must not raise the alarm. SGLang leaves spec_accept_rate at
+# zero until a speculation step completes: on the first live run turns 1-2 read
+# 0.00 and the probe cried "ACCEPTANCE LOW" at a drafter that turn 3 showed was
+# healthy. That is the absence-vs-zero trap the whole probe exists to avoid, so
+# it gets a gate rather than a comment. Static, because reproducing an
+# unpopulated engine gauge against a fake is not worth the fidelity it buys.
+python3 - "$P" <<'PYEOF' || bad "zero acceptance gauge treated as unpopulated" "an explicit v == 0 -> None guard" "0 would raise a false alarm"
+import re, sys
+src = open(sys.argv[1], encoding="utf-8").read()
+body = src[src.index("def spec_view"):]
+body = body[:body.index("\ndef ")] if "\ndef " in body else body
+# the guard must return "no reading" for 0, BEFORE any threshold comparison
+guard = re.search(r"if v is None or v == 0:\s*\n\s*return None, False", body)
+thresh = body.index("v < 0.20") if "v < 0.20" in body else -1
+sys.exit(0 if (guard and thresh > guard.end()) else 1)
+PYEOF
+ok "a zero acceptance gauge reads as unpopulated, not as a collapsed drafter"
+
+# --- contract 6j: both engines must report acceptance on the SAME scale, or the
+# cross-engine A/B is meaningless. vLLM gives accepted/drafted; SGLang must use
+# spec_accept_rate (a fraction), NOT spec_accept_length (mean tokens per step),
+# which would invite comparing 3.55 against 100%.
+command grep -q 'sglang:spec_accept_rate' "$P" \
+  || bad "SGLang acceptance uses the comparable fraction" "sglang:spec_accept_rate" "absent"
+command grep -q 'sglang:spec_accept_length' "$P" \
+  && bad "SGLang acceptance must not use accept_length" "spec_accept_rate only" "accept_length is still referenced"
+ok "acceptance is accepted/drafted on both engines, so the A/B is on one scale"
+
 # --- contract 6d: the LAST basis is reachable. One chunk carrying the whole
 # reply is a real speculative-decoding shape (one DFlash chunk carried 8 tokens),
 # and it leaves no content window at all — only the wall basis can measure it.

@@ -66,7 +66,12 @@ REUSE = {"source": None, "counter": None}   # source: "usage" | "metrics" | None
 # Names verified against a running SGLang v0.5.19 and vLLM v0.29.0 package source
 # on 2026-09-13.
 _SPEC_COUNTERS = {          # engine -> (accepted, drafted)
-    "sglang": ("sglang:spec_accept_length", None),   # gauge: mean accepted per step
+    # ⭐ spec_accept_rate, NOT spec_accept_length. The rate is a FRACTION
+    # (accepted/drafted) — the same quantity vLLM reports — so the two engines
+    # land on one scale and an A/B means something. accept_length is mean
+    # accepted tokens per step, a different axis that silently invites comparing
+    # 3.55 against 100%.
+    "sglang": ("sglang:spec_accept_rate", None),
     "vllm": ("vllm:spec_decode_num_accepted_tokens_total",
              "vllm:spec_decode_num_draft_tokens_total"),
 }
@@ -154,11 +159,16 @@ def spec_view(before, after):
         return f"{rate:.0%}", rate < 0.20
     if SPEC["kind"] == "sglang-gauge":
         v = metric_sum(after, SPEC["accepted"])
-        if v is None:
+        # ⚠️ EXACTLY 0 is UNPOPULATED, not collapsed. SGLang leaves this gauge at
+        # zero until a speculation step has completed, so early turns read 0.00
+        # while the drafter is healthy — measured on the first live run: turns 1-2
+        # read 0.00, turn 3 onwards read the true value, and the probe cried
+        # "ACCEPTANCE LOW" at a working drafter. That is the absence-vs-zero trap
+        # this probe exists to avoid. A genuinely dead drafter still reports a
+        # small NON-zero rate, which the threshold below catches.
+        if v is None or v == 0:
             return None, False
-        # Mean accepted tokens per step; 1.0 means every draft was rejected and
-        # only the bonus token survived, i.e. speculation is buying nothing.
-        return f"{v:.2f}x", v < 1.2
+        return f"{v:.0%}", v < 0.20
     return None, False
 
 # ⭐ The API's cached_tokens is ATTENTION-KV ONLY. jb-seo's question (disc #1178)
@@ -460,7 +470,8 @@ def run_depth():
           "exact basis (two differing usage chunks) was unavailable and a fallback window was "
           "used; the basis is named per row. 'chunk-count' reads LOW under spec-dec.")
     if SPEC["kind"]:
-        print(f"  accept: per-turn drafter acceptance ({'accepted/drafted' if SPEC['kind'] == 'vllm-ratio' else 'mean accepted tokens per step'})."
+        print(f"  accept: per-turn drafter acceptance (accepted/drafted on both engines, so it is"
+              " comparable across them)."
               " A dead drafter and a queued request both read as 'slow' from the client and are"
               " indistinguishable without this (#1259); only a dead drafter puts throughput BELOW"
               " the no-speculation baseline.")
