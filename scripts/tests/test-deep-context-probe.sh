@@ -76,7 +76,7 @@ PORT, REPORT = int(sys.argv[1]), sys.argv[2]
 # Two REPORT values change the STREAM SHAPE rather than the cached-token source;
 # both reproduce a decode n/a seen on a real 141K run. They report cached tokens
 # exactly like "usage" so only the decode path is under test.
-SHAPE = REPORT if REPORT in ("usage_once", "one_token") else "normal"
+SHAPE = REPORT if REPORT in ("usage_once", "one_token", "one_chunk") else "normal"
 if SHAPE != "normal": REPORT = "usage"
 SEEN = []; COUNTER = {"cache": 0}; LOCK = threading.Lock(); KV_TOTAL = 10000
 def toks(s): return len(s) // 4 + 10
@@ -114,11 +114,15 @@ class H(BaseHTTPRequestHandler):
         chunk({"choices": [{"index": 0, "delta": {"role": "assistant", "content": ""}, "finish_reason": None}], "usage": None})
         steps = [(1, "OK")] if maxtok <= 8 else [(1, "one"), (9, ", two, three, four, five"), (16, ", six, seven, eight,")]
         if SHAPE == "one_token" and maxtok > 8: steps = [(1, "one")]   # model stops early: no window at all
+        # one_chunk: the whole reply arrives in ONE chunk with no per-chunk usage
+        # (a real speculative-decoding shape - one DFlash chunk carried 8 tokens).
+        # There is no content WINDOW at all, so only the wall basis can measure it.
+        if SHAPE == "one_chunk" and maxtok > 8: steps = [(16, "one, two, three, four, five, six")]
         for cum, piece in steps:
             chunk({"choices": [{"index": 0, "delta": {"content": piece}, "finish_reason": None}],
-                   # usage_once: content streams but per-chunk usage never arrives,
-                   # so there is no usage DELTA to difference (the turn-17 shape).
-                   "usage": (None if SHAPE == "usage_once" else
+                   # usage_once / one_chunk: content streams but per-chunk usage
+                   # never arrives, so there is no usage DELTA to difference.
+                   "usage": (None if SHAPE in ("usage_once", "one_chunk") else
                              {"prompt_tokens": ptok, "completion_tokens": cum, "total_tokens": ptok + cum})})
             time.sleep(0.15)
         ctok = steps[-1][0]
@@ -212,6 +216,30 @@ command grep -q 'decode n/a: 1 completion tok' <<<"$out" || bad "n/a names the t
 command grep -q 'finish_reason=stop' <<<"$out" || bad "n/a names the finish_reason" "finish_reason=stop" "absent: $out"
 command grep -q 'short reply: 1/48 tok' <<<"$out" || bad "a reply under the cap is flagged" "'short reply: 1/48 tok'" "absent: $out"
 ok "unmeasurable decode reports n/a WITH the stream shape, and flags the short reply"
+
+# --- contract 6d: the LAST basis is reachable. One chunk carrying the whole
+# reply is a real speculative-decoding shape (one DFlash chunk carried 8 tokens),
+# and it leaves no content window at all — only the wall basis can measure it.
+run_fake one_chunk depth TARGET_CTX=2500 TURN_TOKENS=800
+[[ $rc -eq 0 ]] || bad "depth run against fake(one_chunk) exits 0" "0" "$rc: $(tail -3 <<<"$out")"
+d="$(col_decode "$out" | head -1)"
+[[ "$d" != "n/a" ]] || bad "a single-chunk reply still measures" "a number" "n/a: $out"
+command grep -q 'decode basis: wall' <<<"$out" || bad "the wall basis is named on the row" "'decode basis: wall'" "absent: $out"
+ok "a whole reply in one chunk still measures, via the wall basis, and says so"
+
+# --- contract 6e: the four bases stay ordered by fidelity. This is a STATIC
+# check on purpose. The floor-fallthrough it protects cannot be exercised
+# end-to-end — an engine's final usage chunk lands after the content and widens
+# the usage window past the floor by itself, so a fake that tried to force the
+# fallthrough would pass against the OLD code too and prove nothing.
+python3 - "$P" <<'PYEOF' || bad "decode bases ordered by fidelity" "usage-delta, usage-window, chunk-count, wall in order" "reordered or missing"
+import re, sys
+src = open(sys.argv[1], encoding="utf-8").read()
+want = ["usage-delta", "usage-window", "chunk-count", "wall"]
+got = [m for m in re.findall(r'basis = "([a-z-]+)"', src)]
+sys.exit(0 if got == want else 1)
+PYEOF
+ok "the four decode bases are chained in descending fidelity (chunk-count below both token-counted bases)"
 
 # --- contract 7: breadth without eviction pressure says so, and re-queries verdict
 run_fake usage breadth SESSIONS=2 SESSION_CTX=600 KV_POOL=100000
