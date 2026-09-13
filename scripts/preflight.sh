@@ -1330,7 +1330,7 @@ preflight_compose_deps() {
     # could resolve the `:-default`, causing a false "missing" (the gemma-4-12b
     # MODEL_SUBDIR/SPEC_MODEL_SUBDIR composes). Stop only at real delimiters
     # (quote / whitespace / comma); the `${VAR:-default}` resolver runs downstream.
-    done < <(command grep -hv '^[[:space:]]*#' "${compose_files[@]}" 2>/dev/null | command grep -oE '/root/\.cache/huggingface/[^"'\''[:space:],]+' || true)
+    done < <(command grep -hv '^[[:space:]]*#' "${compose_files[@]}" 2>/dev/null | command grep -oE '/root/\.cache/huggingface/[^"'\''\\[:space:],]+' || true)
 
     # Experimental SGLang composes mount individual MODEL_DIR subdirectories to
     # /models/target and /models/drafter instead of using the HF cache mount.
