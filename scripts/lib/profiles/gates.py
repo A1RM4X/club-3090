@@ -537,6 +537,13 @@ def c0_engine_support(
             f"Ampere via FlashInfer for FlashInfer-path models)"
         )
 
+    supported_sm = entry.get("supported_sm")
+    if supported_sm is not None and float(hardware_sm) not in supported_sm:
+        return _incompat(
+            f"compose supports only SM {supported_sm}; hardware sm_{float(hardware_sm):g} "
+            "has no supported kernel path for this profile"
+        )
+
     # 3d-bis. family-specific kernels — a numeric floor can't express these.
     # nvfp4 KV needs the trtllm-gen FP4 FMHA, built only for datacenter Blackwell
     # sm_100/sm_103; consumer sm_120/121 is a HIGHER number but has no build.

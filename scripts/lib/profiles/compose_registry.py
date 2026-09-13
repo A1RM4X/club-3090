@@ -12,6 +12,7 @@ generator and it does not attempt to normalize away historical variants.
 """
 
 import json
+import math
 from pathlib import Path
 
 # Slug lifecycle / availability statuses — the canonical health flag.
@@ -145,6 +146,7 @@ def _entry(
     required_engine_features=None,
     recommended_engine_features=None,
     required_sm=None,
+    supported_sm=None,
     fallback_sm=None,
     default_arch_allow=None,
     status="production",
@@ -245,6 +247,14 @@ def _entry(
         entry["recommended_engine_features"] = list(recommended_engine_features)
     if required_sm is not None:
         entry["required_sm"] = required_sm
+    if supported_sm is not None:
+        if not isinstance(supported_sm, (list, tuple)) or not supported_sm or any(
+            isinstance(sm, bool) or not isinstance(sm, (int, float))
+            or not math.isfinite(sm) or sm <= 0
+            for sm in supported_sm
+        ):
+            raise ValueError(f"{compose_path}: supported_sm must be a nonempty list of positive compute capabilities")
+        entry["supported_sm"] = [float(sm) for sm in supported_sm]
     if fallback_sm is not None:
         # Weight-only fallback floor. required_sm = the NATIVE-kernel SM;
         # fallback_sm = the lowest SM where the format still RUNS via a

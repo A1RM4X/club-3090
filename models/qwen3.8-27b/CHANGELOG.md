@@ -2,6 +2,36 @@
 
 Dated history for Qwen3.8-27B configs in this repo. Append-only — add a new entry, don't rewrite past ones.
 
+## 2026-09-13 — ULTRAMAX: prebuilt FP8 KV kernels and native FlashAttention plugin
+
+Fold the FA2 FP8 KV configuration into the existing `ultramax` slug and
+`dual/fp8/dflash2.yml`. Remove the additional `hypermax` entry. Target and
+DFlash2 now select `FLASH_ATTN` through vLLM's plugin API, with no FlashInfer
+backend substitution. An init service supplies compiled kernels and a wheel;
+the serving container verifies the artifact and installs it without a build.
+
+Keep 262144 context, vision and DFlash2 n=7. Explain that fixed KV bytes bypass
+`gpu_memory_utilization` and that scheduler settings account for the context
+capacity. Add explicit supported-SM gates without changing `required_sm`'s
+lower-bound meaning. SM86 is GPU-tested; SM89/SM120 are compiled targets with
+GPU validation pending. Keep stock native FlashAttention on SM90/SM100.
+
+The controlled four-arm comparison found similar draft acceptance for matched
+workloads. The native plugin and compiled stock control each scored 63/75 on
+the same quality packs. See
+[`REVIEW_VALIDATION.md`](vllm/patches/fa2-fp8kv-sm86/REVIEW_VALIDATION.md)
+for sampling, graph policy, per-card memory and validation limits.
+
+## 2026-09-12 — HYPERMAX: FA2 with FP8 KV on dual SM86
+
+Add experimental `vllm/qwen38-27b-dual-hypermax`, served by
+`vllm/compose/dual/fp8/dflash2-fp8-fa2.yml`: official FP8 weights, DFlash2 W4A16
+n=7, FP8 KV for target and draft, FA2 attention, 262K context and one image.
+The pinned source build runs inside stock vLLM 0.29.0; a small version-checked
+adapter follows its KV layout contract. The model default remains unchanged.
+Validation results for 0.29.0 are reported separately from historical 0.27.1
+measurements. This profile has a tight VRAM budget and stays experimental.
+
 ## 2026-09-11 — SGLang W4A8: vendor @A1RM4X's re-cut patch, wire it to every `sgl/` slug
 
 Takes the **patch half** of [#1226](https://github.com/noonghunna/club-3090/pull/1226) — the

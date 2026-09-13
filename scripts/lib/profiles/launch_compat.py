@@ -496,6 +496,7 @@ def _run_fits_for_entry(
         requires_nvlink=bool(entry.get("requires_nvlink", False)) if include_compose_requirements else False,
         required_engine_features=list(entry.get("required_engine_features", [])) if include_compose_requirements else [],
         required_sm=entry.get("required_sm") if include_compose_requirements else None,
+        supported_sm=entry.get("supported_sm") if include_compose_requirements else None,
         project_vram=project_vram,
     )
 

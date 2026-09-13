@@ -1075,6 +1075,7 @@ def fits(
     requires_nvlink: bool = False,
     required_engine_features: Optional[list[str]] = None,
     required_sm: Optional[float] = None,
+    supported_sm: Optional[list[float]] = None,
     project_vram: bool = True,
 ) -> FitsResult:
     start = time.monotonic()
@@ -1130,8 +1131,11 @@ def fits(
 
     min_sm = max(float(engine.min_sm), float(required_sm or engine.min_sm))
     low_sm = [hw for hw in hardware if hw.sm < min_sm]
+    unsupported_sm = [hw for hw in hardware if supported_sm is not None and hw.sm not in supported_sm]
     if low_sm:
         fail("C3", f"engine/compose requires sm >= {min_sm:g}; below floor: " + ", ".join(f"{hw.id}=sm_{hw.sm:g}" for hw in low_sm))
+    elif unsupported_sm:
+        fail("C3", f"compose supports only SM {supported_sm}; unsupported: " + ", ".join(f"{hw.id}=sm_{hw.sm:g}" for hw in unsupported_sm))
     else:
         ok("C3")
 
@@ -1366,6 +1370,7 @@ def from_compose_name(
         # replaces required_sm as the HARD floor when present — the C3 gate then
         # admits fallback-band hardware (sm_86 live-confirmed 2026-07-11).
         required_sm=entry.get("fallback_sm") or entry.get("required_sm"),
+        supported_sm=entry.get("supported_sm"),
         project_vram=project_vram,
     )
     result.compose_name = name

@@ -8,6 +8,13 @@ If you're adding a new compose that depends on an unmerged upstream patch (volum
 
 ---
 
+## FA2 FP8 KV on Ampere SM86
+
+| Dependency | Status | Local dependency / removal condition |
+|---|---|---|
+| [fa2-fp8kv-sm86, 0fa02cb](https://github.com/AntonProkopyev/fa2-fp8kv-sm86/tree/0fa02cbb760fbcc4a94ba1ee376e89825f8f43f4) | ⚫ Experimental external fork | `vllm/qwen38-27b-dual-ultramax` installs prebuilt kernels and a native `FLASH_ATTN` plugin offline. No FlashInfer backend substitution or serving-time CUDA build. SM86 GPU-tested; SM89/SM120 compiled but not GPU-validated. Stock native FlashAttention retained on SM90/SM100. The source repo contains the upstream FA2 submodule and a reproducible mapped diff. Artifact integrity, ABI and SM checks precede weights loading. Remove when stock vLLM provides a validated equivalent. DFlash quantized-KV and GDN patches remain separate dependencies tracked below. |
+
+
 ## How rows work
 
 Each row covers one upstream link with: **title • status • our dependency / impact • workaround (if any)**.
