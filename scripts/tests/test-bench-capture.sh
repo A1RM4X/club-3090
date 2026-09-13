@@ -960,6 +960,16 @@ for layer in 'layer 1  driver P2P grant :' 'layer 2  NCCL use         :' 'layer 
   command grep -qF "$layer" "$H" || fail "interconnect block is missing '$layer' — all THREE layers are the point"
 done
 # Layer 3 must degrade cleanly in host-mode / llama.cpp, per the issue's spec.
+# ⚠️ This assertion is only meaningful if the run actually reached the MULTI-GPU
+# branch. It previously passed while taking the single-card path: the fixture's
+# fake-nvidia-smi had no `-L` arm, so p2p_gpu_count saw 0 GPUs — and the OLD
+# p2p_gpu_count returned the two-line string "0\n0", making `[[ "0\n0" -lt 2 ]]`
+# a SHELL SYNTAX ERROR, so the single-card `if` went false and execution fell
+# through to the llama.cpp branch by accident (exposed by club-3090#1279).
+# Assert the precondition first, or a green here means nothing.
+if command grep -q 'single-card run' "$H"; then
+  fail "interconnect block took the SINGLE-CARD path — the custom-AR assertion below would pass vacuously. Check the fixture's nvidia-smi -L arm."
+fi
 command grep -qE 'layer 3  engine custom-AR : .*custom-AR n/a' "$H" \
   || { command grep -F 'layer 3' "$H" >&2; fail "a host-mode/llama.cpp run must read 'custom-AR n/a', never 'off' (there is no AR kernel to disable)"; }
 # ...and layers 1-2 must still report on that same run — degrading layer 3 must

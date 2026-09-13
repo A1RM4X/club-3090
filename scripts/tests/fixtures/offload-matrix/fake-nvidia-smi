@@ -1,7 +1,17 @@
 #!/usr/bin/env python3
 """Fake nvidia-smi for the offload-matrix tier-1 suite.
 
-Implements exactly the two invocations the sweep makes, and nothing else:
+Implements exactly the invocations our suites make, and nothing else:
+
+  nvidia-smi -L
+      -> one "GPU <n>: <name> (UUID: ...)" line per GPU. Added alongside the club-3090#1279 fix:
+         p2p_gpu_count() counts these, and WITHOUT this arm it returned 0 here,
+         which routed bench.sh's interconnect block down the single-card path.
+         test-bench-capture had been passing anyway, because the OLD
+         p2p_gpu_count returned the two-line string "0\n0" and `[[ "0\n0" -lt 2 ]]`
+         is a SHELL SYNTAX ERROR — the `if` went false and execution fell
+         through to the multi-GPU branch by accident. Fixing that bug (#1279)
+         exposed the missing arm.
 
   nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits
       -> one integer MiB per GPU, one per line
@@ -28,6 +38,12 @@ def vram_list():
     return (vals * NGPU)[:NGPU] if len(vals) < NGPU else vals[:NGPU]
 
 argv = sys.argv[1:]
+
+# --- device list form (`nvidia-smi -L`) ---
+if argv and argv[0] == "-L":
+    for i in range(NGPU):
+        print("GPU %d: NVIDIA GeForce RTX 3090 (UUID: GPU-fake%08d)" % (i, i))
+    raise SystemExit(0)
 
 # --- query-gpu form ---
 if any(a.startswith("--query-gpu") for a in argv):
