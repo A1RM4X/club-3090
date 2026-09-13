@@ -24,6 +24,17 @@
 #           earliest. Tests the stranding shape @jb-seo describes in disc #1178:
 #           "kv leaf evicted -> that session's mamba checkpoint goes useless ->
 #           remaining kv goes useless too".
+#   concurrent
+#           grow SESSIONS deep conversations INTERLEAVED, then COMPACT one and
+#           measure whether the others keep their prefix. This is the case the
+#           other two modes miss: depth is one session, breadth is many shallow
+#           ones, and both open reports turn on what a second long session does
+#           — and on what happens at a compaction, which is the moment a user
+#           named as their trigger.
+#           Turns go round-robin, never in parallel: only one request is ever in
+#           flight, so max_running_requests stays 1 and the ACTIVE pools are held
+#           constant while warm-prefix state accumulates. That is the variable
+#           under test; issuing in parallel would move both at once.
 #
 # READING THE OUTPUT
 #   depth   cached should track prompt_tok minus the newest turn. TTFT should
@@ -60,16 +71,19 @@
 # Usage:
 #   URL=http://localhost:8143 MODEL=qwen3.8-27b bash scripts/deep-context-probe.sh
 #   MODE=breadth SESSIONS=12 SESSION_CTX=28000 KV_POOL=279595 bash scripts/deep-context-probe.sh
+#   MODE=concurrent SESSIONS=2 TARGET_CTX=100000 bash scripts/deep-context-probe.sh
 #
 # Env:
 #   URL           endpoint base (default: registry default port for qwen3.6-27b)
 #   MODEL         served model name (required — no default; a wrong one 404s)
-#   MODE          depth | breadth            (default: depth)
+#   MODE          depth | breadth | concurrent  (default: depth)
 #   TARGET_CTX    depth: accumulated prompt tokens to reach (default: 140000)
 #   TURN_TOKENS   depth: approx tokens appended per turn   (default: 4000)
 #   SESSIONS      breadth: how many distinct conversations (default: 12)
 #   SESSION_CTX   breadth: tokens per conversation         (default: 28000)
 #   KV_POOL       breadth: engine KV pool, for the over-capacity report
+#   SESSIONS      concurrent: how many deep sessions        (default: 2)
+#   TARGET_CTX    concurrent: tokens per session
 set -uo pipefail
 export PYTHONUTF8="${PYTHONUTF8:-1}"
 ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -79,7 +93,16 @@ MODEL="${MODEL:-}"
 MODE="${MODE:-depth}"
 TARGET_CTX="${TARGET_CTX:-140000}"
 TURN_TOKENS="${TURN_TOKENS:-4000}"
-SESSIONS="${SESSIONS:-12}"
+# 12 is the breadth default (many shallow sessions). In concurrent mode each
+# session is DEEP, so 12 would be over a million tokens against a ~280K pool —
+# the run would thrash before it measured anything. Default to the smallest
+# number that can answer the question: does a SECOND long session disturb the
+# first, and does compacting one disturb the other.
+if [[ "$MODE" == "concurrent" ]]; then
+  SESSIONS="${SESSIONS:-2}"
+else
+  SESSIONS="${SESSIONS:-12}"
+fi
 SESSION_CTX="${SESSION_CTX:-28000}"
 KV_POOL="${KV_POOL:-0}"
 
@@ -87,7 +110,7 @@ if [[ -z "$MODEL" ]]; then
   echo "MODEL is required (the served name). A wrong one returns HTTP 404 and reads as a dead server." >&2
   exit 2
 fi
-case "$MODE" in depth|breadth) ;; *) echo "MODE must be depth|breadth (got '$MODE')" >&2; exit 2 ;; esac
+case "$MODE" in depth|breadth|concurrent) ;; *) echo "MODE must be depth|breadth|concurrent (got '$MODE')" >&2; exit 2 ;; esac
 curl -sf -m 10 "${URL}/v1/models" >/dev/null 2>&1 || {
   echo "no server at ${URL} — check the port. ⚠️ 12 composes ignore ESTATE_PORT (#1293), so the" >&2
   echo "container may be bound to its default rather than the port you asked for; run 'docker port <c>'." >&2

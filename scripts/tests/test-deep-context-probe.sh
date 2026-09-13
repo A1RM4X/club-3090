@@ -336,6 +336,35 @@ command grep -q 'does NOT mean there is no' <<<"$out" \
 command grep -qc 'HEALTHY reuse' <<<"$out" || bad "breadth re-query verdicts rendered" "HEALTHY reuse rows" "absent: $out"
 ok "a sub-pool breadth run does not claim 'no eviction pressure', and still classifies re-queries"
 
+# --- contract 8: concurrent mode runs, interleaves, compacts, and reports what
+# the compaction did to the OTHER session. This is the case depth and breadth
+# both miss, and the phase labels are the contract — each claim it makes has to
+# be attributable to a phase, or a reader cannot tell a compaction effect from
+# ordinary growth.
+run_fake usage concurrent SESSIONS=2 TARGET_CTX=1500 TURN_TOKENS=500
+[[ $rc -eq 0 ]] || bad "concurrent run exits 0" "0" "$rc: $(tail -3 <<<"$out")"
+for phase in grow baseline "COMPACT A" after-compact "A regrow" after-regrow; do
+  command grep -q "$phase" <<<"$out" || bad "concurrent reports the '$phase' phase" "$phase rows" "absent: $out"
+done
+# both sessions must actually appear, or "concurrent" is a single-session run
+command grep -qE '^ +grow +A ' <<<"$out" || bad "session A grows" "an A row" "absent"
+command grep -qE '^ +grow +B ' <<<"$out" || bad "session B grows" "a B row" "absent"
+# and the verdict on the neighbour must be stated either way, never left implied
+command grep -qE 'kept its prefix across|LOST REUSE after|reuse unobservable' <<<"$out" \
+  || bad "states what the compaction did to the other session" "an explicit survived/lost/unobservable line" "absent: $out"
+ok "concurrent mode interleaves two sessions, compacts one, and states the effect on the other"
+
+# --- contract 8b: the neighbour verdict must not claim survival when reuse is
+# UNOBSERVABLE. Same absence-vs-zero discipline as the rest of the probe: on a
+# server that does not report cached tokens, "kept its prefix" would be a guess.
+run_fake none concurrent SESSIONS=2 TARGET_CTX=1500 TURN_TOKENS=500
+[[ $rc -eq 0 ]] || bad "concurrent run (no cache reporting) exits 0" "0" "$rc: $(tail -3 <<<"$out")"
+command grep -q 'reuse unobservable' <<<"$out" \
+  || bad "unobservable reuse is reported as such" "'reuse unobservable'" "absent: $out"
+command grep -q 'kept its prefix across' <<<"$out" \
+  && bad "must not claim survival without evidence" "no survival claim" "claimed it anyway"
+ok "with reuse unobservable, the neighbour verdict says so instead of claiming survival"
+
 # --- contract 7b (the negative control #1299 asks for): with reuse absent and a
 # cold-cost TTFT, a run that CANNOT establish pressure must report the
 # observation without naming a cause. The fake reports cached=0 via a pool it

@@ -665,6 +665,123 @@ def run_breadth():
               f"{verdict(m, cold['ttft'], pressure_known)}",
               flush=True)
 
+def compact_summary(sess_name, turns):
+    """What a client sends after compacting: a short digest replacing the history.
+
+    Modelled on what compaction actually does — the long conversation is thrown
+    away and replaced by a summary, then work continues in the SAME session. The
+    old prefix is not freed; it simply stops being referenced and waits to be
+    evicted. That is the state we want to observe from the OTHER session."""
+    return (f"Summary of {sess_name} so far: {turns} turns of a regional logistics "
+            f"audit were reviewed. Findings were routine, utilisation stable, no "
+            f"escalations. Continue from this summary.")
+
+def run_concurrent():
+    """Two deep sessions alive at once, then compact one and watch the other.
+
+    This is the case neither existing mode covers. `depth` is one session;
+    `breadth` is many shallow ones. The question both open reports turn on is
+    what happens when a second long session exists, and what a COMPACTION in one
+    does to the other.
+
+    ⭐ Turns are interleaved round-robin rather than issued in parallel, and that
+    is deliberate. Only one request is ever in flight, so `max_running_requests`
+    stays 1 and the ACTIVE side of the pools is held constant. What accumulates
+    is warm-prefix state — which is the thing under test. Issuing them in
+    parallel would change both variables at once and confound exactly the
+    measurement we came for.
+
+    Prediction being tested (from a measured single-session run): one 141K
+    conversation consumed 49 of 55 mamba state slots, growing ~2 per turn because
+    each turn is a new distinct prefix. If slots scale with turn count rather than
+    session count, two deep sessions cannot both be resident, and the second
+    should force the first out well before the KV pool is exhausted."""
+    reuse_selftest()
+    p = pool_view()
+    print(f"  CONCURRENT — {SESSIONS} sessions interleaved to ~{TARGET_CTX:,} tok each "
+          f"(~{SESSIONS * TARGET_CTX:,} total), then one compacts")
+    if p and p.get("mamba_total"):
+        print(f"  mamba pool: {int(p['mamba_total'])} state slots. A single deep session was "
+              f"measured consuming 49 of 55 — slots scale with TURN COUNT, not session count.")
+    if p and p.get("kv_total"):
+        print(f"  kv pool: {int(p['kv_total']):,} tok nominal. ⚠️ eviction has been measured at "
+              f"~66% of nominal, so the nominal figure is a planning number only (#1299).")
+    print(f"  {'phase':>16} {'sess':>5} {'turn':>5} {'prompt_tok':>11} {'cached':>9} {'ttft_s':>8} "
+          f"{'decode':>8} {'accept':>7}{'  pools' if p else ''}")
+
+    sessions = [[] for _ in range(SESSIONS)]
+    turns = [0] * SESSIONS
+
+    def step(i, phase, ask=None, reset=None):
+        """One turn on session i. `reset` replaces the history (a compaction)."""
+        if reset is not None:
+            sessions[i] = [{"role": "user", "content": reset}]
+        else:
+            turns[i] += 1
+            sessions[i].append({"role": "user", "content": chunk(TURN_TOKENS, (i + 1) * 1000 + turns[i])
+                                + (ask or f"\n\nTurn {turns[i]}: count from one to twenty in words, comma separated.")})
+        try:
+            m = measure(sessions[i], max_tokens=DEPTH_MAX_TOK)
+        except Exception as e:
+            print(f"  {phase:>16} {chr(65+i):>5} — ERROR {http_error_text(e)}"); return None
+        sessions[i].append({"role": "assistant", "content": CANNED_REPLY})
+        flags = ""
+        if m.get("preempt"):
+            flags += f"   <- {m['preempt']} preemption(s)"
+        print(f"  {phase:>16} {chr(65+i):>5} {turns[i]:>5} {m['ptok']:>11,} {fmt_cached(m):>9} "
+              f"{fmt_ttft(m):>8} {fmt_dtps(m):>8} {(m.get('accept') or 'n/a'):>7}"
+              f"{pool_cols(pool_view())}{flags}", flush=True)
+        return m
+
+    # --- phase 1: grow every session, round robin -------------------------
+    while True:
+        last = [step(i, "grow") for i in range(SESSIONS)]
+        if any(m is None for m in last):
+            return
+        if all(m["ptok"] >= TARGET_CTX for m in last) or max(turns) > 200:
+            break
+
+    # --- phase 2: baseline reuse, every session, before anything compacts --
+    base = {}
+    for i in range(SESSIONS):
+        m = step(i, "baseline")
+        if m is None: return
+        base[i] = cached_of(m)[0]
+
+    # --- phase 3: session A compacts. Its own cost is informative, but the
+    #     question is what it does to the OTHERS. -------------------------
+    m = step(0, "COMPACT A", reset=compact_summary("session A", turns[0]))
+    if m is None: return
+
+    # --- phase 4: the others, immediately. Did A's compaction cost them? ---
+    for i in range(1, SESSIONS):
+        m = step(i, "after-compact")
+        if m is None: return
+        now, was = cached_of(m)[0], base.get(i)
+        if now is None or was is None:
+            print(f"     session {chr(65+i)}: reuse unobservable — cannot say whether the compaction "
+                  f"cost it anything (see the self-test above)")
+        elif was > 0 and now < was * 0.5:
+            print(f"     ⚠️ session {chr(65+i)} LOST REUSE after A compacted: {was:,} -> {now:,} cached tok")
+        else:
+            print(f"     session {chr(65+i)} kept its prefix across A's compaction "
+                  f"({was:,} -> {now:,} cached tok)")
+
+    # --- phase 5: A regrows. The compaction itself is cheap; the expensive
+    #     part is rebuilding, and THAT is what can evict a neighbour. ------
+    for _ in range(3):
+        if step(0, "A regrow") is None: return
+    for i in range(1, SESSIONS):
+        m = step(i, "after-regrow")
+        if m is None: return
+        now, was = cached_of(m)[0], base.get(i)
+        if now is None or was is None:
+            print(f"     session {chr(65+i)}: reuse unobservable")
+        elif was > 0 and now < was * 0.5:
+            print(f"     ⚠️ session {chr(65+i)} LOST REUSE while A rebuilt: {was:,} -> {now:,} cached tok")
+        else:
+            print(f"     session {chr(65+i)} survived A's rebuild ({was:,} -> {now:,} cached tok)")
+
 detect_reuse_counter()
 detect_spec_counters()
-run_depth() if MODE == "depth" else run_breadth()
+{"depth": run_depth, "breadth": run_breadth, "concurrent": run_concurrent}[MODE]()
