@@ -246,6 +246,24 @@ command grep -q 'count from one to twenty in words' "$P" \
   || bad "depth ask fits the cap" "an ask that completes inside DEPTH_MAX_TOK" "still asking for more than fits"
 ok "the depth ask completes inside the token cap (no truncation by construction)"
 
+# --- contract 6h: the depth history must be a FIXED assistant turn, never the
+# model's own reply. Feeding replies back makes the conversation a feedback loop
+# -- any downward drift is read as the house style and reinforced. Measured
+# twice on a live server: 48 -> 4 tokens with an over-cap ask, and still 40 -> 2
+# by 98K after that was fixed, both taking the decode column to n/a across the
+# exact range this probe exists to measure. Controls on the same boot: single
+# turn held 48/48 at 190,670 tokens, fixed-history multi-turn showed no trend to
+# 144,521. Only the fed-back arm collapsed.
+python3 - "$P" <<'PYEOF' || bad "depth history is a fixed turn" "append CANNED_REPLY, not m['text']" "the model's own reply is fed back"
+import re, sys
+src = open(sys.argv[1], encoding="utf-8").read()
+body = src[src.index("def run_depth"):]
+body = body[:body.index("\ndef ")] if "\ndef " in body else body
+appends = re.findall(r'msgs\.append\(\{"role": "assistant".*', body)
+sys.exit(0 if appends and all("CANNED_REPLY" in a for a in appends) else 1)
+PYEOF
+ok "the depth history is a fixed assistant turn, so replies cannot feed back on themselves"
+
 # --- contract 6d: the LAST basis is reachable. One chunk carrying the whole
 # reply is a real speculative-decoding shape (one DFlash chunk carried 8 tokens),
 # and it leaves no content window at all — only the wall basis can measure it.

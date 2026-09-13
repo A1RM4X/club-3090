@@ -11,6 +11,11 @@ TARGET_CTX, TURN_TOKENS = int(sys.argv[4]), int(sys.argv[5])
 # Depth reply cap. Big enough that the decode window clears the floor even at
 # DFlash speeds; a reply shorter than this is flagged, not silently averaged.
 DEPTH_MAX_TOK = 48
+# ⭐ The assistant turn written into the history is FIXED, never the model's own
+# reply. See run_depth() for why; in short, feeding real replies back turns the
+# conversation into a feedback loop that destroys the decode window.
+CANNED_REPLY = ("one, two, three, four, five, six, seven, eight, nine, ten, eleven, twelve, "
+                "thirteen, fourteen, fifteen, sixteen, seventeen, eighteen, nineteen, twenty")
 SESSIONS, SESSION_CTX, KV_POOL = int(sys.argv[6]), int(sys.argv[7]), int(sys.argv[8])
 BASE = URL.rstrip("/")
 
@@ -401,7 +406,26 @@ def run_depth():
             print(f"  turn {turn}: ERROR {http_error_text(e)}"); return
         ptok = m["ptok"]
         if base_ctok is None and m["ctok"]: base_ctok = m["ctok"]
-        msgs.append({"role": "assistant", "content": m["text"] or "OK"})
+        # ⭐ Append a FIXED assistant turn, NOT the model's own reply.
+        #
+        # Feeding real replies back makes the conversation a feedback loop: any
+        # downward drift in reply length is read by the next turn as the house
+        # style and reinforced. Measured here twice. With an ask that overran the
+        # cap, replies went 48 -> 4 and stuck. With an ask that completes inside
+        # it, they still went 40 -> 2 by 98K. Both took the decode column to n/a
+        # over exactly the depth range this probe exists to measure.
+        #
+        # Two same-boot controls separate cause from coincidence: a single-turn
+        # probe held 48/48 at 190,670 tokens, so DEPTH does not do this; and a
+        # multi-turn probe with a fixed history showed no trend to 144,521, so
+        # ACCUMULATION does not either. Only the fed-back arm collapsed.
+        #
+        # The real reply is still measured, and its drift is still flagged below
+        # — it simply does not get to set the stimulus for the next turn. That
+        # keeps the decode window comparable across depths, which is the whole
+        # point of the column. Drift itself is a model-behaviour finding and
+        # belongs in the flags, not silently inside the thing being measured.
+        msgs.append({"role": "assistant", "content": CANNED_REPLY})
         flags = ""
         if m["ttft"] is None:
             flags += "   <- NO CHOICES CHUNK (empty stream)"
