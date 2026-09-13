@@ -157,6 +157,10 @@ All five are actively developed. ktransformers is positioned as research but pro
 | **Chunked prefill** | ✅ default | ⚠️ via parallel slots | ✅ | ✅ + Layerwise Prefill | ⚠️ via parallel slots |
 | **Continuous batching** | ✅ | ✅ via parallel slots | ✅ | ✅ via SGLang | ✅ via parallel slots |
 
+**Client-visible cache reporting is opt-in on both engines, and asymmetric.** `usage.prompt_tokens_details.cached_tokens` — how much of the prompt the prefix cache served — is emitted only when vLLM gets `--enable-prompt-tokens-details` or SGLang gets `--enable-cache-report`. Both default the flag **off**, so an unflagged server reports `prompt_tokens_details: null` however well its prefix cache is working, and `null` is indistinguishable from "nothing was reused". Our composes pass both flags ([#1246](https://github.com/noonghunna/club-3090/issues/1246), [#1297](https://github.com/noonghunna/club-3090/issues/1297)).
+
+⚠️ **On SGLang, absent is NOT zero.** Even with the flag on, SGLang **omits** `cached_tokens` when the value is genuinely 0; vLLM sends `cached_tokens: 0` explicitly. A client that treats a missing field as "nothing was reused" cannot tell no-reuse from reporting-off — read absent as **unknown**, and only a present value as a measurement.
+
 ---
 
 ## Multimodal
