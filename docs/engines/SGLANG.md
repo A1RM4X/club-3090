@@ -1,4 +1,191 @@
-# SGLang — Qwen3-Next EAGLE-3 path PARKED; no shipped variant on this stack
+# SGLang on this stack
+
+**Current state (2026-09-14): SGLang IS shipped** — 13 composes for Qwen3.8-27B across
+dual/multi4/multi8, 11 registered `sgl/` slugs, all `🧪 experimental`. Stock
+`lmsysorg/sglang:v0.5.19`, no engine patches (the W4A8 overlay is opt-in and off by default).
+
+⚠️ This page was previously titled *"EAGLE-3 path PARKED; no shipped variant on this stack"* and
+described the 2026-05 Qwen3.6-27B investigation. That is now [archived below](#archive--the-2026-05-qwen3627b-eagle-3-investigation-superseded).
+
+## TL;DR
+
+| What | State |
+|---|---|
+| Shipped composes | 13 (Qwen3.8-27B), 11 registered slugs, all experimental |
+| Engine | stock `v0.5.19`, no patches required |
+| Tiers | `fast` (MTP n=4) · `superfast` (DFlash2) · `max`/`supermax` (fp8 weights) |
+| cuda-graph on Ampere | ✅ **works** — captures decode to bs=24 (the 2026-05 hang is gone) |
+| Concurrency | `--max-running-requests 1` shipped; the engine clamps to `K // r` regardless |
+| HiCache | ⛔ **broken for hybrid GDN** — upstream #33713, do not enable |
+| W4A8 | opt-in, vendored (#1226/#1248), off by default |
+
+---
+
+## ⭐ The GDN state pool — the thing that actually governs this engine
+
+On a hybrid GDN model (Qwen3.8, Qwen3.6-35B-A3B …) SGLang keeps **two** device pools: the KV cache
+and a **mamba/GDN state pool**. The state pool, not KV, is usually what binds.
+
+⛔ **The old mental model on this page was wrong.** It said the pool is sized as
+`n_mamba_layers × max_running_requests × per-layer-state-size` and recommended
+`--max-mamba-cache-size 8`. Both are wrong: the pool is **auto-fit by a solver**, its size does
+**not** depend on `max_running_requests`, and a hardcoded slot count is meaningless across tiers —
+the five dual composes measured **55 / 34 / 33 / 21 / 8** on the same rig.
+
+### Read your own boot line
+
+```
+Mamba Cache is allocated. max_mamba_cache_size: N
+```
+
+Everything below is computed from that `N` (call it `K`). ⚠️ It differs per weight tier, per
+drafter tier and per topology. Do not carry a number between composes — that mistake shipped a
+wrong constant to five files (club-3090#1319).
+
+### Slots consumed per running request
+
+```
+usable working slots = K − k × max_running_requests
+```
+
+`k` is set by `--mamba-radix-cache-strategy` (`mem_cache/common.py:26-29`):
+
+| strategy | `k` (slots/request) |
+|---|--:|
+| `extra_buffer` (default) | 3 |
+| `extra_buffer_lazy` | 2 |
+| `no_buffer` | 1 |
+
+⚠️ **There is no `−1` for a sink slot.** `MambaSlotAllocator.clear()` builds `arange(1, K+1)` with
+slot 0 reserved separately, so `K` is already net of it.
+
+### ⭐ The concurrency clamp uses a DIFFERENT ratio
+
+`_calculate_mamba_ratio()` returns **r = 5** (`extra_buffer` + overlap), **4** (lazy), **3**
+(`no_buffer`), and `resolve_max_num_reqs()` caps concurrency at **`K // r`**. This is not `k`.
+
+| K | 55 | 34 | 33 | 21 | 8 |
+|---|--:|--:|--:|--:|--:|
+| effective cap at r=5 | 11 | 6 | **6** | 4 | **1** |
+
+Measured clamps match exactly: a request for 8 resolved to 8 on K=55 and to **6** on K=33.
+⚠️ A pool of K=8 can run **one** request whatever you configure.
+
+⚠️ **`server_args=` echoes the REQUEST, not the effective value.** The line that carries what took
+effect is:
+
+```
+max_total_num_tokens=… chunked_prefill_size=… max_running_requests=N … context_len=…
+```
+
+Or read `/server_info` → `internal_states[0].effective_max_running_requests_per_dp` (the
+**top-level** `max_mamba_cache_size` field reads `null`).
+
+### ⚠️ `extra_buffer_lazy` is not a free saving
+
+The auto-fit solve is `K = floor((B − p(1+D)) / (p(1+D/r)))` and uses **r**, so moving 5→4 raises
+the denominator and can *shrink* K. Lower per-request cost, smaller pool. Measure both together.
+
+### What concurrency actually costs
+
+The slot count is invariant to `max_running_requests` (verified 1 vs 8 on two tiers). What
+concurrency spends is **KV tokens** — roughly −20% going C=1→8 — because the intermediate state
+caches grow with it.
+
+---
+
+## ⛔ HiCache — do not enable on hybrid GDN
+
+`--enable-hierarchical-cache` allocates host pools, backs up to them, retains them, and **never
+serves a host hit**. Measured twice on 2026-09-14: backup succeeded for both `pool="kv"` and
+`pool="mamba"`, `hicache_dropped_tokens_total = 0`, 37% of the host pool free — and yet
+`load_back_tokens_total = 0` for both pools, with `cached_tokens_total{cache_source="host"}` never
+even instantiated.
+
+Root cause: **[sgl-project/sglang#33713](https://github.com/sgl-project/sglang/issues/33713)**
+(open). On device eviction `_evict_host_leaf` consults only the FULL component's `host_value`, so a
+node whose MAMBA component already committed to host is pruned from the radix tree wholesale
+instead of downgraded — the host bytes are orphaned.
+
+⚠️ **No workaround on this pin.** The `hi_mamba_radix_cache` path the issue calls unaffected does
+not exist in v0.5.19, and `--radix-cache-backend` resolves only externally registered plugins.
+Enabling it costs `HICACHE_GB × TP` of host RAM (the flag is **per rank**) for nothing.
+
+**Re-test trigger:** #33713 merges, or the engine pin moves.
+
+---
+
+## ⛔ `--enable-mixed-chunk` corrupts checkpoints on hybrid GDN
+
+**[sgl#39342](https://github.com/sgl-project/sglang/issues/39342)** (open). With
+`extra_buffer`/`extra_buffer_lazy` on a hybrid GDN model, `merge_batch` drops
+`mamba_track_indices`, the checkpoint write is skipped, and the finished request donates an
+**unwritten** slot to the radix cache — later requests restore stale SSM state. Exact match
+0.91 → 0.84-0.86; p50 latency 200 ms → 3-7 s.
+
+⚠️⚠️ **It fires only when prefill co-batches with decode**, so it passes verify-full, verify-stress,
+soak (single-stream by design) and any c=1 bench. Our entire operational gate is blind to it. We
+ship the flag nowhere; do not add it.
+
+---
+
+## Tuning levers + Ampere gotchas
+
+### KV cache dtype
+`fp8_e4m3` is the shipped default and halves bytes/token vs bf16. Sub-8-bit KV is not available on
+this engine.
+
+### ✅ cuda-graph on Ampere — the 2026-05 hang is GONE
+The archived section below says capture hangs and mandates `--disable-cuda-graph`. On v0.5.19 the
+shipped composes run `cuda graph: True` and capture decode graphs for bs `[1..24]`. Do not carry
+that advice forward.
+
+### `--speculative-draft-model-quantization unquant`
+Still correct: a BF16 external drafter otherwise inherits the target's `--quantization auto-round`
+and fails to load. Mandatory for BF16-drafter + quantized-target.
+
+### `--mamba-ssm-dtype bfloat16`
+Shipped default. Halves per-slot state bytes, which **buys slots** (measured 26 → 55 on one tier).
+A,B,A,B repeat-boot found ~+8% code decode; prefill ~−1%.
+
+### Prefix-cache policy (opt-in, off by default)
+`SESSION_RADIX_CACHE=1` sets `SGLANG_ENABLE_UNIFIED_RADIX_TREE=1` **and**
+`--enable-session-radix-cache` together (upstream requires both; one alone is inert). It is also
+inert unless clients send a `session_id` — no OpenAI-compatible client does by default.
+`RADIX_EVICTION_POLICY` accepts `lru` (default) / `lfu` / `slru` / `priority`.
+⛔ `--radix-eviction-policy-config` is documented upstream but **does not exist in v0.5.19** —
+passing it hard-fails the boot.
+
+---
+
+## ⚠️ Measurement traps on this engine
+
+These each produced a wrong number for us; they are cheap to avoid and expensive to discover.
+
+| trap | consequence |
+|---|---|
+| `cache_type`-labelled counters are emitted **per TP rank with identical labels** and summed by the multiprocess collector | `hicache_backup_tokens_total`, `load_back_tokens_total`, `evicted_tokens_total`, `hicache_dropped_tokens_total` read at **tp_size × truth**. The `_bytes_total` counters are genuinely additive. |
+| `cached_tokens_total` carries `cache_source=device\|host\|storage` | aggregating without that label collapses the device-vs-host split |
+| the device/host split is **not** in `usage` | it needs `return_cached_tokens_details: true` and arrives in a separate `sglext` chunk with `choices: []`, before the usage chunk |
+| `usage.prompt_tokens_details` is `null` at 0 | with `--enable-cache-report` on, null means **zero-known**, not unknown |
+| reusable prefixes clamp to a **128-token grid** | a prompt shorter than the grid can never insert or hit |
+| `/tokenize` returns nothing on this build, and raw-body counts miss the chat template (~10K on a 32K prompt) | size any cache-pressure trace from `usage.prompt_tokens` measured on the wire |
+| `evicted_tokens_total` counts **full-KV only** | mamba evictions are invisible in it |
+| `mamba_*_tokens` gauges are **state slots**, not tokens | the name lies |
+| `mamba_used` **excludes** evictable entries | `K = used + available + evictable` |
+
+Detail and dates: [`learnings/sglang-engine.md`](../../../learnings/sglang-engine.md) 2026-09-14.
+
+---
+
+## Archive — the 2026-05 Qwen3.6-27B EAGLE-3 investigation (SUPERSEDED)
+
+⚠️ Everything below is the **2026-05-21** state and describes a different model
+(Qwen3.6-27B) and a different goal (EAGLE-3 external drafters). It is kept for its
+re-test triggers and patch mechanics. Its headline — *"no shipped variant on this
+stack"* — has been false since 2026-09-11.
+
+### (archived) SGLang — Qwen3-Next EAGLE-3 path PARKED
 
 SGLang is a strong alternative to vLLM for high-throughput multi-tenant serving — RadixAttention prefix sharing, structured-output-aware scheduling. We investigated it as a way to unlock **EAGLE-3 external-drafter spec-decode** for Qwen3-Next family (which vLLM doesn't support — blocked by DeltaNet KV rollback). The path reached boot + coherent output on dual 3090 with two vendored patches.
 
