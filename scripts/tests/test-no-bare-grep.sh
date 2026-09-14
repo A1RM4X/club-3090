@@ -40,6 +40,38 @@ if [[ "$planted" != "1" ]]; then
 fi
 echo "  ✓ scanner detects a planted violation and ignores printed advice"
 
+# --- the scanner must not fire on text that CANNOT execute -------------------
+# Its stated scope is "EXECUTED greps only" and its failure message asserts "A
+# hit here IS in code", so a hit on a comment is a false positive that actively
+# misleads. It fired on a contributor's explanatory comment reading
+# "(grep -m1 = first match)" — the `(` put the word in apparent command
+# position. ${VAR#prefix} and $# must keep working: their `#` follows a
+# non-space character and is not a comment.
+cat > "$probe/scripts/edge.sh" <<'EOS'
+# entirely (grep -m1 = first match). ENGINE_FAMILY is a global
+  # (grep something) indented comment
+foo | command grep x   # grep advice here
+v=${NAME#grep }
+echo "see: ps | grep thing"
+EOS
+edge="$(python3 "$SCAN" "$probe" | command grep -c 'edge.sh' || true)"
+if [[ "$edge" -ne 0 ]]; then
+  echo "FAIL: negative control — scanner fired on non-executable text ($edge hits):" >&2
+  python3 "$SCAN" "$probe" | command grep 'edge.sh' >&2
+  exit 1
+fi
+echo "  ✓ comments, trailing comments and \${VAR#prefix} do not register as executed greps"
+
+# --- and it must STILL catch a real one on the same pass ----------------------
+# Without this, the check above could pass because the scanner stopped working.
+printf '%s\n' 'ps | grep thing' > "$probe/scripts/realviolation.sh"
+real="$(python3 "$SCAN" "$probe" | command grep -c 'realviolation.sh' || true)"
+if [[ "$real" -ne 1 ]]; then
+  echo "FAIL: positive control — scanner should still find the real violation, found $real" >&2
+  exit 1
+fi
+echo "  ✓ a real executed grep is still caught alongside them"
+
 # --- the actual assertion
 out="$(python3 "$SCAN" "$ROOT" | command grep '[^[:space:]]' || true)"
 if [[ -n "$out" ]]; then
