@@ -1,7 +1,8 @@
 # ===========================================================================
 # Profile (at-a-glance):
 #   Model:     Qwen3.8-27B (Frozenlock AutoRound INT4 — 4-bit, group 128, sym;
-#              ~18 GiB. Served W4A16 here: 16-bit activations, W4A8=0 default.
+#              ~18 GiB. Served W4A8 here (int8 activations, W4A8=0 for W4A16) —
+#              +46% prefill; measured table below.
 #              lm_head is bf16, which the DFlash2 drafter requires — it ships no
 #              embeddings/lm_head and shares the target's.)
 #   Topology:  Dual 3090 PCIe (TP=2, no NVLink; NVLINK_MODE=auto detects)
@@ -56,8 +57,41 @@
 # ⚠️ GPU_MEMORY_UTILIZATION 0.90 is deliberate — higher shrinks the transient
 #   prefill-peak slack a long-context config needs most; do NOT raise it to squeeze
 #   more KV (makes prefill OOM MORE likely).
-# ⚠️ W4A8 is OFF here (W4A16). The FA2 numbers above are W4A16; W4A8=1 re-enables
-#   int8 activations, UNVALIDATED with the DFlash2 drafter on FA2.
+# ⭐ W4A8 vs W4A16 — MEASURED on the reference 2x3090, 2026-09-14. ONE boot per
+# arm, MAX_MODEL_LEN pinned to 204800 on both (the shipped default is 262144) so
+# the activation dtype is the only variable. Everything else is this file's
+# shipped config: fp8_e4m3 KV, FLASH_ATTN + the #1274 FA2 plugin, DFlash2 n=7.
+# bench.sh 3 warm + 5 measured for decode; 3 runs @10K and 1 @90K for prefill.
+#
+#                         W4A8=1    W4A16     delta    CV (A / B)
+#   prefill @10K  n=3     1862.9    1276.3    +46.0%   0.1% / 0.0%
+#   prefill @90K  n=1     1441.3    1051.1    +37.1%     n=1
+#   decode narrative n=5   117.9     125.4     -6.0%   4.1% / 4.3%
+#   decode code      n=5   226.9     226.2     +0.3%   5.3% / 6.5%
+#
+# ⭐ W4A8 SHIPS ON as of 2026-09-14 (maintainer decision on the run above). Both
+# prefill arms held CV <=0.1% and +46% / +37% dwarf the ~2.8% boot-to-boot spread,
+# so the prefill gain is real, and it costs nothing on code decode (+0.3%) — which
+# is what this tier is for. The gain narrows with depth (+46% @10K -> +37% @90K)
+# but stays large. Set W4A8=0 for the old W4A16 path.
+#
+# ⚠️ The DECODE deltas are NOT boot-confirmed — one boot per arm, and boot-to-boot
+# spread on this rig is ~2.8%. Read code (+0.3%) as "no change" and narrative
+# (-6.0%) as "indicative, possibly real": it is only ~2x the boot noise off a
+# single boot. The default was flipped ON knowing this — if you serve mostly long
+# NARRATIVE generation rather than code, W4A8=0 is the arm to try.
+#
+# ⭐ W4A8 does NOT harm the DFlash2 drafter, which is what the old "unvalidated
+# with this drafter on FA2" caveat feared. Decode-window acceptance was 6.37/6.33
+# (W4A8) and 6.65/6.40 (W4A16) against n=7, at 76-81% per-position. Each arm also
+# logs one `Mean acceptance length: 2.00` window — identical in both (Accepted: 1,
+# Drafted: 7, ~0.01 tok/s), i.e. a single draft step in an otherwise idle 60s
+# window during the 60-80s 90K prefill. That is an idle-window artifact of the
+# metric, not a drafter problem, and it is not arm-specific.
+#
+# ⚠️ These are vLLM numbers on THIS tier. The SGLang composes carry their own W4A8
+# figures from club-3090#1226/#1248 — a different engine; do not cross-quote.
+#
 # ⚠️ Spec-decode is exposed to OPEN vllm#50021 (GDN spec wild write) in principle,
 #   but the collapse soak was crash-free to 21k gen. Treat that as "not observed",
 #   not "immune"; SPEC_N=0 is the mitigation. docs/UPSTREAM.md.
@@ -173,7 +207,9 @@ services:
       - OMP_NUM_THREADS=1
       - PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}
       # ⭐ W4A8 (int8 activations) SHIPS ON — set W4A8=0 for the W4A16 path.
-      - W4A8=${W4A8:-0}
+      # ~+46% prefill @10K / ~+37% @90K at +0.3% code decode (measured table in
+      # the header). Matches the fast and superfast tiers, which also ship W4A8=1.
+      - W4A8=${W4A8:-1}
       # ⚠️⚠️ WHY A SEPARATE BOOLEAN INSTEAD OF `${VLLM_MARLIN_INPUT_DTYPE:-int8}`:
       # vLLM VALIDATES this variable against a closed set and raises on anything
       # else — INCLUDING THE EMPTY STRING:
