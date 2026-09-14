@@ -28,6 +28,15 @@
 #                       Use this if you're serving via llama.cpp/ik_llama rather than vLLM.
 #   SKIP_MODEL          Set to 1 to skip the model download step
 #   HF_TOKEN            HF token (public models, usually unnecessary)
+#   WITH_ASSISTANT_DRAFT  Set to 1 to ALSO download the model's MTP "assistant"
+#                       drafter when its profile registers one (setup:
+#                       assistant_draft). Default: 0 — EXCEPT where the profile
+#                       marks the drafter always_draft, in which case it is
+#                       fetched unconditionally and this flag is redundant.
+#                       ⚠️ vllm/gemma-26ba4b-single REQUIRES it: the slug
+#                       defaults to SPEC_N=4, so without the drafter on disk
+#                       vLLM aborts on a missing config.json. Either set this
+#                       flag, or boot the slug drafter-less with SPEC_N=0.
 #   WITH_DFLASH_DRAFT   Set to 1 to ALSO download the model family's DFlash
 #                       drafter when one is registered in profiles/models/*.yml.
 #                       Default: 0.
@@ -40,6 +49,15 @@
 #                       the llamacpp/qwen38-27b-single-iq4xs slug, which ships
 #                       q4/262K/vision). Default: 0. c3's Download pulls it via the
 #                       slug's weights_companions regardless.
+#   WITH_PRISM_EAGLE3   Set to 1 to ALSO download the Prism EAGLE3 drafter when
+#                       the model registers one (setup: prism_eagle3).
+#                       Default: 0.
+#   HF_DOWNLOAD_RETRIES Attempts per repo download before giving up. Default: 4.
+#                       A transfer is resumable, so a retry costs only the
+#                       reconnect; raise it on a flaky link.
+#   HF_DOWNLOAD_RETRY_SLEEP
+#                       Seconds before the first retry, doubling up to 120.
+#                       Default: 8.
 #   PREFLIGHT_DISK_GB   Required free space at MODEL_DIR. Default: derived from
 #                       the size_gb of every key this run would actually fetch
 #                       (already-present weights cost nothing) + headroom.
@@ -136,6 +154,26 @@ usage() {
   done < <(_catalog_py "[m['id'] for m in data['models']]")
   echo ""
   echo "Exact catalog entry fetch: WEIGHT_KEY=<registry-key> $0 <model-name>"
+  echo ""
+  # These are OPTIONAL downloads, and a slug that needs one fails at switch.sh
+  # time with the engine's own error — which names neither the flag nor the way
+  # out (club-3090#1304). A flag documented only in this file's header comment
+  # is a flag you have to already know about to find, so they are listed here,
+  # where a stuck user actually looks. Guarded by
+  # scripts/tests/test-setup-optin-flags-documented.sh.
+  echo "Optional extra downloads (set to 1):"
+  echo "  WITH_ASSISTANT_DRAFT  MTP \"assistant\" drafter, when the model registers one."
+  echo "                        REQUIRED by vllm/gemma-26ba4b-single — that slug defaults"
+  echo "                        to SPEC_N=4, so without the drafter on disk vLLM aborts on"
+  echo "                        a missing config.json."
+  echo "  WITH_DFLASH_DRAFT     DFlash drafter, when the model family registers one."
+  echo "                        REQUIRED by the qwen3.8-27b super*/ultra* slugs."
+  echo "  WITH_VISION           F16 mmproj vision projector, when the model registers one."
+  echo "  WITH_PRISM_EAGLE3     Prism EAGLE3 drafter, when the model registers one."
+  echo ""
+  echo "Missing drafter, and you would rather not re-download? Every vLLM compose"
+  echo "honours SPEC_N=0 (alias SPEC=off) to boot with speculative decoding disabled:"
+  echo "  SPEC_N=0 bash scripts/switch.sh <slug> --force"
 }
 
 model_label() {
@@ -754,23 +792,83 @@ _hf_download_repo() {
   # Optional commit-SHA / tag pin (#319). Empty -> track HEAD (today's behavior).
   local rev_args=()
   [[ -n "$revision" ]] && rev_args=(--revision "$revision")
-  mkdir -p "${MODEL_DIR}/${subdir}"
+  local dest="${MODEL_DIR}/${subdir}"
+  mkdir -p "${dest}"
   # Guarantee a download CLI (consent-gated isolated install if missing).
   ensure_hf_cli || exit 1
+
+  local cli=""
   if command -v hf >/dev/null 2>&1; then
+    cli="hf"
     echo "[model]   Using 'hf download' (hf_transfer if available) ..."
-    # files is intentionally word-split: empty -> whole repo; non-empty -> selected files.
-    HF_HUB_ENABLE_HF_TRANSFER=1 HF_HUB_DISABLE_XET=1 \
-      hf download "$repo" ${files} "${rev_args[@]}" --local-dir "${MODEL_DIR}/${subdir}"
   elif command -v huggingface-cli >/dev/null 2>&1; then
+    cli="huggingface-cli"
     echo "[model]   Using 'huggingface-cli download' ..."
-    HF_HUB_ENABLE_HF_TRANSFER=1 HF_HUB_DISABLE_XET=1 \
-      huggingface-cli download "$repo" ${files} "${rev_args[@]}" --local-dir "${MODEL_DIR}/${subdir}"
   else
     # Unreachable: ensure_hf_cli returned 0 so one of the above resolves.
     echo "ERROR: hf CLI unexpectedly unavailable after ensure_hf_cli." >&2
     exit 1
   fi
+
+  # Bounded retry with backoff (club-3090#1305). These transfers are 16-17 GB,
+  # so the window for one transient stall is wide — and this ran ONCE, under
+  # `set -euo pipefail`, so a single mid-transfer
+  # `httpx.ConnectTimeout: _ssl.c:1015: The handshake operation timed out`
+  # aborted the whole setup run with a ~40-line unhandled Python traceback,
+  # against a hub that was otherwise answering in well under a second. The hub
+  # client resumes from the `.incomplete` markers it has already written, so a
+  # retry costs nothing but the reconnect. Env knobs exist mainly so the gate can
+  # exercise this without sleeping.
+  # Validate the knobs before any arithmetic touches them. Under `set -u` a
+  # non-numeric value makes `(( attempt >= max ))` resolve it as a VARIABLE name
+  # and die "foo: unbound variable" — a crash inside the code that exists to
+  # handle crashes. Same reasoning as the composes' non-numeric SPEC_N check: a
+  # typo gets a clear error, never a silent fallback.
+  local max="${HF_DOWNLOAD_RETRIES:-4}"
+  local backoff="${HF_DOWNLOAD_RETRY_SLEEP:-8}"
+  case "${max}" in ""|*[!0-9]*|0)
+    echo "ERROR: HF_DOWNLOAD_RETRIES='${max}' is not a positive integer (attempts per download)." >&2
+    exit 1 ;;
+  esac
+  case "${backoff}" in ""|*[!0-9]*)
+    echo "ERROR: HF_DOWNLOAD_RETRY_SLEEP='${backoff}' is not a non-negative integer (seconds)." >&2
+    exit 1 ;;
+  esac
+  local attempt=1 rc=0
+  while :; do
+    rc=0
+    # files is intentionally word-split: empty -> whole repo; non-empty -> selected files.
+    HF_HUB_ENABLE_HF_TRANSFER=1 HF_HUB_DISABLE_XET=1 \
+      "${cli}" download "$repo" ${files} "${rev_args[@]}" --local-dir "${dest}" || rc=$?
+    if [[ "${rc}" -eq 0 ]]; then
+      return 0
+    fi
+    if (( attempt >= max )); then
+      break
+    fi
+    echo "[model]   attempt ${attempt}/${max} failed (rc=${rc}) — retrying in ${backoff}s." >&2
+    echo "[model]   Nothing is lost: the transfer resumes from the partial files already on disk." >&2
+    [[ "${backoff}" != "0" ]] && sleep "${backoff}"
+    attempt=$(( attempt + 1 ))
+    backoff=$(( backoff * 2 > 120 ? 120 : backoff * 2 ))
+  done
+
+  # Give up with an instruction, not a traceback. The recovery here is trivial —
+  # re-run the identical command — and was previously undiscoverable from the
+  # output, so a first-time user on a 17 GB download reasonably read it as
+  # "this is broken" rather than "run it again".
+  {
+    echo ""
+    echo "ERROR: downloading '${repo}' failed on all ${max} attempts (last rc=${rc})."
+    echo "       Any traceback above comes from the hub client. The transfer itself is"
+    echo "       RESUMABLE: re-run the SAME command and it continues from where it"
+    echo "       stopped — completed files are skipped and partial ones are kept under"
+    echo "         ${dest}/.cache/huggingface/download/*.incomplete"
+    echo "       If it keeps failing, check that the hub is reachable:"
+    echo "         curl -sS -o /dev/null -w 'http=%{http_code} total=%{time_total}s\\n' https://huggingface.co"
+    echo "       Tune the retry with HF_DOWNLOAD_RETRIES (default 4) if your link is flaky."
+  } >&2
+  exit 1
 }
 
 # _hf_remote_meta <repo> <revision> <file> -> "<sha256> <size>" on stdout

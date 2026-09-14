@@ -84,9 +84,19 @@ kv_calc_supported: true
 # `setup:` — dispatch policy for scripts/setup.sh (contract C1); see
 # qwen3.6-27b.yml for the field reference. Only the non-default keys appear.
 setup:
-  # setup.sh's default fetch is the autoround-int4-mixed tier, not the profile
-  # default (awq).
-  primary: autoround-int4-mixed
+  # No `primary:` override — setup.sh fetches default_weight_variant (awq),
+  # which is what BOTH registered slugs serve (vllm/gemma-26ba4b-single and
+  # vllm/gemma-26ba4b-dual pin weights_variant: awq).
+  #
+  # This key used to read `primary: autoround-int4-mixed` (club-3090#1303).
+  # That tier's composes were moved to vllm/compose/_archive/ — no registry
+  # entry references the variant any more — but the setup block was never
+  # repointed, so `bash scripts/setup.sh gemma-4-26b-a4b` downloaded 16 GB
+  # nothing could serve and skipped the 17 GB both slugs need. The variant
+  # itself stays registered above (kv-calc and the arch_patches evidence rows
+  # still name it); it is just not what setup fetches.
+  # Guarded by scripts/tests/test-setup-primary-slug-backed.sh.
+  #
   # WITH_ASSISTANT_DRAFT=1 target — fetch the MTP assistant if using awq-mtp.
   assistant_draft: assistant
   weights_aliases:
