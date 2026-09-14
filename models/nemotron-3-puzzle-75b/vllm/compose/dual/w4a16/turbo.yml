@@ -81,6 +81,7 @@ services:
     # path boots coherent on v0.25.1). Override with VLLM_IMAGE=... for a specific nightly.
     image: ${VLLM_IMAGE:-vllm/vllm-openai:v0.29.0}
     container_name: "${ESTATE_CONTAINER:-vllm-nemotron-puzzle-75b-dual-w4a16}"
+    user: "0:${DOCKER_GID:-1000}"
     restart: ${CLUB3090_RESTART:-unless-stopped}
     ports:
       - "${BIND_HOST:-0.0.0.0}:${ESTATE_PORT:-${PORT:-8096}}:8000"
