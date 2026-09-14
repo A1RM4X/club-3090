@@ -202,7 +202,16 @@ _measure_vllm_arm() {
   med="$(printf '%s\n' "${tps_list[@]}" | sort -n | awk '{a[NR]=$1} END{print a[int((NR+1)/2)]}')"
   if [[ "$n" != "0" ]]; then
     local cn
-    cn="$(docker ps --format '{{.Names}}' | command grep -m1 -E 'vllm' || true)"
+    # Match the container to THIS arm's engine, not a hardcoded 'vllm'. The family
+    # (vllm/sglang/…) is already resolved once via the canonical resolver into
+    # ENGINE_FAMILY (#1282) and container names carry that token (vllm-…, sglang-…).
+    # A hardcoded 'vllm' left cn empty on an sglang-* container — so the gate
+    # below kept the SGLang fallback unreachable and SGLang arms printed '—' —
+    # and, when more than one engine container is up, picked the wrong engine
+    # entirely (grep -m1 = first match). ENGINE_FAMILY is a global set at engine
+    # resolution, so it is in scope here — no private re-classification
+    # (test-engine-kind-resolver arm 4).
+    cn="$(docker ps --format '{{.Names}}' | command grep -m1 -E "$ENGINE_FAMILY" || true)"
     # Two engines word this differently. vLLM: "SpecDecoding metrics: ... acceptance
     # rate: 85.0%". SGLang: "accept len: 5.66, accept rate: 0.67" (a RATE in [0,1],
     # so scale to % to keep the column comparable). Until 2026-09-11 only the vLLM
