@@ -4,6 +4,10 @@
 #   Topology:  Single 3090 (TP=1)
 #   Drafter:   MTP n=4 — google/gemma-4-26B-A4B-it-assistant (external, ~0.97 GB)
 #              Toggle: SPEC_N=<n> sets depth; SPEC_N=0 (or SPEC=off) disables
+#              Get it: WITH_ASSISTANT_DRAFT=1 bash scripts/setup.sh gemma-4-26b-a4b
+#              (setup.sh does NOT fetch it by default — the entrypoint refuses to
+#              boot with SPEC_N>0 and no drafter on disk rather than letting vLLM
+#              emit a bare missing-config.json; club-3090#1304)
 #   KV:        int8_per_token_head (1 byte/token, via vendored PR #40391 overlay)
 #   Vision:    off (limit-mm-per-prompt image=0 audio=0)
 #   Max ctx:   176K default (single-card boot ceiling ~185K WITH the external MTP
@@ -137,9 +141,26 @@ services:
           echo "[spec] Fix: SPEC_N=<n> sets depth; SPEC_N=0 (or SPEC=off) disables." >&2
           exit 1 ;;
         esac
+        _draft_dir=/root/.cache/huggingface/gemma-4-26b-a4b-it-assistant
         SPEC_ARGS=()
         if [ "$$_spec_n" -gt 0 ]; then
-          SPEC_ARGS=(--speculative-config "{\"model\":\"/root/.cache/huggingface/gemma-4-26b-a4b-it-assistant\",\"num_speculative_tokens\":$$_spec_n}")
+          # Fail loud if the external MTP assistant is absent. setup.sh fetches it
+          # only under WITH_ASSISTANT_DRAFT=1, and this slug defaults to SPEC_N=4 --
+          # so the common path is a user who ran plain `setup.sh gemma-4-26b-a4b`
+          # and then gets a bare missing-config.json out of vLLM that names neither
+          # the cause nor either way out (club-3090#1304). Same fail-loud contract
+          # as the deepseek moecache composes (#1054).
+          if [ ! -f "$$_draft_dir/config.json" ]; then
+            echo "[spec] FATAL: external MTP drafter not found:" >&2
+            echo "[spec]   $$_draft_dir" >&2
+            echo "[spec] This slug defaults to SPEC_N=4, and setup.sh fetches this drafter" >&2
+            echo "[spec] only on request (~0.97 GB). Fix one of:" >&2
+            echo "[spec]   - fetch it:  WITH_ASSISTANT_DRAFT=1 bash scripts/setup.sh gemma-4-26b-a4b" >&2
+            echo "[spec]   - or boot drafter-less:  SPEC_N=0 bash scripts/switch.sh vllm/gemma-26ba4b-single --force" >&2
+            echo "[spec]     (accepts the lower no-spec TPS; frees the ~86K tok the drafter costs)" >&2
+            exit 1
+          fi
+          SPEC_ARGS=(--speculative-config "{\"model\":\"$$_draft_dir\",\"num_speculative_tokens\":$$_spec_n}")
           echo "[spec] drafter ON - draft-model gemma-4-26b-a4b-it-assistant n=$$_spec_n" >&2
         else
           echo "[spec] drafter OFF (SPEC_N=0 / SPEC=off) - no speculative decoding" >&2

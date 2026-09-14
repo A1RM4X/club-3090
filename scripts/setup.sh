@@ -28,6 +28,15 @@
 #                       Use this if you're serving via llama.cpp/ik_llama rather than vLLM.
 #   SKIP_MODEL          Set to 1 to skip the model download step
 #   HF_TOKEN            HF token (public models, usually unnecessary)
+#   WITH_ASSISTANT_DRAFT  Set to 1 to ALSO download the model's MTP "assistant"
+#                       drafter when its profile registers one (setup:
+#                       assistant_draft). Default: 0 — EXCEPT where the profile
+#                       marks the drafter always_draft, in which case it is
+#                       fetched unconditionally and this flag is redundant.
+#                       ⚠️ vllm/gemma-26ba4b-single REQUIRES it: the slug
+#                       defaults to SPEC_N=4, so without the drafter on disk
+#                       vLLM aborts on a missing config.json. Either set this
+#                       flag, or boot the slug drafter-less with SPEC_N=0.
 #   WITH_DFLASH_DRAFT   Set to 1 to ALSO download the model family's DFlash
 #                       drafter when one is registered in profiles/models/*.yml.
 #                       Default: 0.
@@ -40,6 +49,9 @@
 #                       the llamacpp/qwen38-27b-single-iq4xs slug, which ships
 #                       q4/262K/vision). Default: 0. c3's Download pulls it via the
 #                       slug's weights_companions regardless.
+#   WITH_PRISM_EAGLE3   Set to 1 to ALSO download the Prism EAGLE3 drafter when
+#                       the model registers one (setup: prism_eagle3).
+#                       Default: 0.
 #   PREFLIGHT_DISK_GB   Required free space at MODEL_DIR. Default: derived from
 #                       the size_gb of every key this run would actually fetch
 #                       (already-present weights cost nothing) + headroom.
@@ -136,6 +148,26 @@ usage() {
   done < <(_catalog_py "[m['id'] for m in data['models']]")
   echo ""
   echo "Exact catalog entry fetch: WEIGHT_KEY=<registry-key> $0 <model-name>"
+  echo ""
+  # These are OPTIONAL downloads, and a slug that needs one fails at switch.sh
+  # time with the engine's own error — which names neither the flag nor the way
+  # out (club-3090#1304). A flag documented only in this file's header comment
+  # is a flag you have to already know about to find, so they are listed here,
+  # where a stuck user actually looks. Guarded by
+  # scripts/tests/test-setup-optin-flags-documented.sh.
+  echo "Optional extra downloads (set to 1):"
+  echo "  WITH_ASSISTANT_DRAFT  MTP \"assistant\" drafter, when the model registers one."
+  echo "                        REQUIRED by vllm/gemma-26ba4b-single — that slug defaults"
+  echo "                        to SPEC_N=4, so without the drafter on disk vLLM aborts on"
+  echo "                        a missing config.json."
+  echo "  WITH_DFLASH_DRAFT     DFlash drafter, when the model family registers one."
+  echo "                        REQUIRED by the qwen3.8-27b super*/ultra* slugs."
+  echo "  WITH_VISION           F16 mmproj vision projector, when the model registers one."
+  echo "  WITH_PRISM_EAGLE3     Prism EAGLE3 drafter, when the model registers one."
+  echo ""
+  echo "Missing drafter, and you would rather not re-download? Every vLLM compose"
+  echo "honours SPEC_N=0 (alias SPEC=off) to boot with speculative decoding disabled:"
+  echo "  SPEC_N=0 bash scripts/switch.sh <slug> --force"
 }
 
 model_label() {
