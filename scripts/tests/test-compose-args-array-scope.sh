@@ -29,12 +29,21 @@ def script_of(path):
     try: d = yaml.safe_load(open(path))
     except Exception: return None
     for svc in (d.get("services") or {}).values():
-        ep = svc.get("entrypoint")
-        if isinstance(ep, list):
-            # NOT ep[-1]: these composes end with a literal "--", and picking it
-            # yields a 2-char string that passes every check vacuously.
-            cand = [e for e in ep if isinstance(e, str) and "exec " in e]
-            if cand: return max(cand, key=len)
+        # ⚠️ entrypoint AND command. 17 services set
+        # entrypoint: ['/bin/bash','-c'] and put the real script in `command:`;
+        # reading only `entrypoint` skipped them ENTIRELY and this gate scored
+        # them as vacuously clean. Found 2026-09-14 when a malformed array
+        # expansion shipped to 13 composes with every gate green.
+        cand = []
+        for key in ("entrypoint", "command"):
+            v = svc.get(key)
+            if isinstance(v, list):
+                # NOT v[-1]: these composes end with a literal "--", and picking
+                # it yields a 2-char string that passes every check vacuously.
+                cand += [e for e in v if isinstance(e, str) and "exec " in e]
+            elif isinstance(v, str) and "exec " in v:
+                cand.append(v)
+        if cand: return max(cand, key=len)
     return None
 
 OPEN  = re.compile(r'^\s*(if|for|while|until|case)\b')
