@@ -590,7 +590,7 @@ services:
           --context-length "${CONTEXT_LENGTH:-131072}" \
           --mem-fraction-static "${MEM_FRACTION:-0.92}" \
           --max-running-requests "${MAX_RUNNING_REQUESTS:-1}" \
-          \"$${CACHE[@]}\" \
+          "$${CACHE[@]}" \
           --trust-remote-code \
           --enable-metrics \
           --enable-cache-report \
