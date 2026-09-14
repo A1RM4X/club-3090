@@ -15,6 +15,18 @@ def exec_indices(line):
             if line.startswith('$(', i): stack.append('$('); i += 2; continue
             if ch == '"': stack.pop()
             i += 1; continue
+        # A shell comment ends the executable part of the line, so nothing after
+        # it can be an executed grep. Only at top level (not inside $( )), and
+        # only where `#` actually starts a comment: at the start of the line or
+        # after whitespace. That leaves ${VAR#prefix} and $# alone, since their
+        # `#` follows a non-space character.
+        #
+        # Without this the scanner contradicts its own stated scope ("EXECUTED
+        # greps only") and its failure message ("A hit here IS in code"). It fired
+        # on a contributor's explanatory comment reading "(grep -m1 = first
+        # match)" — the `(` put the word in apparent command position.
+        if not stack and ch == '#' and (i == 0 or line[i - 1].isspace()):
+            break
         if line.startswith('$(', i): stack.append('$('); i += 2; continue
         if ch == ')' and top == '$(': stack.pop(); i += 1; continue
         if ch == "'": stack.append("'"); i += 1; continue
