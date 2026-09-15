@@ -136,9 +136,19 @@
 #     | intermediate_ssm_state_cache    |      0.70 GB |     0.35 GB |
 #     | intermediate_conv_window_cache  |      0.01 GB |     0.01 GB |
 #     | mamba total                     |  **2.65 GB** | **2.41 GB** |
-#     | KV pool #tokens                 |      394,661 | **451,633** |
-#     |   (409,552 was the 0.90 / max-running-requests=1 default, to 2026-09-15) |
+#     | KV pool #tokens                 |      394,661 | **409,552** |
 #     | `Memory pool end` avail mem     |      2.38 GB |     2.42 GB |
+#
+#   ⚠️⚠️ BOTH ARMS ABOVE WERE MEASURED AT THE OLD 0.90 / max-running-requests=1
+#   DEFAULT (2026-09-10) AND MUST STAY MATCHED. This table's only job is the
+#   SSM-dtype delta; substituting a figure taken at another mem-fraction turns
+#   it into a comparison of two different configs. (That happened once: #1329
+#   rewrote the bf16 cell to 451,633 while leaving max_mamba_cache_size at 55 —
+#   a pairing that never booted, since the new default fits K=63 — and broke the
+#   "+14,891 tokens" sentence directly below.) The shipped default moved to
+#   0.95 / max-running-requests=2 on 2026-09-15, where this compose boots K=63
+#   and a 451,633-token pool; that pairing lives in the MAMBA STATE SLOTS block
+#   below, not here.
 #
 #   Per-slot SSM bytes halved exactly (0.0731 -> 0.0358 GB); the solver spent the
 #   saving on slots. The only bytes actually RETURNED are the intermediate cache

@@ -15,7 +15,11 @@
 #   Vision:    ✅ tower present. The MTP sibling scored verify-full 4/4 on vision
 #              2026-09-10; untested on this tier.
 #   Max ctx:   262144 (full arch max, as the fp8 MTP sibling which MEASURED a
-#              409,552-token pool at this setting).
+#              409,552-token pool at this setting — that figure is the sibling's
+#              0.90 / max-running-requests=1 boot; the int4 MTP sibling re-defaulted
+#              to 0.95 / 2 on 2026-09-15 and measures 451,633. This compose ships its
+#              own mem-fraction, so neither number is its pool — both only evidence
+#              that 262144 fits).
 #   Genesis:   N/A — Genesis is a vLLM construct.
 #   Status:    👁️ Preview — ⚠️ UNMEASURED ON ITS CURRENT DRAFTER (see below).
 #              The "drafter is dead" verdict this header used to carry was

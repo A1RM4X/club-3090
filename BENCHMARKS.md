@@ -390,6 +390,29 @@ drafter on FA2" caveat.
 ⚠️ **Do not diff these against the Qwen3.6-27B rows.** Different checkpoint, different sampler defaults (this tier follows the 3.8 model card's Instruct row), and cross-session TPS comparison is invalid on this rig — single boots swing ~5 TPS on the code leg, which is wider than most tier gaps. Same-session A/B only.
 
 
+### Dual-card (2× RTX 3090, TP=2) — SGLang
+
+Stock SGLang v0.5.19, **zero patches** — that is the point of this tier (see the compose header for
+why jb-seo's three patches are not vendored). Two rows for the same compose, one per shipped default,
+because the default changed on 2026-09-15 and **decode moved more than the change was expected to move it**.
+
+| Compose | Rig | KV | Max ctx | Narr / Code TPS | PP tok/s | Peak VRAM | Date | Notes |
+| --- | --- | --- | ---: | ---: | ---: | ---: | --- | --- |
+| `dual/autoround-int4/mtp.yml` (`sgl/qwen38-27b-dual-fast`, Frozenlock INT4, native MTP n=4) — **old default** `mem-fraction 0.90` / `max-running-requests 1` | @noonghunna (2× 3090 PCIe Gen4, TP=2, no NVLink) | fp8 e4m3 | 262144 | **89.24 / 112.50** (n=5 each, CV 3.2% / 4.3%) | 1183 @10K (CV 0.1%) / 953 @90K | — | 2026-09-10 | `Soak: —` bench-only. MTP accept len 2.86 / rate 0.465 (n=131), KV pool **409,552**, `max_mamba_cache_size` 55, verify-full ALL PASS, vision 4/4. ⚠️ The MTP-acceptance check in verify-full **SKIPS** on this engine (it greps for vLLM's `SpecDecoding metrics` line, which SGLang never emits) — read the engine's own `accept len:` counter instead. |
+| same compose — **shipped default since 2026-09-15** ([#1329](https://github.com/noonghunna/club-3090/pull/1329)) `mem-fraction 0.95` / `max-running-requests 2` | @noonghunna (2× 3090 PCIe Gen4, TP=2, no NVLink) | fp8 e4m3 | 262144 | **74.00 / 101.58** (n=5 each, CV 3.0% / 3.8%) | 1127 @10K / 934 @90K | 23,179 / 22,872 MiB | 2026-09-15 | `Soak: ✓ PASS` (continuous 5×5: **0 MiB growth** / 200 budget, 0 errors, 0/25 silent-empty, 100% TPS retention). KV pool **451,633** = 2 × 225,817, `max_mamba_cache_size` 63 auto-fit, accept len 3.14, VRAM leak 8 MiB over bench, 0 OOM. verify-full 10/10; verify-stress boundary 5/5 + ceiling ladder **6/6 to 240,660 tok (91% of n_ctx)**, rc=1 on one check only — VRAM margin 949 MB vs a 1,024 MB threshold, not depth-driven (957 MB at ladder start → 949 MB at 240K; the pool is preallocated). Quality cli-40 **29/40** — a *new baseline*, no prior same-engine cli-40 run exists. |
+
+⚠️⚠️ **The decode delta between those two rows is unexplained — do not quote either figure as this
+tier's throughput yet.** Narrative fell **−17.1%** (89.24 → 74.00) and code **−9.7%** (112.50 → 101.58)
+on the same rig, same engine pin and same `bench.sh`, which is roughly **6× the ~2.8% boot-to-boot
+spread** this stack measures between identical configs. Draft acceptance moved the *other* way
+(2.86 → 3.14), so a collapsed drafter is ruled out. The two live suspects are cudagraph batch sizing
+at `--max-running-requests 2` (a single stream paying for a batch-of-2 graph) and fewer captured graph
+shapes at `mem-fraction 0.95` (only ~949 MB free after pool allocation). **Neither is confirmed** — this
+needs an A,B,A,B repeat-boot per the stack's own rule that A/B noise is boot-to-boot, not run-to-run.
+The memory-side numbers (pool, K, VRAM) *are* boot-stable and can be quoted as-is.
+
+---
+
 ### Quad-card (4× RTX 3090, TP=4) — SGLang
 
 Community submission. **Not a shipped compose** — @A1RM4X ran his own TP=4 W4A8 compose from

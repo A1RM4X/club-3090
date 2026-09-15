@@ -203,12 +203,19 @@
 #   sgl/qwen38-27b-dual-fast — verify-full ALL PASS 2026-09-10, bench 89.24 narrative /
 #   112.50 code decode TPS, prefill 1183.41 @10K / 952.92 @90K, MTP accept len 2.86
 #   (n=131), KV pool 409,552 tokens, vision 4/4.
+#   ⚠️ SUPERSEDED 2026-09-15 (#1329) — that proxy moved to 0.95 / max-running-requests 2:
+#   KV pool 451,633 (K=63), verify-full 10/10, ceiling ladder 6/6 to 240,660 tok,
+#   soak-continuous PASS, accept len 3.14. Decode at the new default measured
+#   74.00 / 101.58 — a 17.1% / 9.7% DROP on the same rig and bench, ~6x the
+#   boot-to-boot spread, unexplained and UNCONFIRMED. Quote the pool (boot-stable);
+#   do NOT quote either decode figure until an A,B,A,B repeat-boot settles it.
 #   ⚠️ Those numbers transfer on TOPOLOGY ONLY — not on pool size, context
 #   headroom, or concurrency.
 #
 #   ⭐ WHAT 4 CARDS BUY HERE: headroom, not context. 262144 is already the
-#   architectural ceiling and the DUAL already reaches it (409,552 tokens of
-#   pool measured at TP=2 — 1.56x the context). Sharding the ~18.2 GB of int4
+#   architectural ceiling and the DUAL already reaches it (451,633 tokens of
+#   pool measured at TP=2 — 1.72x the context, at the 2026-09-15 default; it was
+#   409,552 / 1.56x at the old 0.90 / max-running-requests=1 default). Sharding the ~18.2 GB of int4
 #   weights from ~9.1 GB/rank to ~4.5 GB/rank converts weight VRAM into pool and
 #   concurrency headroom. Expect single-stream decode to be ~FLAT vs the dual
 #   (the qwen3.6-27b equivalent was flat from 2 to 4 cards) and the POOL to grow.

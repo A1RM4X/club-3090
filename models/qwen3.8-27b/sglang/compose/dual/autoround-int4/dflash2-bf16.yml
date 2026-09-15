@@ -17,7 +17,11 @@
 #              2026-09-10; untested on this tier.
 #   Max ctx:   196608 (~192K). ⚠️ DERIVED, NOT MEASURED, and deliberately BELOW
 #              the vLLM tier's 204800. Arithmetic: the fp8 sibling MEASURED a
-#              409,552-token pool on this rig; bf16 KV is 2x the bytes per
+#              409,552-token pool on this rig at 0.90 / max-running-requests=1
+#              (⚠️ deliberately NOT restated as 451,633 — that is the int4 MTP
+#              sibling's 0.95 / 2 boot from 2026-09-15, and this compose ships
+#              mem-fraction 0.82, so the larger figure would inflate the derivation
+#              below); bf16 KV is 2x the bytes per
 #              token, so the same budget buys ~204,776 — which is UNDER 204800,
 #              leaving zero radix headroom. Set CONTEXT_LENGTH to raise it once
 #              a real boot reports `max_total_num_tokens`.
