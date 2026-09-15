@@ -59,11 +59,13 @@ supported_model_families:
                         # ⭐ UPDATE 2026-09-15 (club-3090#1329): dual-fast re-defaulted to
                         #   mem-fraction 0.95 / max-running-requests 2 and was gated —
                         #   KV pool 451,633 (K=63), verify-full 10/10, soak PASS.
-                        #   ⚠️ Decode REGRESSED against the 09-10 line above: narrative
-                        #   89.24 -> 74.00 (-17.1%), code 112.50 -> 101.58 (-9.7%), same
-                        #   rig, same bench, ~6x the boot-to-boot spread. UNEXPLAINED and
-                        #   UNCONFIRMED — do not quote either figure as this tier's
-                        #   throughput until an A,B,A,B repeat-boot settles it.
+                        #   ⭐ FASTER than the 09-10 line above: narrative 89.24 -> 101.26
+                        #   (+13.5%), code 112.50 -> 135.63 (+20.6%), prefill 1224.74 @10K,
+                        #   accept len 3.142 — on a DEDICATED fresh boot, no FORCE_TOKENS.
+                        #   ⛔ An earlier '-17.1% regression' here is RETRACTED: it came from
+                        #   benching THIRD in a gate chain (after verify-stress), which
+                        #   under-reports narrative -27% / code -25% / prefill -8% at
+                        #   identical accept len (3.139 vs 3.142). Bench on its own boot.
                         # jb-seo's three patches are a concurrency/multi-window story and are
                         # NOT vendored. ⚠️ The reason is AVAILABILITY, not concurrency: they do
                         # not exist in stock v0.5.19 (patch 1 does not apply; --decode-passes-

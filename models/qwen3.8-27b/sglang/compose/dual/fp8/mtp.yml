@@ -209,9 +209,10 @@
 #   ⚠️ For raw throughput at 2×24GB use sgl/qwen38-27b-dual-{fast,superfast}
 #   (int4): 89.24/112.50 and 115.08/171.16 decode, at 409,552 / 279,595 pool.
 #   ⚠️ dual-fast RE-DEFAULTED 2026-09-15 (#1329) to 0.95 / max-running-requests 2:
-#   its pool is now 451,633, and its decode MEASURED LOWER at the new default
-#   (74.00/101.58, -17.1%/-9.7%). That drop is unexplained and unconfirmed —
-#   treat both dual-fast decode figures as provisional.
+#   its pool is now 451,633 and its decode is HIGHER: 101.26/135.63 on a dedicated
+#   fresh boot (+13.5%/+20.6% over the 89.24/112.50 above). ⛔ An earlier
+#   '-17.1% regression' is RETRACTED — that reading came from benching third in a
+#   gate chain, which under-reports ~25-27%. Bench on its own boot.
 #   This tier is SLOWER and SHORTER by construction. That is the trade, not a bug.
 # ---------------------------------------------------------------------------
 #   ⭐⭐ WHY AN FP8 TIER ON AMPERE AT ALL — read this before "optimising" it.

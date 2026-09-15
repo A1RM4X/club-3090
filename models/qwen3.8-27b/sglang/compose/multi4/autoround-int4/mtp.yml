@@ -205,10 +205,12 @@
 #   (n=131), KV pool 409,552 tokens, vision 4/4.
 #   ⚠️ SUPERSEDED 2026-09-15 (#1329) — that proxy moved to 0.95 / max-running-requests 2:
 #   KV pool 451,633 (K=63), verify-full 10/10, ceiling ladder 6/6 to 240,660 tok,
-#   soak-continuous PASS, accept len 3.14. Decode at the new default measured
-#   74.00 / 101.58 — a 17.1% / 9.7% DROP on the same rig and bench, ~6x the
-#   boot-to-boot spread, unexplained and UNCONFIRMED. Quote the pool (boot-stable);
-#   do NOT quote either decode figure until an A,B,A,B repeat-boot settles it.
+#   soak-continuous PASS, accept len 3.142. Decode on a DEDICATED fresh boot:
+#   101.26 narrative / 135.63 code, prefill 1224.74 @10K — i.e. FASTER than the
+#   09-10 figures above (+13.5% / +20.6%).
+#   ⛔ An earlier '-17.1% regression' is RETRACTED: it came from benching THIRD in
+#   a gate chain (after verify-stress), which under-reports narrative -27% / code
+#   -25% / prefill -8% at identical accept len. Bench on its own boot.
 #   ⚠️ Those numbers transfer on TOPOLOGY ONLY — not on pool size, context
 #   headroom, or concurrency.
 #
