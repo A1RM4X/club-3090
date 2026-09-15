@@ -115,23 +115,36 @@
 #   halving the SSM dtype halves `per_req` and the solver simply BUYS TWICE THE
 #   SLOTS at the same budget.
 #
-#   ⭐ MEASURED on this rig, 2026-09-10, same boot recipe, TP=2 (per rank):
+#   ⛔⛔ THE fp32-vs-bf16 TABLE THAT USED TO SIT HERE WAS THE **int4 SIBLING'S**,
+#   NOT THIS TIER'S — corrected 2026-09-15 (club-3090#16). It was labelled
+#   "MEASURED on this rig, same boot recipe" and claimed `max_mamba_cache_size`
+#   26/55 and a KV pool of 394,661/409,552. Booting THIS compose at its own
+#   shipped defaults gives:
 #
-#     | boot line                       | fp32 (stock) | bf16 (this) |
-#     |---------------------------------|-------------:|------------:|
-#     | max_mamba_cache_size            |           26 |      **55** |
-#     | conv_state                      |      0.04 GB |     0.08 GB |
-#     | ssm_state                       |      1.90 GB |     1.97 GB |
-#     | intermediate_ssm_state_cache    |      0.70 GB |     0.35 GB |
-#     | intermediate_conv_window_cache  |      0.01 GB |     0.01 GB |
-#     | mamba total                     |  **2.65 GB** | **2.41 GB** |
-#     | KV pool #tokens                 |      394,661 | **409,552** |
-#     | `Memory pool end` avail mem     |      2.38 GB |     2.42 GB |
+#     | boot line              | claimed (wrong) | MEASURED 2026-09-15 |
+#     |------------------------|----------------:|--------------------:|
+#     | max_total_num_tokens   |         409,552 |        **158,116**  |
+#     | max_mamba_cache_size   |              55 |             **21**  |
+#     | context_len            |         262,144 |        **131,072**  |
+#     | available_gpu_mem      |               — |          1.67 GB    |
 #
-#   Per-slot SSM bytes halved exactly (0.0731 -> 0.0358 GB); the solver spent the
-#   saving on slots. The only bytes actually RETURNED are the intermediate cache
-#   (0.70 -> 0.35 GB, sized by `max_running_requests`, not by K), and they went
-#   to KV (+14,891 tokens).
+#   Both rows were overstated ~2.6x. The registry `status_note` for this slug was
+#   right all along ("0.92 yields 157,875") — measured 158,116, within 0.15%.
+#
+#   ⚠️ WHY THE MAMBA ROW CANNOT BE SHARED BETWEEN QUANT TIERS, which is what made
+#   the copy look plausible: K is AUTO-FIT from the memory left AFTER weights, so
+#   it is not an architectural constant. fp8 commits ~14.75 GB/rank of weights
+#   plus a 2.67 GB MTP head before KV; int4 commits ~9.1 GB/rank. Same solver,
+#   very different budget -> 21 slots here vs 55 there. Only per-slot BYTE sizes
+#   (conv_state/ssm_state shapes) are quant-independent; the slot COUNT is not.
+#
+#   ⇒ READ YOUR OWN BOOT LINE. The five dual composes measure 55 / 34 / 33 / 21 / 8.
+#
+#   The fp32-vs-bf16 SSM-dtype A/B has NOT been re-run on this tier, so no such
+#   table is published here. The mechanism above (auto-fit spends a halved
+#   `per_req` on twice the slots rather than returning bytes) still applies; only
+#   the int4 numbers demonstrating it were ever measured, and they live in
+#   `dual/autoround-int4/mtp.yml` where they belong.
 #
 #   ⭐ WHY MORE SLOTS IS THE POINT: the pool is not just per-request scratch —
 #   `uses_mamba_radix_cache: True` and the Unified Radix Cache carries

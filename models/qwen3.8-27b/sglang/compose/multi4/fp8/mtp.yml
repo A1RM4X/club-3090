@@ -141,6 +141,18 @@
 #     | KV pool #tokens                 |      394,661 | **409,552** |
 #     | `Memory pool end` avail mem     |      2.38 GB |     2.42 GB |
 #
+#   ⛔⛔ THIS TABLE IS THE int4 SIBLING'S, NOT AN fp8 MEASUREMENT (club-3090#16,
+#   2026-09-15). The dual fp8 tier was booted and measures max_total_num_tokens
+#   158,116 / max_mamba_cache_size 21 — the pool row above is overstated ~2.6x and
+#   the slot row likewise. K is AUTO-FIT from memory left AFTER weights, so it is
+#   not an architectural constant: fp8 commits ~14.75 GB/rank + a 2.67 GB MTP head
+#   before KV, int4 ~9.1 GB/rank. Only per-slot BYTE sizes are quant-independent.
+#   ⚠️ No corrected figure is substituted here because THIS slug has never booted
+#   (4/8 cards do not exist on the reference rig) and the dual's 158,116 does NOT
+#   transfer either — sharding changes weight bytes per rank, which is the very
+#   input the solver uses. Read your own boot line; report via the
+#   `numbers-from-your-rig` issue template.
+#
 #   Per-slot SSM bytes halved exactly (0.0731 -> 0.0358 GB); the solver spent the
 #   saving on slots. The only bytes actually RETURNED are the intermediate cache
 #   (0.70 -> 0.35 GB, sized by `max_running_requests`, not by K), and they went
