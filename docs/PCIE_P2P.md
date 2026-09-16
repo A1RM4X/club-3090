@@ -193,8 +193,28 @@ A driver grant does **not** mean your engine uses it. Each engine has its own sw
 | engine | default | turn ON | turn OFF (escape hatch) |
 |---|---|---|---|
 | **vLLM** | **auto-enabled** by our composes' entrypoint on a grant | `NVLINK_MODE=pcie_p2p` to force | `NVLINK_MODE=force_off`, or `NCCL_P2P_DISABLE=1` on a raw `docker run` |
+| ↳ vLLM **custom all-reduce kernel** (rides on the transport) | ON with the transport at ≤2 GPUs; vLLM vetoes it itself above 2 PCIe-only GPUs (#786) | — | **`DISABLE_CUSTOM_ALL_REDUCE=1`** — drops the kernel, **keeps** the transport |
 | **llama.cpp** | ⚠️ **OFF** — opt-in regardless of the grant | `GGML_CUDA_P2P=1` **and** `--split-mode row`/`tensor` | unset `GGML_CUDA_P2P` |
 | **SGLang** | no interconnect detection | `NCCL_P2P_DISABLE=0` | `NCCL_P2P_DISABLE=1` |
+
+> ⭐ **Transport and kernel are two switches.** `NVLINK_MODE=force_off` turns off *both* — it discards the NCCL prefill win along with the kernel that is usually the actual problem ([#922](https://github.com/noonghunna/club-3090/issues/922), [#1332](https://github.com/noonghunna/club-3090/issues/1332)). `DISABLE_CUSTOM_ALL_REDUCE=1` is the narrow one:
+>
+> ```bash
+> DISABLE_CUSTOM_ALL_REDUCE=1 bash scripts/launch.sh <slug>
+> ```
+>
+> `NCCL_P2P_LEVEL` stays as auto-detect resolved it and `NCCL_P2P_DISABLE` stays unset; only vLLM's own kernel goes. Measured on the reporting rig in #1332: **+10.7 % prefill / −8.6 % TTFT** against disabling the peer path entirely, with the crash gone.
+>
+> **Making it persist.** Both launchers read the repo-root `.env` — `switch.sh` exports every key in it, and `launch.sh` hands off to `switch.sh` — so a line there works:
+>
+> ```
+> # .env
+> DISABLE_CUSTOM_ALL_REDUCE=1
+> ```
+>
+> ⚠️ **One exception: a raw `docker compose -f …` invocation.** Compose reads `.env` from the *project directory* — the directory of the first `-f` file — so running a compose file directly never picks up the repo-root `.env`, from any working directory, unless you pass `--project-directory` or `--env-file`. Use the launchers, or pass the variable on the command line. (`NVLINK_MODE` behaves the same way.)
+>
+> An invalid value is a hard error rather than a silent no-op. The knob works on **every** compose that auto-enables the kernel, including ones this repo does not ship — it is wired at the detector, not per-file.
 
 ⚠️ **The three most common mistakes here:**
 
@@ -691,6 +711,25 @@ Two hard truths set expectations before you start:
 > bidirectional with P2P, against **~43 GB/s** without — useful as a sanity target for
 > `p2pBandwidthLatencyTest` (§7).
 
+> ### ⚠️ After DKMS installs the patched module, REBUILD THE INITRAMFS — or you boot the stock one
+>
+> Reported by @leo-3889 on Ubuntu 26.04 ([#1332](https://github.com/noonghunna/club-3090/issues/1332)). DKMS installs the patched module to disk, but **the initramfs can still contain the stock `nvidia` module and load it first at boot**. Peer access then looks unavailable and the patch reads as a failed build — when it built fine.
+>
+> **The check compares ONE module's on-disk build against the loaded one:**
+>
+> ```bash
+> modinfo -F srcversion nvidia      # what is on disk
+> cat /sys/module/nvidia/srcversion # what is actually loaded
+> # equal  -> the running kernel module is the one you built
+> # differ -> you are running a different build than the one on disk (this trap)
+> ```
+>
+> ⚠️ **Do not compare `srcversion` *between* `nvidia`, `nvidia_uvm`, `nvidia_modeset` and `nvidia_drm`.** It is a per-module source hash, so those four **always** differ even on a single clean build — on a reference rig here they read `5B7E…`, `DF13…`, `A84C…`, `BA5C…`. A check that expects them to match reports every healthy system as broken. (An earlier revision of this document said exactly that; it was wrong and is corrected here.)
+>
+> Fix: `sudo update-initramfs -u` and reboot. **Redo it after every driver or kernel upgrade** — a routine `apt upgrade` can put you back on the stock module, and the only symptom is that P2P quietly stopped working.
+>
+> ⚠️⚠️ **And the obvious verification is a false-clean.** Inspecting the initramfs needs root; as a normal user `lsinitramfs` fails with a permission error, and piped into a counting grep that error goes to stderr while the count prints **`0`** — which reads exactly like "no stock module in there, all good". Run it under `sudo` and check the exit code, not the count.
+
 **On this stack**, once the patched module is installed you don't edit composes — set one env var:
 
 ```bash
@@ -862,10 +901,18 @@ Everything below was hit for real. Start from the symptom.
 > | byte-verified transfer test | data crosses and round-trips | a collective can still be wrong (this section) |
 > | **`verify-full`** | the model still produces *language* | fluent-but-wrong output |
 > | quality pack / needle with known answer | the output is *correct* | — |
+> | **a real decode run** — `bench.sh`, or `soak-test.sh --continuous` for longer | the path survives the workload the kernel is actually used for | — |
+>
+> ⭐ **Why a needle test is not the stress it looks like.** vLLM's custom all-reduce only handles tensors below `max_size`, **8 MiB by default** — `should_custom_ar()` ends `return inp_size < self.max_size`. A decode step all-reduces one token's hidden state, a few KB, so it goes through the custom kernel. A prefill chunk of a few thousand tokens is tens of MiB, so it **falls back to NCCL and never touches the custom kernel at all**.
+>
+> So on a rig where that kernel is the problem, prefill-shaped work is safe for a structural reason: the kernel is not in its path. A 240,660-token needle test is almost entirely prefill. That is why [#1332](https://github.com/noonghunna/club-3090/issues/1332) passed every tier above — `verify-full` 10/10 and correct needle recall at every depth — minutes before each hard reset.
+>
+> ⚠️ **What is still unexplained:** `verify-full`'s own step 8 is a single uninterrupted 2000-token generation, which is decode, and it passed — while `bench.sh` reset the machine within a few hundred tokens. Both use the kernel, so kernel-vs-no-kernel does not separate them. One untested difference: `bench.sh` defaults to `CAPTURE=1` and runs `nvidia-smi dmon` plus a PCIe link sampler concurrently, through the patched driver; `verify-full` does not. `CAPTURE=0 bash scripts/bench.sh` on the failing arm would test that. Until someone runs it, **run a real decode bench before trusting a P2P bring-up, and do not assume a long-context test covered you.**
 
 
 | symptom | cause | fix |
 |---|---|---|
+| ⚠️⚠️ The **machine hard-resets** a few seconds into decode-heavy work over a patched peer path — kernel log ends mid-line, **no panic, no oops, no MCE, no Xid, kdump produces nothing**, no systemd shutdown, filesystem needs orphan cleanup on the next boot | vLLM's **custom all-reduce** over BAR1 P2P. Same kernel as the wrong-data row below, different consequence. **Mechanism unestablished** — nothing is logged and there is no crash dump, so what is on record is the correlation, not the cause. The reporter offers `iommu=pt` removing DMA isolation while the patch has GPUs writing to peer BAR1 addresses; a PCIe *fatal* error resetting a consumer board fits the same silence. Neither is distinguishable without out-of-band logging | **`DISABLE_CUSTOM_ALL_REDUCE=1`** (§0c) — keeps the NCCL transport and its prefill win. Isolated by @leo-3889 ([#1332](https://github.com/noonghunna/club-3090/issues/1332)) on 2× 3090 (Ti + non-Ti), AM5 / Ryzen 7 7700, gen4 x8+x8, driver 610.57.04 patched via DKMS, vLLM 0.29.0 TP=2 + DFlash2: three arms in one sitting at identical clocks and power limits — P2P+kernel **resets**, P2P off **clean**, P2P+kernel-off **clean and faster** (+10.7 % prefill, −8.6 % TTFT). The reporter concludes the two working arms rule out the PSU and the overclock, since both run the same workload at the same draw; note that the failing arm also has its own load *shape*, so treat that as their inference rather than an independent finding |
 | ⚠️⚠️ Collectives **complete**, at a plausible TPS, but the model emits **garbage on every request** (e.g. `!!!!!!!!!!!!` at 18 prompt tokens) over a patched peer path | vLLM's **custom all-reduce** over BAR1 P2P returns WRONG DATA — NCCL itself is fine. aikitoria [#21](https://github.com/aikitoria/open-gpu-kernel-modules/issues/21) class; related `vllm#28334` (IMA in custom AR during graph capture with spec-decode). **NOT universal on Ampere** — a configuration interaction, not "Ampere is broken" | **`--disable-custom-all-reduce`** — keeps NCCL P2P *and* its prefill gain. `NVLINK_MODE=force_off` also works but discards the win. Reported by @juslex + independently reproduced by @fkrutko ([#922](https://github.com/noonghunna/club-3090/issues/922)) on **two** Intel-platform patched-P2P rigs (Z390/Gen3/FP8 · Z690/Gen4/INT4, two driver point-releases) — **reseat-persistent** on both, identical signature (`!!!!` + 0% MTP accept); a Threadripper x16 rig did **not** reproduce. NCCL over the same link stays correct (`p2p-validate.sh` HEALTHY), so the fault is the custom kernel, not the transport |
 | `topo -p2p` = **`CNS`** in a VM | Emulated front host bridge isn't in the driver's chipset table (§4a) | `x-nv-gpudirect-clique` (§4a). **Not** a BAR, driver-flavour or topology problem |
 | `CNS` persists after a **large BAR1** + **open driver** | BAR/driver were never the gate; the chipset table is | Same — clique. Measured: 32 GB BAR1 + `nvidia-open` still `CNS` |
