@@ -27,7 +27,9 @@
 # reads the cache. The emit costs ~1s, so source this file only where a
 # registry answer is actually needed — and prefer one shared resolve over
 # per-line lookups in hot paths. registry_lookup_cleanup removes the cache file
-# early; otherwise the tmp file lives until the consuming process exits.
+# early. ⚠️ Nothing removes it AT process exit — the cache outlives the process,
+# and a killed process also strands its mktemp staging file. Both are swept by
+# _registry_lookup_reap on the next cache creation; see the note there.
 
 export PYTHONUTF8="${PYTHONUTF8:-1}"
 # Repo root the helper resolves the registry against. Derived from this file's
@@ -36,6 +38,34 @@ export PYTHONUTF8="${PYTHONUTF8:-1}"
 : "${REGISTRY_LOOKUP_ROOT:=}"
 
 _registry_lookup_cache=""
+
+# Reap leaked tmp files from earlier runs. Two kinds leak, and NEITHER is fixable
+# with an EXIT trap — a SIGKILLed process runs no traps:
+#   * registry-lookup.<pid>.json    — the per-process cache, when that process was
+#     killed, or simply never called registry_lookup_cleanup (which is opt-in).
+#   * registry-lookup.XXXXXXXX.json — the mktemp STAGING file, if the process died
+#     inside the ~1s emit window. Both the success and failure paths below remove
+#     it, so only a kill strands one.
+# Measured on this rig 2026-09-16: 433,584 files / 130 GB over ~2 months, 422k of
+# them staging files — the kill window is hit far more often than the code shape
+# suggests. Reaping on create is self-healing and needs nothing from consumers.
+#
+# SAFETY: a per-pid cache is dropped ONLY when no process holds that pid, so a
+# live consumer's cache is never removed (pid reuse fails safe — we keep it).
+# Staging files are dropped only when older than an hour; no real emit is close.
+_registry_lookup_reap() {
+    local dir="${TMPDIR:-/tmp}" f pid
+    for f in "${dir}"/registry-lookup.*.json; do
+        [[ -e "${f}" ]] || continue
+        pid="${f##*/registry-lookup.}"; pid="${pid%.json}"
+        if [[ "${pid}" =~ ^[0-9]+$ ]]; then
+            kill -0 "${pid}" 2>/dev/null || rm -f "${f}"
+        elif [[ -z "$(find "${f}" -maxdepth 0 -mmin -60 2>/dev/null)" ]]; then
+            rm -f "${f}"
+        fi
+    done
+    return 0
+}
 
 # Ensure the cached catalog exists; prints nothing, returns non-zero on failure.
 registry_lookup_cache_path() {
@@ -52,6 +82,7 @@ registry_lookup_cache_path() {
             root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)" || return 1
         fi
         [[ -f "${root}/scripts/lib/registry-emit.sh" ]] || return 1
+        _registry_lookup_reap
         local staged
         staged="$(mktemp "${TMPDIR:-/tmp}/registry-lookup.XXXXXXXX.json")" || return 1
         if ! bash "${root}/scripts/lib/registry-emit.sh" --json "${root}" > "${staged}" 2>/dev/null \
