@@ -2702,6 +2702,70 @@ entries:
         presence_penalty: 0.0
         repetition_penalty: 1.0
     sampler_default_mode: instruct
+  exllamav3/qwen38-flash-next-dual-exl3-305-cpumoe:
+    origin: core
+    model: qwen3.8-flash-next
+    weights_variant: exl3-3.05bpw
+    workload: long-ctx-single
+    engine: exllamav3
+    drafter: null
+    spec_method: mtp
+    kv_format: q4_0
+    act_format: 16bit
+    act8_capable: false
+    offload: cpu-moe-split
+    moe_cache: false
+    host_ram_gb: 96
+    chat_template: native
+    tp: 2
+    max_ctx: 204800
+    max_num_seqs: 1
+    mem_util: null
+    compose_path: models/qwen3.8-flash-next/exllamav3/compose/dual/exl3-3.05bpw/cpumoe.yml
+    requires_nvlink: false
+    requires_homogeneous_arch: false
+    required_engine_features: []
+    default_port: 8180
+    kvcalc_key: SKIP
+    status: incubating
+    status_note: "⭐ THE FASTER TIER and the one the tuned recipe was built on. bench.sh canonical: 57.37 narrative (CV 1.8%) / 74.51 code (CV 2.3%) / 1566.0 prefill@10K (CV 0.9%), TTFT ~310/315 ms. MTP acceptance 0.688, accept_len 3.31, effective k 3.36. Beats its own 4.05 sibling by ~18% on ALL THREE axes at once, because the lower bit rate cuts CPU-resident experts 44% -> 25%. vs the shipped bucko vLLM recipe: narrative 57.37 vs 68.12 (-15.8%), code 74.51 vs 74.09 (a TIE inside the ~2.8% boot-to-boot noise, NOT a win), prefill +177%, TTFT -43%. ⇒ pick this for prefill/TTFT-dominated work, not for raw decode; bucko remains the decode choice. ⚠️ 3.05bpw is low enough that part of the speed win is BECAUSE it is smaller -- that is precisely what the missing 8-pack would price. ⚠️ Single boot (n=5 within-boot); boot-to-boot is ~2.8%. ⚠️⚠️ QUALITY IS UNMEASURED -- no 8-pack, no verify-stress, no soak-continuous was run on EITHER exl3 tier. Deliberately left to COMMUNITY validation (maintainer decision 2026-09-17), which is why this ships 🐣 Incubating rather than 🧪 Experimental. ⚠️⚠️ THE THROUGHPUT FIGURES BELOW ARE HOST-VENV NUMBERS; THE SHIPPED CONTAINER MEASURES ~9% SLOWER. Same weights, same resolved config, same pins: narrative 52.19 vs 57.37, code 68.11 vs 74.51, prefill@10K 1317.9 vs 1566.0 (-9.0% / -8.6% / -15.8%), TTFT unaffected (319/338 vs 310/315 ms), MTP still healthy (0.664 vs 0.688). Both sides at CV 1.1-2.4%, so the gap is outside the ~2.8% boot-to-boot band and is REAL. Cause NOT diagnosed -- container CPU scheduling / cgroup / thread affinity are the suspects, this engine being entirely host-compute-bound. BENCHMARKS row 7 is the container number and is the one to quote. ⭐⭐ ENGINE PROPERTY: exl3 COMPUTES offloaded experts on the CPU -- expert weights never cross PCIe, only activations do. Decode is therefore set by the CPU-RESIDENT EXPERT FRACTION and almost nothing else (GPU util measured 5-8% during decode on a heavily-offloaded model). ⭐⭐ --cpu-moe-threads is the biggest knob: 16 -> 28 measured +20.7% narrative / +21.3% code; the good zone is an ABSOLUTE 24-32, NOT nproc/2. The compose ships nproc/2 as a portable FLOOR and says so at boot -- set THREADS to tune. This reproduces the llama.cpp thread finding CROSS-ENGINE, so it is a property of the HOST memory subsystem, not of either engine. ⚠️ Our harness cannot read this engine's drafter counters: detect_engine misidentifies exl3 as llamacpp and greps vLLM's log format, so verify-full's spec-dec check SKIPS and reads as 'no drafter' -- a false clean that already produced one wrong report. Read 'draft N/M accepted' off the server's stdout. ⭐⭐ max_ctx 204800 -- the SAME context our moe-cache slug for this model ships, reached by moving more experts to the CPU (split 144, up from 128). Q4 at the stock split 128 caps at 106496; split 144 clears 204800 at 50.5 T/s. VALIDATED at 14K/50K/100K prompts: zero OOM, vision 4/4, and VRAM FLAT across prompt lengths (23,182 -> 23,160 MiB) because exl3 PRE-ALLOCATES the full cache at boot, so prompt length costs almost nothing extra. ⛔ split 136 + autosplit_reserve 128 is FASTER (53.1 T/s, +5.1%) and DELIBERATELY NOT SHIPPED: it leaves only 648 MiB free on card1 vs 1,026 MiB, and 5% decode is a bad trade for margin at the context we advertise. ⚠️ Lowering the reserve is NOT the lever it looks like -- split 128 still NO-FITs at reserve 256/128/64; the idle VRAM is autosplit's whole-layer packing granularity, not held-back headroom. ⭐ The old MEASURED Q4 maximum (122880 and 114688 NO-FIT; VRAM 21,742/22,654 MiB) -- 3.25x the 32768 originally shipped. ⚠️ Q4 KV is BELOW this stack's q8-grade serving floor, so this is a capacity EXHIBIT, consistent with 🐣 Incubating; maintainer decision 2026-09-18 to maximise context. Q8 caps this tier at 65536, i.e. LESS than Q4 buys. exl3 spells the mode `Q4` (modes are FP16|Q8|Q6|Q4); `q4_0` is only the registry taxonomy token and is NOT llama.cpp's q4_0 block format. ⚠️ ZERO PATCHES -- stock upstream tabbyAPI @ 53da791 with stock exllamav3 1.5.0 wheels. ⚠️ ATTRIBUTION: ExLlamaV3 and the official quants are turboderp's work; TabbyAPI is theroyallab's. We vendor and patch neither."
+    weights_companions: []
+    gateway: false
+    serve_aliases: []
+    required_sm: 8.6
+    category: frontier
+  exllamav3/qwen38-flash-next-dual-exl3-405-cpumoe:
+    origin: core
+    model: qwen3.8-flash-next
+    weights_variant: exl3-4.05bpw
+    workload: long-ctx-single
+    engine: exllamav3
+    drafter: null
+    spec_method: mtp
+    kv_format: q4_0
+    act_format: 16bit
+    act8_capable: false
+    offload: cpu-moe-split
+    moe_cache: false
+    host_ram_gb: 118
+    chat_template: native
+    tp: 2
+    max_ctx: 204800
+    max_num_seqs: 1
+    mem_util: null
+    compose_path: models/qwen3.8-flash-next/exllamav3/compose/dual/exl3-4.05bpw/cpumoe.yml
+    requires_nvlink: false
+    requires_homogeneous_arch: false
+    required_engine_features: []
+    default_port: 8181
+    kvcalc_key: SKIP
+    status: incubating
+    status_note: "The SAFER bit rate at a throughput cost. bench.sh canonical, TUNED (28 threads + dynamic_draft): 48.53 narrative (2 boots 48.40/48.66) / 62.94 code (2 boots 64.56/61.31) / 1335.7 prefill@10K -- about 18% behind the 3.05 sibling on every axis, for ~1 bit of weight precision whose quality benefit is UNQUANTIFIED. Also loses to the shipped bucko vLLM recipe on decode (68.12/74.09). ⚠️⚠️ BENCHMARKS row 4 (43.54/62.16) is the UNTUNED FIRST BOOT of this same variant and sits ~12% below the tuned row 5 for reasons never attributed: that boot recorded its drafter only as 'MTP n=4' without saying whether dynamic_draft was on, and under dynamic_draft that number is a CEILING, not a depth -- so it does not identify a config. Cite row 5, not row 4. Recorded as an open gap, not a tuning win. ⚠️ This branch ships a different file set from 3.05 (vision_k6.safetensors present, no MTP patch file); the layouts are not interchangeable. ⚠️⚠️ QUALITY IS UNMEASURED -- no 8-pack, no verify-stress, no soak-continuous was run on EITHER exl3 tier. Deliberately left to COMMUNITY validation (maintainer decision 2026-09-17), which is why this ships 🐣 Incubating rather than 🧪 Experimental. ⚠️⚠️ THE THROUGHPUT FIGURES BELOW ARE HOST-VENV NUMBERS; THE SHIPPED CONTAINER MEASURES ~9% SLOWER. Same weights, same resolved config, same pins: narrative 52.19 vs 57.37, code 68.11 vs 74.51, prefill@10K 1317.9 vs 1566.0 (-9.0% / -8.6% / -15.8%), TTFT unaffected (319/338 vs 310/315 ms), MTP still healthy (0.664 vs 0.688). Both sides at CV 1.1-2.4%, so the gap is outside the ~2.8% boot-to-boot band and is REAL. Cause NOT diagnosed -- container CPU scheduling / cgroup / thread affinity are the suspects, this engine being entirely host-compute-bound. BENCHMARKS row 7 is the container number and is the one to quote. ⭐⭐ ENGINE PROPERTY: exl3 COMPUTES offloaded experts on the CPU -- expert weights never cross PCIe, only activations do. Decode is therefore set by the CPU-RESIDENT EXPERT FRACTION and almost nothing else (GPU util measured 5-8% during decode on a heavily-offloaded model). ⭐⭐ --cpu-moe-threads is the biggest knob: 16 -> 28 measured +20.7% narrative / +21.3% code; the good zone is an ABSOLUTE 24-32, NOT nproc/2. The compose ships nproc/2 as a portable FLOOR and says so at boot -- set THREADS to tune. This reproduces the llama.cpp thread finding CROSS-ENGINE, so it is a property of the HOST memory subsystem, not of either engine. ⚠️ Our harness cannot read this engine's drafter counters: detect_engine misidentifies exl3 as llamacpp and greps vLLM's log format, so verify-full's spec-dec check SKIPS and reads as 'no drafter' -- a false clean that already produced one wrong report. Read 'draft N/M accepted' off the server's stdout. ⭐⭐ max_ctx 204800, reached at split 256 (up from 225) at 39.3 T/s -- the heavier tier needs a far deeper split than the 3.05 sibling's 144 for the same context, and pays for it in decode. split 224 NO-FITs, so 256 is the minimum. ⭐ The old MEASURED Q4 maximum (131072/98304/81920 all NO-FIT; VRAM 22,596/21,730 MiB) -- 2x the 32768 originally shipped, and HALF what the 3.05 sibling reaches, which is the cost of the heavier tier. ⭐ This ladder was also this tier's FIRST EVER BOOT IN THE SHIPPED CONTAINER; everything before it was derived from the 3.05 sibling. ⚠️ Q4 KV is BELOW the q8-grade serving floor -- a capacity EXHIBIT, consistent with 🐣 Incubating; maintainer decision 2026-09-18. ⚠️ ZERO PATCHES -- stock upstream tabbyAPI @ 53da791 with stock exllamav3 1.5.0 wheels. ⚠️ ATTRIBUTION: ExLlamaV3 and the official quants are turboderp's work; TabbyAPI is theroyallab's. We vendor and patch neither."
+    weights_companions: []
+    gateway: false
+    serve_aliases: []
+    required_sm: 8.6
+    category: frontier
   llamacpp-club3090/deepseek-flash-multi4-q8-moecache:
     origin: core
     model: deepseek-v4-flash-0731
@@ -3270,6 +3334,55 @@ entries:
       - gguf_mmproj_f16
     gateway: false
     serve_aliases: []
+    sampler_profiles:
+      instruct:
+        temperature: 0.7
+        top_p: 0.8
+        top_k: 20
+        min_p: 0.0
+        presence_penalty: 1.5
+        repetition_penalty: 1.0
+      thinking:
+        temperature: 1.0
+        top_p: 0.95
+        top_k: 20
+        min_p: 0.0
+        presence_penalty: 0.0
+        repetition_penalty: 1.0
+    sampler_default_mode: thinking
+  llama-cpp-prism/qwen38-27b-single-ternary-pq2:
+    origin: core
+    model: qwen3.8-27b
+    weights_variant: prism-ternary-pq2
+    workload: long-ctx-single
+    engine: llama-cpp-prism
+    drafter: null
+    spec_method: null
+    kv_format: q8_0
+    act_format: 16bit
+    act8_capable: false
+    offload: null
+    moe_cache: false
+    host_ram_gb: null
+    chat_template: native
+    tp: 1
+    max_ctx: 262144
+    max_num_seqs: 1
+    mem_util: null
+    compose_path: models/qwen3.8-27b/llama-cpp-prism/compose/single/prism-ternary-pq2/ternary.yml
+    requires_nvlink: false
+    requires_homogeneous_arch: false
+    required_engine_features: []
+    default_port: 8182
+    kvcalc_key: SKIP
+    status: incubating
+    status_note: "🧪 prism-ml Bonsai 2 27B -- a TERNARY g128 quant of Qwen3.8-27B (weights in {-1,0,+1}, one FP16 scale per 128, in a blockwise Hadamard-rotated basis), architecture unchanged. PQ2_0 = 2.13 bpw / 7.21 GB, so a 27B-class reasoning model fits ONE 3090 whole -- no offload, no expert cache, ~1/2.4 the footprint of the UD-Q4_K_XL sibling (17.6 GB). ⭐ verify-full 2026-09-18: 8 PASS / 2 skipped / 0 FAIL at 262144 ctx + q8_0 KV -- tool calling, SSE streaming, streaming tool-calls with no <tool_call> leak, reasoning separation, cascade check clean (8,500 chars, variety 0.605, max_line_repeat 2), and VISION 4/4 ON GROUND TRUTH (the mmproj loads and is correct). The 2 skips are legitimate: Genesis is vLLM-only, and the MTP check greps vLLM's log format -- and this artifact has no MTP head anyway, so nothing is missed. ⭐ BOOTED 2026-09-18 in the shipped image: loads as `ftype: PQ2_0 - 2.13 bpw (group 128)`, thinking mode works, 71.1 tok/s decode / 350.9 tok/s prompt (llama-cli, 4096 ctx, -ngl 99); upstream reports A100 73.9 and RTX 4090 81.2 on this pack, so the rig is in family. ⚠️ That is llama-cli's own counter on ONE generation, NOT bench.sh -- not citable against a BENCHMARKS row. ⚠️⚠️ REQUIRES THE PrismML llama.cpp FORK AND FAILS SILENTLY WITHOUT IT: stock llama.cpp rejects PQ2_0/PTQ1_0 as unknown types and loads Q2_0 with NO warning while producing GARBAGE, having no Hadamard activation runtime. Verified from the GGUF header pre-download: general.file_type=141, 402 of 851 tensors type 142, against a mainline enum ending at TQ2_0=35. NEVER repoint this slug at llama-cpp-local / llamacpp-club3090 / ik-llama. ⚠️⚠️ QUALITY UNVERIFIED AND THE VENDOR FIGURE DOES NOT DESCRIBE THIS ARTIFACT: the card's 84.78 thinking avg (98.2% of FP16, vs IQ2_XXS 72.59) was measured 'with EvalScope + vLLM on H100', but these packs need the fork, not vLLM. No 8-pack was run here either. ⭐⭐ FULL 262144 CONTEXT ON ONE 3090, MEASURED, AND ~FREE: the whole ladder boots (32768/65536/98304/131072/196608/262144) and decode is FLAT across it -- 46.15/46.58 tok/s at 32768 vs 45.66/45.28 at 262144, ~2% across an 8x increase, because everything is GPU-resident and there is no offload budget to trade. VRAM scales linearly at +2,080 MiB per 32,768 tokens on f16 (65 KiB/token = 16 full-attn layers x 8 KV heads x 128 dim x 2B, matching the card's ~25%-full-attention claim). KV A/B at 262144: f16 23,806 MiB (97% of the card) vs q8_0 17,108 MiB (70%) for a 0.2% decode difference -- so q8_0 is shipped. ⚠️⚠️ NO MTP, AND NONE IS POSSIBLE FROM THIS FILE -- verified in the GGUF: qwen35.block_count=64, blk indices 0..63, ZERO nextn/mtp tensors. The unsloth GGUFs of this SAME model DO ship a built-in head at blk.64.nextn.*; prism-ml's ternary conversion dropped it. So 'Qwen3.8-27B has MTP' is true of the model and FALSE of this artifact, and every throughput figure here is UN-DRAFTED. An external draft model is the only remaining spec-dec option (upstream points at Bonsai-demo); untried. ⚠️ reasoning_effort `low` is UNSUPPORTED and silently behaves like xhigh (upstream), so the compose defaults to `medium`, unlike its qwen3.8-27b siblings. ⚠️ The vision mmproj (Q8_0, clip.projector_type=qwen3vl_merger) is downloaded and wired but NEVER LOADED -- unvalidated. ⚠️ PTQ1_0 (1.75 bpw, 5.95 GB) was not downloaded; the two packs INVERT by architecture (PQ2_0 wins H100/A100/Blackwell, PTQ1_0 Ada/L4) and the 3090 is in neither row, so the pack choice here is UNDETERMINED. ⚠️ ATTRIBUTION: the ternary kernels, method and both packings are prism-ml's work (Apache 2.0); we wrap their release binary and patch nothing."
+    weights_companions:
+      - prism-ternary-mmproj-q8
+    gateway: false
+    serve_aliases: []
+    required_sm: 8.6
+    category: frontier
     sampler_profiles:
       instruct:
         temperature: 0.7

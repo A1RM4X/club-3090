@@ -47,10 +47,18 @@ def facts(text):
     slots = cmd[cmd.index("-ot") + 1].count("OT_G") if has_ot else 0
     has_ncm = any("n-cpu-moe" in c for c in cmd) or bool(
         re.search(r'--n-cpu-moe', text))
+    # exl3/TabbyAPI offloads by splitting EXPERT INDICES to the host, which it
+    # then COMPUTES there — no `-ot`, no residency bundles, no `--n-cpu-moe`.
+    # Without this arm those composes derive None ("not a CPU-offload compose"),
+    # which is both false and would quietly excuse them from the host-RAM guard.
+    has_mcs = any("cpu-moe-split-experts" in c for c in cmd) or bool(
+        re.search(r'--cpu-moe-split-experts', text))
     contract = bool(BUNDLE.search(text)) and bool(LAYERS.search(text))
-    return contract, has_ot, slots, has_ncm
+    return contract, has_ot, slots, has_ncm, has_mcs
 
-def expected(contract, has_ot, slots, has_ncm):
+def expected(contract, has_ot, slots, has_ncm, has_mcs=False):
+    if has_mcs and not has_ot:
+        return "cpu-moe-split"
     if has_ncm and not has_ot:
         return "n-cpu-moe"
     if contract and slots > 0:

@@ -1,0 +1,178 @@
+schema_version: 1
+id: exllamav3
+display_name: ExLlamaV3 1.5.0 + TabbyAPI (CPU-COMPUTED MoE expert offload)
+type: exllamav3
+stability: experimental
+install:
+  method: docker_image
+  # Digest-pinned, not tag-pinned: tags move, digests do not (#940 precedent).
+  # Built 2026-09-17 from theroyallab/tabbyAPI @ 53da791 ("Dependencies: Bump
+  # exllamav3", 2026-09-14) using UPSTREAM's own docker/Dockerfile.cu13, from a
+  # `git archive HEAD` clean context — NOT the working tree.
+  #   ⚠️ Building from a live tabbyAPI checkout is a trap: upstream's
+  #   .dockerignore excludes `venv` but NOT `.venv`, and excludes `config.yml`
+  #   but NOT `config-*.yml`. A working-tree build bakes in a multi-GB venv and
+  #   any local config files. Always build from `git archive`.
+  #
+  # Dockerfile.cu13 installs the `[cu13]` dependency group, which resolves to
+  # torch 2.11.0+cu130 and exllamav3 1.5.0+cu132.torch2.11.0 — byte-for-byte the
+  # same stack the 2026-09-17 measurements were taken on (a host venv). The cu12
+  # Dockerfile pins torch+cu128 instead and was NOT validated here.
+  #
+  # ⚠️ NO PATCHES ARE VENDORED. This engine runs stock upstream — it is the only
+  # engine on this stack serving a frontier MoE with zero deltas. Consequently the
+  # pin exists for trigger (2) reproducibility only, not to protect patch hooks.
+  spec: ghcr.io/noonghunna/tabbyapi-club3090@sha256:87490d21a61ad0bc74093411ea431bcaacaeae748fa7d109df0a07217651ca0c
+
+# ---------------------------------------------------------------------------
+# WHY THIS ENGINE EXISTS ON THE STACK
+#
+# exl3 is the first engine here where offloaded MoE experts are COMPUTED ON THE
+# CPU rather than streamed to the GPU — expert weights never cross PCIe, only
+# activations do. That is a structural difference from every other offload path
+# we run, and it inverts the tuning model:
+#
+#   moe-cache  → the lever is HIT RATE (keep hot experts resident, pay on miss)
+#   exl3       → the lever is CPU-RESIDENT FRACTION (the host computes that share)
+#
+# MEASURED consequence (2026-09-17, three points, one engine, same rig):
+#   Qwen3.8-Flash-Next 3.05bpw  25% CPU-resident → 57.37 narrative TPS
+#   Qwen3.8-Flash-Next 4.05bpw  44% CPU-resident → 48.53
+#   GLM-5.3-Flash      4.05bpw  80% CPU-resident → 10.9   (GPU util 5-8%: idle cards)
+#
+# ⭐ SELECTION RULE — estimate `bpw × params` against total VRAM BEFORE
+# downloading. Under ~30% CPU-resident exl3 is competitive-to-excellent; over
+# ~50% the model belongs on an engine with a real expert cache. `-mcs` splits by
+# expert INDEX (tail-N to CPU) with a slow rebalancing sweep, so it cannot win
+# where most experts must live off-card. GLM was evaluated on this engine and
+# REJECTED on exactly this basis (learnings/glm-5.3-flash.md 2026-09-17).
+# ---------------------------------------------------------------------------
+
+min_sm: 8.6
+# ⭐ Ampere is FIRST-CLASS here, unlike the SGLang path that was abandoned for
+# this model family. exl3's kernels are hand-written for the trellis codebook and
+# carry no FA3 / fp8-native / NVLink-allreduce dependency, so none of the sm_90+
+# gates that blocked SGLang apply. No from-source build, no patches: the engine
+# ships prebuilt cu132/torch2.11.0/cp312 wheels.
+
+supported_model_families:
+  - qwen4exp              # Qwen3.8-Flash-Next (MoE, 1:3 hybrid, PLE n-gram)
+                          # ⚠️ must match models/qwen3.8-flash-next.yml `family:`
+                          # EXACTLY — the resolver gates on the FAMILY tag, not the
+                          # arch name. Added 2026-09-17 WITH the composes, not
+                          # before: the sibling profiles learned the hard way that a
+                          # family tag without a compose gives the resolver nothing
+                          # to point at.
+  # ⛔ glm5next is DELIBERATELY ABSENT. GLM-5.3-Flash 4.05bpw was booted on this
+  #    engine 2026-09-17 and everything worked (vision 4/4, tools, MTP 57%,
+  #    reasoning) — it was rejected purely on throughput (10.9 vs the shipped
+  #    moe-cache 15.45) because it needs 80% of experts CPU-resident. Do not add
+  #    the tag without re-reading the selection rule above.
+
+features:
+  cpu_moe_split_experts: true   # `-mcs` / `cpu_moe_split_experts`: tail-N experts
+                                # per layer computed on the host, hot set kept on
+                                # VRAM, with a dynamic swap sweep
+                                # (EXL3_MOE_CPU_SWAP_INTERVAL, default 128 decode
+                                # steps).
+  ngram_table_offload: true     # Qwen's 31 GB PLE / n-gram table. ⭐ DISK-STREAMING
+                                # IS THE UPSTREAM DEFAULT — it is never in VRAM.
+                                # `ngram_ram: true` opts into holding it in system
+                                # RAM instead, which is what our composes ship.
+  vision_offload: true          # vision tower on the host; cost measured at +46 MiB
+                                # VRAM on GLM. No separate mmproj artifact exists —
+                                # the vision weights are IN the exl3 quant.
+
+supported_kv_formats:
+  - fp16                  # `cache_mode: FP16`. The tier ladders were first
+                          # measured on it.
+  - q4_0                  # ⭐ ADDED 2026-09-18 WITH BOOT EVIDENCE on both tiers.
+                          # ⚠️ TAXONOMY NOTE: exl3 spells this `Q4` (its modes are
+                          # FP16|Q8|Q6|Q4 — see CACHE_SIZES in TabbyAPI's
+                          # common/config_models.py). It is NOT llama.cpp's q4_0
+                          # BLOCK FORMAT — same bit width, different
+                          # implementation. `q4_0` is used here because it is the
+                          # existing 4-bit token in the registry/hardware
+                          # taxonomy; the compose passes the literal `Q4`.
+                          # ⚠️ Q4 is BELOW this stack's q8-grade serving floor, so
+                          # it is a SPEED/CAPACITY EXHIBIT — which is consistent
+                          # with both slugs shipping 🐣 Incubating. Maintainer
+                          # decision 2026-09-18, taken to maximise context.
+                          # MEASURED max context at Q4 (descending ladder, first
+                          # boot is the max):
+                          #     3.05bpw -> 106496  (122880/114688 NO-FIT)
+                          #     4.05bpw ->  65536  (131072/98304/81920 NO-FIT)
+                          # ⛔ Q8 and Q6 remain UNSHIPPED: Q8 caps 3.05 at 65536,
+                          # i.e. LESS context than Q4 buys, which is the whole
+                          # reason Q4 was chosen.
+
+supported_drafters:
+  - mtp                   # The model's BUILT-IN MTP head, via `draft_mode: mtp`.
+                          # ⚠️⚠️ THIS FIELD HOLDS spec_method VALUES, NOT DRAFTER
+                          # IDs — compat.py C7 compares against
+                          # `drafter.spec_method`. The sibling llamacpp profile
+                          # records three failed revisions of exactly this field.
+                          # Listed here although our composes set `drafter: null`:
+                          # exl3's MTP needs NO external drafter artifact (the head
+                          # ships inside the quant, alongside
+                          # mtp_hyper_connection_mixer_patch.safetensors), so it is
+                          # a runtime spec-type like the moe-cache engine's
+                          # `ngram-mod`.
+                          # MEASURED 2026-09-17 on 3.05bpw: acceptance 0.688,
+                          # accept_len 3.31, effective k 3.36 at
+                          # draft_num_tokens=4 + dynamic_draft=true.
+
+supported_weight_formats:
+  - exl3                  # turboderp's trellis/mul1 codebook quantization. Weight-
+                          # only — there is no activation-quant concept in exl3, so
+                          # `act_format` is always 16bit for these slugs.
+
+required_overlays: []
+vendored_overlays: []
+  # ⚠️ GENUINELY EMPTY — unlike the llamacpp profiles, where [] is a convention
+  # standing in for baked-in vendoring. This image is stock upstream tabbyAPI at
+  # 53da791 with stock exllamav3 1.5.0 wheels. Nothing is patched, mounted or
+  # grafted. If that ever stops being true, this field must gain a real entry with
+  # a source path on disk or diagnose-profile [6/6] fails.
+required_genesis: false
+
+notes: >
+  🧪 EXPERIMENTAL — catalogued 2026-09-17. ⛔⛔ RETRACTED 2026-09-18 — the container-vs-venv gap was a COMPOSE BUG of ours: no
+  `environment:` block, so $THREADS never reached the container and it ran at nproc/2
+  = 16 threads while the venv used 28 (+20.7% lever). Re-measured with the knob live:
+  narrative 52.19 → 61.60, code 68.11 → 79.86, TTFT 319/338 → 279/311 ms. ⚠️ It does
+  NOT prove the reverse — those runs differ in ctx/KV/split, so a like-for-like
+  comparison has never been run. ⭐ A boot proves the server RUNS, not that it runs
+  the CONFIG you think.
+  ⛔ NOT RUN ON ANY ARTIFACT: the quality 8-pack, verify-stress, soak-continuous,
+  a concurrency curve, or any context above 32768. The 32K figure is what was
+  tested, NOT a ceiling — it is simply where `max_seq_len` was left. Quality is
+  DELIBERATELY left to community validation (maintainer decision 2026-09-17), which
+  is why both slugs ship 🐣 Incubating rather than 🧪 Experimental.
+  ⚠️ OUR HARNESS CANNOT READ THIS ENGINE'S DRAFTER COUNTERS. `detect_engine`
+  misidentifies exl3 as `llamacpp` and greps vLLM's `SpecDecoding metrics` out of
+  `docker logs`; exl3 emits `draft N/M accepted` on its own stdout. verify-full's
+  spec-dec check therefore SKIPS and reads as "no drafter" — a false clean that
+  already produced one wrong report (learnings/exllamav3-engine.md 2026-09-17).
+  Read the engine's own counter until detect_engine learns this engine.
+  ⚠️ TabbyAPI is CONFIG-FILE DRIVEN, not CLI-flag driven, unlike every other engine
+  here. The compose mounts a config.yml; there are no server flags to read in the
+  compose body, so the tuned values live in the mounted file and the compose header
+  is the only place they are visible at a glance.
+  ⚠️ ATTRIBUTION: ExLlamaV3 and the official quants are turboderp's work
+  (github.com/turboderp-org/exllamav3); TabbyAPI is theroyallab's. We vendor
+  neither and patch neither — what we contribute is measurement.
+
+feature_provenance:
+  cpu_moe_split_experts:
+    author: turboderp
+    source: https://github.com/turboderp-org/exllamav3
+    status: upstream
+  ngram_table_offload:
+    author: turboderp
+    source: https://github.com/turboderp-org/exllamav3
+    status: upstream
+  serving_api:
+    author: theroyallab
+    source: https://github.com/theroyallab/tabbyAPI
+    status: upstream

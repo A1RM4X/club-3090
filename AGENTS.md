@@ -174,6 +174,10 @@ Relative paths from a compose to its sibling patches/caches: `../../../patches/.
 
 **If a future patch is genuinely topology-specific** (e.g., a kernel rewrite that only applies to TP=2), keep it at `<engine>/patches/<patch-name>/` and document the topology constraint in the patch's README. Discoverability ("one `patches/` per engine, search there") trumps the marginal benefit of a topology partition.
 
+#### Engine patch provenance — upstream first
+
+Engine-code patches enter the catalog from an **upstream PR or upstream commit** (merged or open) as the standard path. A user- or community-authored engine patch is vendored only when **both** hold: (1) **critical** — a measured crash, corruption, or severe perf/cliff defect with a repro, not a capability or tuning preference; (2) **not yet available upstream** — no open upstream PR/commit covers the fix. Every `patches.yml` entry carries `upstream.status` + ref; entries in the exception class additionally carry a one-line criticality justification and a drop trigger (file-upstream tracking / merge-inherit). Chat templates and other data files are not engine code and are out of scope; diagnostic overlays and negative-result records are not shipped fixes and are out of scope. When an exception-class patch's fix lands upstream in a pinned release, drop the vendored copy in the same pin bump (existing drop-trigger convention).
+
 #### Profile schema header (every compose, every time)
 
 Every compose starts with a `Profile (at-a-glance)` block declaring the (Model, Topology, Drafter, KV, Vision, Max-ctx, Genesis) tuple in structured form. Free-form description follows below the schema, not in place of it.
