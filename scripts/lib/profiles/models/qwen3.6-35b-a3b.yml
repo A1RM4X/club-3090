@@ -123,7 +123,10 @@ weights:
       - Qwen3.6-35B-A3B-APEX-MTP-I-Compact.gguf
     engine: ik-llama
     kind: gguf
-    verify_glob: "*.gguf"
+    # ⚠️ MUST be pack-specific: compact and quality are DIFFERENT files in the
+    # SAME subdir, so a bare "*.gguf" made them indistinguishable to
+    # weights_state_for() — either one present reported both present.
+    verify_glob: "*Compact.gguf"
   byteshape-iq4xs:
     path: qwen3.6-35b-a3b-gguf/byteshape-iq4xs
     local_subdir: qwen3.6-35b-a3b-gguf/byteshape-iq4xs
@@ -150,7 +153,10 @@ weights:
       - Qwen3.6-35B-A3B-APEX-MTP-I-Quality.gguf
     engine: ik-llama
     kind: gguf
-    verify_glob: "*.gguf"
+    # ⚠️ MUST be pack-specific: compact and quality are DIFFERENT files in the
+    # SAME subdir, so a bare "*.gguf" made them indistinguishable to
+    # weights_state_for() — either one present reported both present.
+    verify_glob: "*Quality.gguf"
   morikomorizz-q6kp:
     # Uncensored "HauhauCS-Aggressive" fine-tune of Qwen3.6-35B-A3B, Q6_K_P GGUF
     # WITH embedded nextn MTP head (loads on mainline llama.cpp b9570). Dual-card.

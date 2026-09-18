@@ -144,7 +144,10 @@ weights:
       - mmproj-F16.gguf
     engine: llama-cpp
     kind: mmproj
-    verify_glob: "*.gguf"
+    # ⚠️ MUST be mmproj-specific: this entry SHARES subdir qwen3.6-27b-gguf with
+    # the `gguf` variant, so a bare "*.gguf" also matched the MAIN model file and
+    # reported the projector PRESENT after it had been deleted (2026-09-18).
+    verify_glob: "mmproj*.gguf"
     setup_weights_key: gguf
   ubergarm-iq4ks:
     path: qwen3.6-27b-gguf/ubergarm-mtp-iq4ks
