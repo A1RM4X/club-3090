@@ -10,7 +10,8 @@
 #   bash scripts/switch.sh <variant>            # switch + tail until ready
 #   bash scripts/switch.sh <variant> --no-wait  # switch and return immediately
 #   bash scripts/switch.sh --force <variant>    # skip hardware/free-VRAM preflight
-#   bash scripts/switch.sh --owui <variant>     # after ready, also register it in Open WebUI (no-op if OWUI down)
+#   bash scripts/switch.sh <variant>            # OWUI picker is synced automatically once ready (no-op if OWUI down)
+#   bash scripts/switch.sh --no-owui <variant>  # ...unless you opt out
 #   bash scripts/switch.sh --list               # actionable variants on THIS machine (deprecated hidden) + defaults
 #   bash scripts/switch.sh --list --all         # every variant — all GPU counts + deprecated
 #   bash scripts/switch.sh --list-all           # alias for --list --all
@@ -957,6 +958,13 @@ down_running() {
     fi
   done
   [[ "$brought_down" -eq 1 ]] || echo "[switch] no club-3090 container running"
+  # Teardown must prune too, or `--down` leaves the OWUI picker advertising a
+  # model that is no longer serving — the same stale-entry class that let seven
+  # dead connections accumulate. Only club-owned ports are eligible, and it is a
+  # no-op when OWUI is not running, so this is safe on every teardown path.
+  if [[ "${OWUI_REGISTER:-1}" -eq 1 ]]; then
+    bash "$(dirname "$0")/lib/owui-register.sh" --prune-only || true
+  fi
 }
 
 gpu_preflight() {
@@ -1429,7 +1437,13 @@ VARIANT=""
 LIST_REQUESTED=0
 LIST_ALL=0
 LIST_LOCAL=0
-OWUI_REGISTER=0
+# Default ON (2026-09-18). It was opt-in via --owui, which meant the common case
+# — launch a slug, open the picker — silently showed nothing, while the endpoints
+# that HAD been registered stayed forever because the helper was append-only.
+# Syncing on every launch is what makes "whatever is running is what you see"
+# true. Still safe to leave on: owui-register.sh is a no-op when OWUI is not
+# running, and it only ever prunes ports this repo owns.
+OWUI_REGISTER=1
 EXPLAIN_REQUESTED=0
 EXPLAIN_SLUG=""
 EXPLAIN_JSON=0
@@ -1473,7 +1487,8 @@ while [[ $# -gt 0 ]]; do
     --down) down_running; exit 0 ;;
     --no-wait) WAIT=0 ;;
     --force) FORCE=1 ;;
-    --owui) OWUI_REGISTER=1 ;;
+    --owui) OWUI_REGISTER=1 ;;          # back-compat: now the default
+    --no-owui) OWUI_REGISTER=0 ;;       # skip OWUI sync entirely
     --*) echo "Unknown flag: $1"; exit 1 ;;
     *)
       if [[ -n "$VARIANT" ]]; then
@@ -1529,8 +1544,11 @@ resolve_ready_url "${VARIANT}"
 down_running
 up_variant "${VARIANT}"
 [[ $WAIT -eq 1 ]] && wait_ready
-# --owui: optionally surface the just-launched endpoint in Open WebUI's model
-# picker (no-op if OWUI isn't running). Only meaningful once the server is ready.
+# OWUI sync (default on; --no-owui to skip): surface the just-launched endpoint in
+# Open WebUI's model picker AND prune club-owned connections that are no longer
+# serving, so the picker matches reality. No-op if OWUI isn't running. Only
+# meaningful once the server is ready — a not-yet-listening port would be pruned
+# by its own liveness probe.
 if [[ "$OWUI_REGISTER" -eq 1 && "$WAIT" -eq 1 ]]; then
   _owui_port="${READY_URL##*:}"; _owui_port="${_owui_port%%/*}"
   bash "$(dirname "$0")/lib/owui-register.sh" "$_owui_port" || true
