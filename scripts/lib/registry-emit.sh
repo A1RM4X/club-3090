@@ -693,7 +693,18 @@ def _weights_meta(model: str, variant: str):
     global _WFMT
     if _WFMT is None:
         _WFMT = {}
-        for _p in sorted((root / "scripts/lib/profiles/models").glob("*.yml")):
+        # ⚠️ BOTH LAYERS. Globbing only the core `models/` dir left every
+        # LOCAL-layer slug resolving to (None, None), so c3 rendered its weights
+        # / provider columns blank no matter what the local model profile said —
+        # measured 2026-09-18: 1 of 138 emit rows had weights_format=None and it
+        # was the only local entry. get_registry() merges the two layers, so the
+        # emit that feeds the cockpit must read both too or the local layer is
+        # half-visible: status and kv_format arrive, weights facts do not.
+        # Core is globbed LAST so a core id always wins on a key collision.
+        _model_dirs = [root / "scripts/lib/profiles-local/models.d",
+                       root / "scripts/lib/profiles/models"]
+        for _p in [q for _d in _model_dirs if _d.is_dir()
+                   for q in sorted(_d.glob("*.yml"))]:
             # NOTE: _yaml (this block's alias), NOT yaml — a bare `yaml` here is
             # a NameError that a blanket except would silently eat to an empty
             # map (the exact swallowed-failure class #599 warned about).
