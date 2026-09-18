@@ -19,7 +19,7 @@
 #
 # CONTRACT
 # --------
-# Every function prints exactly one of: vllm | llamacpp | sglang | unknown
+# Every function prints exactly one of: vllm | llamacpp | sglang | exllamav3 | unknown
 # and returns 0. "unknown" is a value, not an error — callers must handle it
 # rather than treating silence as a kind. Nothing here touches the network.
 #
@@ -49,6 +49,7 @@ engine_kind_from_engine_id() {
   case "${1:-}" in
     vllm*)                                   echo "vllm" ;;
     sglang*|sgl-*)                           echo "sglang" ;;
+    exllamav3*|exl3*)                        echo "exllamav3" ;;
     llama-cpp*|llamacpp*|ik-llama*|beellama*) echo "llamacpp" ;;
     *)                                       echo "unknown" ;;
   esac
@@ -63,6 +64,7 @@ engine_kind_from_container() {
   case "${1:-}" in
     vllm-*)                                        echo "vllm" ;;
     sglang-*|sgl-*)                                echo "sglang" ;;
+    tabbyapi-*|exl3-*|exllamav3-*)                 echo "exllamav3" ;;
     llama-cpp-*|llamacpp-*|ik-llama-*|beellama-*)  echo "llamacpp" ;;
     *)                                             echo "unknown" ;;
   esac
@@ -76,6 +78,7 @@ engine_kind_from_container() {
 engine_kind_from_image() {
   local ref="${1:-}"
   case "$ref" in
+    *tabbyapi*|*exllamav3*)             echo "exllamav3" ;;
     *llama.cpp*|*llama-cpp*|*llamacpp*) echo "llamacpp" ;;
     *sglang*|*lmsysorg*)                echo "sglang" ;;
     *vllm*)                             echo "vllm" ;;
