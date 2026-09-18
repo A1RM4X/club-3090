@@ -105,5 +105,35 @@ else
   ok "no script re-implements the engine mapping privately"
 fi
 
+# --- 5: no script may hand-list CONTAINER NAME PREFIXES ---------------------
+# The sibling defect to arm 4. Arm 4 polices "which engine is this?"; this one
+# polices "is this container ours at all?" — a different question that was ALSO
+# copy-pasted per script, so every new engine silently fell out of every copy.
+#
+# #281 already fixed this once, in switch.sh: teardown used a fixed
+# `^(vllm-|llama-cpp-)` regex, missed beellama-/ik-llama-/sglang- containers and
+# leaked their VRAM across switches. The other copies were never converted, so by
+# 2026-09-18 report.sh's filter was missing BOTH sglang- and exl3, and health.sh
+# was missing exl3 — a rig serving exl3 was told "no engine container running"
+# over a healthy server. "Not found" reads exactly like "not there".
+#
+# The set is registry-derived in scripts/lib/club-containers.sh.
+# ⚠️ TWO SHAPES. The first pass of this arm only knew the `--filter 'name=X-'`
+# form and therefore missed soak-test.sh, which hand-listed the SAME set as a
+# grep alternation `^(vllm-|llama-cpp-|...)`. A gate that knows one spelling of a
+# copy-paste is a gate that certifies the other spelling as clean.
+hand="$(command grep -rnE "name=(vllm|llama-cpp|beellama|ik-llama|sglang|tabbyapi)-|\\^\\((vllm|llama-cpp|ik-llama|sglang|beellama)-\\|" \
+          "${ROOT}/scripts" --include='*.sh' 2>/dev/null \
+          | command grep -v '/scripts/tests/' \
+          | command grep -v '/scripts/lib/club-containers.sh' \
+          | command grep -vE ':[0-9]+:[[:space:]]*#' \
+          | command grep -vE "name=vllm-qwen36" || true)"
+if [[ -n "$hand" ]]; then
+  bad "hand-listed container prefixes" \
+      "discovery via club_running_container / club_container_re" "$hand"
+else
+  ok "no script hand-lists container-name prefixes (registry-derived discovery)"
+fi
+
 if [[ $FAIL -ne 0 ]]; then echo "FAIL: $NAME" >&2; exit 1; fi
 echo "PASS: $NAME (centralised engine-kind resolver, #1282)"
