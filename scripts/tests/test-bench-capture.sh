@@ -27,7 +27,19 @@ export PYTHONUTF8="${PYTHONUTF8:-1}"   # repo rule: locale must not decide pytho
 BENCH="$ROOT_DIR/scripts/bench.sh"
 LIB="$ROOT_DIR/scripts/lib/capture.sh"
 FIX="$ROOT_DIR/scripts/tests/fixtures/offload-matrix"
-PORT_BASE="${TEST_PORT:-8147}"
+# ⚠️⚠️ FIXTURE PORTS LIVE ABOVE THE PRODUCT'S PORT SPACE, ON PURPOSE.
+# This test binds fake servers across PORT_BASE..PORT_BASE+20. The registry
+# allocates real slug `default_port`s across 8010-8199, so a base inside that
+# span silently collides: any slug parked on one of these 21 ports makes this
+# guard fail WHENEVER THAT MODEL IS SERVING, and the failure reads as a broken
+# test rather than a port clash. Measured 2026-09-18: the old 8147 base overlapped
+# ELEVEN registry slugs (eight sgl/qwen38-27b-multi* on 8147-8154 plus three
+# newer ones), and three suite failures were misdiagnosed as pre-existing before
+# the cause was found. 18147+ is clear of the product space entirely.
+# ⚠️ Other fixtures still sit INSIDE 8010-8199 (test-bench-card 8171,
+# test-offload-matrix-mocked 8137, tier2/test-offload-matrix-real 8138) and carry
+# the same latent clash — not addressed here.
+PORT_BASE="${TEST_PORT:-18147}"
 fail() { echo "FAIL: $1" >&2; exit 1; }
 
 for f in "$BENCH" "$LIB" "$FIX/fake-llama-server" "$FIX/fake-nvidia-smi"; do
