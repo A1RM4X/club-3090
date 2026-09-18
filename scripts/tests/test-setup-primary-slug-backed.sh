@@ -113,6 +113,26 @@ catalog = json.loads(
     ).stdout
 )["models"]
 entries = yaml.safe_load((root / "scripts/lib/profiles/registry.yaml").read_text(encoding="utf-8"))["entries"]
+# ⚠️ BOTH LAYERS, or this gate is guaranteed to fail on any LOCAL-layer model.
+# `weights.py catalog --json` above reads the merged catalog (core +
+# profiles-local/models.d), so a local model arrives in `models`; reading only
+# registry.yaml for `entries` meant its serving slug — which lives in
+# registry.local.json — was invisible, and the gate reported "this model has no
+# registry entries at all" about a model that is served perfectly well. Same
+# layer asymmetry as the registry-emit `_weights_meta` bug. Core is loaded FIRST
+# so a local slug can never shadow a core one on a key collision.
+# Optional by design: the local layer is gitignored and absent on most checkouts.
+_local = root / "scripts/lib/profiles/profiles-local/registry.local.json"
+if not _local.exists():
+    _local = root / "scripts/lib/profiles-local/registry.local.json"
+if _local.exists():
+    try:
+        _extra = json.loads(_local.read_text(encoding="utf-8"))
+        if isinstance(_extra, dict):
+            for _slug, _e in _extra.items():
+                entries.setdefault(_slug, _e)
+    except Exception as exc:                      # never let a local file break the gate
+        print(f"  note: could not read the local registry layer ({exc}) — core only")
 
 problems = scan(catalog, entries)
 if problems:
