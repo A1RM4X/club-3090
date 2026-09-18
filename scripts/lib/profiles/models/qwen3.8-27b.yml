@@ -221,7 +221,10 @@ weights:
     engine: llama-cpp-prism
     kind: gguf
     # ⚠️ REQUIRED on every GGUF entry — the default `*.safetensors` matches nothing.
-    verify_glob: "*.gguf"
+    # ⚠️ MUST be pack-specific: shares subdir with prism-ternary-mmproj-q8, so a
+    # bare "*.gguf" also matched the 0.63 GB projector — the two entries were
+    # indistinguishable to weights_state_for() (2026-09-18).
+    verify_glob: "*PQ2_0.gguf"
     manual_note: "🧪 Bonsai 2 27B — a TERNARY g128 quant of Qwen3.8-27B ({-1,0,+1} weights, one FP16 scale per 128, Hadamard-rotated basis), architecture unchanged. PQ2_0 packs one trit per 2-bit slot: 2.13 bpw, 7.21 GB — so a 27B-class model fits ONE 3090 whole, with no offload and no expert cache. ⭐ BOOTED 2026-09-18 in the shipped image: loads as `ftype: PQ2_0 - 2.13 bpw (group 128)`, thinking mode works, 71.1 tok/s decode / 350.9 tok/s prompt on llama-cli at 4096 ctx (upstream reports A100 73.9 / RTX 4090 81.2 on this pack, so the rig is in family). ⚠️ That is llama-cli's own counter on ONE generation, NOT bench.sh — not a citable BENCHMARKS figure. ⛔ NO bench.sh / verify-full / stress / soak / 8-pack / vision / concurrency, and nothing above 4096 ctx (the model declares 262144). ⚠️ VENDOR QUALITY CLAIM UNVERIFIED AND ITS METHOD DOES NOT MATCH THIS ARTIFACT: the card's headline (84.78 thinking avg = 98.2% of FP16, vs IQ2_XXS 72.59) was measured 'with EvalScope + vLLM on NVIDIA H100' — but these packs require the PrismML llama.cpp fork, not vLLM, so that number was not demonstrably taken on this GGUF. ⚠️ The sibling PTQ1_0 pack (1.75 bpw, 5.95 GB) was NOT downloaded; the two packs INVERT by architecture (PQ2_0 wins on H100/A100/Blackwell, PTQ1_0 on Ada/L4) and the 3090 appears in neither row, so the pack choice here is UNDETERMINED."
   prism-ternary-mmproj-q8:
     path: qwen3.8-27b-gguf/prism-ternary
@@ -234,7 +237,10 @@ weights:
     files:
       - Ternary-Bonsai-2-27B-mmproj-Q8_0.gguf
     engine: llama-cpp-prism
-    verify_glob: "*.gguf"
+    # ⚠️ MUST be mmproj-specific: this entry SHARES subdir with prism-ternary-pq2,
+    # so a bare "*.gguf" matched the 7.21 GB PQ2_0 file and reported the
+    # projector PRESENT even when it had been deleted (2026-09-18).
+    verify_glob: "*mmproj*.gguf"
     manual_note: "Vision tower for the Bonsai ternary packs, shipped SEPARATELY from the language model and loaded only when an image arrives — text-only serving never pays for it. Verified from the header: `general.architecture = clip`, `clip.projector_type = qwen3vl_merger`, 334 tensors. ⚠️ Same caveat as the Flash-Next projector: qwen3vl_merger maps to PROJECTOR_TYPE_QWEN3VL, i.e. vision works by REUSING the Qwen3VL path, so a change there affects this model. ⛔ DOWNLOADED BUT NEVER LOADED — vision is entirely unvalidated on this engine. A BF16 reference projector (0.93 GB) also exists upstream and was not taken."
 
 default_weight_variant: unsloth-iq4xs
