@@ -1,0 +1,302 @@
+# ===========================================================================
+# Profile (at-a-glance):
+#   Model:     Qwen3.8-Flash-Next (arch `qwen4exp`, turboderp EXL3 3.05bpw —
+#              80 GB across 7 shards + a 31 GB n-gram table). Trellis/mul1
+#              codebook quant, weight-only: bits 3.05 · head_bits 5 · mtp_bits 3
+#              (read from quantization_config.json, not a card).
+#              ⚠️ The HF branch is `3.05bpw_h5_ng5` — the 4.05 sibling is
+#              `_h6_ng6`. The suffixes differ; do not copy one onto the other.
+#   Engine:    ExLlamaV3 1.5.0 + TabbyAPI (stock upstream @ 53da791, ZERO patches)
+#   Topology:  Dual 3090 PCIe (exl3 autosplit layer-split, NOT tensor-parallel)
+#   Spec-dec:  ✅ Built-in MTP, ON by default. draft_num_tokens=4 as a CEILING
+#              with dynamic_draft — NOT a fixed depth. MEASURED: acceptance
+#              0.688, accept_len 3.31, effective k 3.36. Needs NO drafter file:
+#              the head ships inside the quant. SPEC_N=<n> depth; SPEC_N=0 /
+#              SPEC=off removes the flags.
+#   Drafter:   NONE as an artifact — see above. `drafter: null` in the registry,
+#              `spec_method: mtp`.
+#   KV:        FP16 (`cache_mode`). ⛔ The ONLY KV format validated on this
+#              engine here. exl3 offers quantised modes; none were booted.
+#   Thinking:  ✅ ON — `reasoning: true` with explicit <think> tokens.
+#   Vision:    ✅ yes — built INTO the quant (no mmproj artifact, unlike every
+#              GGUF path here). `vision_offload` keeps the tower in system RAM.
+#   Max ctx:   32768 shipped. ⚠️ This is WHAT WAS TESTED, NOT A CEILING — it is
+#              simply where max_seq_len was left. The model declares 262144.
+#   Genesis:   N/A — not a vLLM engine
+#   Status:    🐣 Incubating
+# CPU-Offload-Host-RAM-GB: 96
+#   ⤷ 80 GB of weights, of which ~25% of experts are CPU-resident and computed
+#     there, plus the 31 GB n-gram table held in RAM (`ngram_ram: true`).
+#     Registry `host_ram_gb` is the NOMINAL figure and must stay <= this.
+#   Best for:  long-prompt and agentic serving where PREFILL and TTFT dominate —
+#              1566 tok/s @10K and ~310 ms TTFT, vs ~565 and ~546 ms for the
+#              bucko vLLM recipe on the same model.
+#   Caveats:
+#     • ⚠️⚠️ QUALITY IS UNMEASURED AT THIS BIT RATE. No 8-pack, no
+#       verify-stress, no soak. 3.05bpw is low enough that part of the
+#       speed win is BECAUSE it is smaller — this slug is explicitly
+#       offered for COMMUNITY validation (maintainer, 2026-09-17), which
+#       is why it ships 🐣 and not 🧪. If you want the more conservative
+#       bit rate, use the `exl3-4.05bpw` sibling.
+#     • ⛔⛔ RETRACTED 2026-09-18 — the "container is ~9% slower than the
+#       venv" caveat that stood here was OUR COMPOSE BUG, not containers.
+#       This file had no `environment:` block, so $THREADS never reached
+#       the container and thread resolution took the nproc/2 branch = 16,
+#       while the venv runs used 28 — a +20.7% lever on this engine.
+#       Re-measured with the knob VERIFIED live in the boot log:
+#       narrative 52.19 → 61.60 (+18.0%), code 68.11 → 79.86 (+17.3%),
+#       TTFT 319/338 → 279/311 ms.
+#       ⚠️ It does NOT prove the reverse: that run is ctx 204800/Q4/split
+#       144 vs the venv's 32768/FP16/split 128 — a like-for-like
+#       comparison has still never been run.
+#       ⭐ A boot proves the server RUNS, not that it runs the CONFIG you
+#       think. The boot log names the branch; one grep would have shown it.
+#     • ⚠️ It does NOT beat the shipped bucko vLLM recipe on decode:
+#       narrative 57.37 vs 68.12 (−15.8%). Code is 74.51 vs 74.09, which
+#       is a TIE inside boot-to-boot noise (~2.8%), not a win. Pick this
+#       slug for prefill/TTFT, not for raw decode.
+#     • ⭐⭐ `--cpu-moe-threads` IS THE BIGGEST KNOB — bigger than any
+#       placement setting. MEASURED 16 → 28 threads: +20.7% narrative /
+#       +21.3% code. The good zone is an ABSOLUTE ~24–32, NOT nproc/2.
+#       This compose resolves nproc/2 as a PORTABLE FLOOR and says so at
+#       boot; set THREADS=<n> to tune. (The same law was found
+#       independently on llama.cpp — it is a property of the HOST memory
+#       subsystem, not of either engine.)
+#     • ⭐ `--cpu-moe-split-experts` is a TIER choice, not a tuning knob.
+#       Sweeping it within a tier did essentially nothing; changing the
+#       bit rate 4.05 → 3.05 moved the CPU-resident share 44% → 25% and
+#       bought +18% on decode, code AND prefill at once. Leave it alone.
+#     • ⚠️ OUR HARNESS CANNOT READ THIS ENGINE'S DRAFTER COUNTERS.
+#       `detect_engine` misidentifies exl3 as `llamacpp` and greps vLLM's
+#       log format, so verify-full's spec-dec check SKIPS and reads as
+#       "no drafter" — a false clean that already produced one wrong
+#       report. Read `draft N/M accepted` off the server's own stdout.
+#     • ⚠️ The 31 GB n-gram/PLE table is DISK-STREAMED by upstream default
+#       and is never in VRAM. `--ngram-ram true` opts into holding it in
+#       system RAM, which is what the host_ram_gb figure above assumes.
+#       Drop it on a RAM-constrained box and accept the latency.
+#     • ⚠️ ATTRIBUTION: ExLlamaV3 and the official quants are turboderp's
+#       work; TabbyAPI is theroyallab's. We vendor and patch neither.
+# ---------------------------------------------------------------------------
+# Detail: BENCHMARKS.md row 6 · learnings/exllamav3-engine.md ·
+#         learnings/qwen3.8-flash-next.md (2026-09-17)
+# ===========================================================================
+
+services:
+  tabbyapi-qwen38-flash-next-exl3-305:
+    # Digest-pinned, not tag-pinned: tags move, digests do not (#940 precedent).
+    # The engine profile (engines/exllamav3.yml) is authoritative; keep in step.
+    # Built 2026-09-17 from theroyallab/tabbyAPI @ 53da791 via UPSTREAM's own
+    # docker/Dockerfile.cu13, from a `git archive` clean context.
+    image: ${EXLLAMAV3_IMAGE:-ghcr.io/noonghunna/tabbyapi-club3090@sha256:87490d21a61ad0bc74093411ea431bcaacaeae748fa7d109df0a07217651ca0c}
+    container_name: ${ESTATE_CONTAINER:-tabbyapi-qwen38-flash-next-exl3-305}
+    restart: unless-stopped
+    # Reap orphaned children — without it a wedged server becomes a <defunct>
+    # PID 1 child docker cannot kill, holding GPU memory and host RAM until
+    # every later boot is refused. Cost 8 of 9 A/B arms on the sibling engine.
+    init: true
+    # ⚠️⚠️ CONTAINER-ONLY REQUIREMENT — NOT NEEDED IN A VENV, AND THE DEFAULT IS
+    # TOO SMALL. exl3's CPU-MoE handoff segment is POSIX shared memory, and
+    # Docker gives /dev/shm 64 MiB by default. MEASURED on first boot of this
+    # image: the segment wanted 68.1 MiB and the server raised
+    #   "RuntimeError: The CPU MoE offload handoff segment needs 68.1 MiB of
+    #    POSIX shared memory (/dev/shm), but only 64.0 MiB ... is free"
+    # — the model LOADS and reports healthy, then EVERY generation aborts with
+    # "chat completion aborted. Maybe the model was unloaded?", which points at
+    # the wrong thing entirely. 2 GB is headroom, not a measurement: the segment
+    # scales with cpu_moe_split_experts, so the 4.05 sibling (225 vs 128) needs
+    # more than this tier does. Do not trim it to 128m "because 68 fits".
+    shm_size: "2gb"
+    ports:
+      # TabbyAPI listens on 5000 inside the container (upstream EXPOSE).
+      # ⚠️⚠️ PORT MUST STAY OUTSIDE 8147-8167. scripts/tests/test-bench-capture.sh
+      # allocates its fixture servers from PORT_BASE=8147 through +20, so a slug
+      # parked in that span makes that guard fail whenever this model is serving.
+      # That cost real triage: three failures were misread as pre-existing before
+      # the cause was found (2026-09-18), and a first fix to 8163/8164 was STILL
+      # inside the span. ⚠️ Eight sgl/qwen38-27b-multi* slugs remain on 8147-8154
+      # and have the same latent problem — pre-existing, tracked separately.
+      - "${BIND_HOST:-0.0.0.0}:${ESTATE_PORT:-${PORT:-8180}}:5000"
+    volumes:
+      - "${MODEL_DIR:-../../../../../../models-cache}:/models:ro"
+    environment:
+      # ⚠️⚠️ DOCKER FORWARDS ONLY WHAT IS DECLARED HERE. The entrypoint below reads
+      # $THREADS / $SPEC_N / $SPEC / $DYNAMIC_DRAFT, and without these lines every
+      # one of them is INERT inside the container — the knob silently does nothing
+      # and the run quietly takes the fallback branch.
+      # ⛔ THAT IS NOT HYPOTHETICAL: this block was MISSING until 2026-09-18, so
+      # every containerised exl3 bench resolved threads to nproc/2 = 16 while the
+      # host-venv runs used 28. 16 vs 28 threads measured +20.7% on this engine,
+      # which means the "container is ~9% slower than the venv" finding was taken
+      # with the two sides on DIFFERENT thread counts. Caught by
+      # test-compose-entrypoint-env-declared, not by booting — a boot proves the
+      # server runs, not that it runs the config you think.
+      # ⚠️ BARE FORM ONLY. `- THREADS=${THREADS:-}` sets the var PRESENT BUT EMPTY,
+      # and an empty string parses as 0 in several consumers — a "safe" default
+      # that silently becomes zero. Declare the name, let docker pass it or not.
+      - THREADS
+      - SPEC_N
+      - SPEC
+      - DYNAMIC_DRAFT
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ['${ESTATE_GPUS:-0,1}']
+              capabilities: [gpu]
+    # ⚠️ LIST FORM, and a wrapper rather than a bare `command:` — the thread
+    # resolution below cannot be expressed as compose variable substitution.
+    # The image ENTRYPOINT is ["python3"]; this replaces it equivalently.
+    entrypoint:
+      - /bin/bash
+      - -c
+      - |
+        # -- Threads ----------------------------------------------------------
+        # ⭐⭐ The single biggest lever on this engine: 16 → 28 measured +20.7%
+        # narrative / +21.3% code. The good zone is an ABSOLUTE ~24-32, NOT a
+        # fraction of core count.
+        # PORTABLE DEFAULT = nproc/2, matching what the launcher computes
+        # (scripts/lib/compose-meta.sh resolve_offload_threads) so both paths
+        # agree. ⚠️ nproc/2 is a FLOOR, not the optimum — on the 32c reference
+        # host 28 beat nproc/2=16 by ~21%. That 28 belongs in the OPERATOR's
+        # .env, NOT in the shipped default: pinning it here would hand a
+        # 32-core-tuned value to every user and oversubscribe smaller boxes
+        # (the exact mistake the sibling compose had to undo).
+        if [ -n "$${THREADS:-}" ]; then
+          _threads="$${THREADS}"
+          echo "[threads] --cpu-moe-threads $$_threads (THREADS set explicitly)" >&2
+        else
+          _np=$$(nproc 2>/dev/null || echo 8)
+          _threads=$$(( _np / 2 )); [ "$$_threads" -lt 1 ] && _threads=1
+          echo "[threads] --cpu-moe-threads $$_threads (auto = nproc/2, nproc=$$_np; the useful zone is an ABSOLUTE 24-32 — set THREADS to tune)" >&2
+        fi
+
+        # -- Speculative decoding: built-in MTP, ON by default -----------------
+        # Needs NO drafter file — the head ships inside the quant. MEASURED:
+        # acceptance 0.688, accept_len 3.31, effective k 3.36.
+        # ⚠️ With --dynamic-draft, --draft-num-tokens is a CEILING, not a depth:
+        # the engine shortens the draft when confidence drops. Logging a depth
+        # alone does NOT identify the config (an unattributed 12% gap on the
+        # 4.05 first boot is most likely exactly this).
+        # Contract (same on every club-3090 compose): SPEC_N=<n> depth,
+        # SPEC_N=0 / SPEC=off REMOVES the flags rather than passing n=0.
+        _spec_n="$${SPEC_N:-4}"
+        case "$${SPEC:-}" in off|OFF|Off|false|no|0) _spec_n=0 ;; esac
+        case "$$_spec_n" in ""|*[!0-9]*)
+          echo "[spec] SPEC_N='$$_spec_n' is not a non-negative integer." >&2
+          echo "[spec] Fix: SPEC_N=<n> sets the draft ceiling; SPEC_N=0 (or SPEC=off) disables." >&2
+          exit 64 ;;
+        esac
+        SPEC_ARGS=()
+        if [ "$$_spec_n" -gt 0 ]; then
+          SPEC_ARGS=(--draft-mode mtp
+                     --draft-num-tokens "$$_spec_n"
+                     --dynamic-draft "$${DYNAMIC_DRAFT:-true}")
+          echo "[spec] built-in MTP ON (ceiling=$$_spec_n dynamic=$${DYNAMIC_DRAFT:-true})" >&2
+        else
+          echo "[spec] MTP OFF (SPEC_N=0 / SPEC=off) - flags removed" >&2
+        fi
+
+        exec python3 main.py \
+          --cpu-moe-threads "$$_threads" \
+          "$${SPEC_ARGS[@]}" \
+          "$$@"
+      - --
+    command:
+      - '--host'
+      - '0.0.0.0'
+      - '--port'
+      - '5000'
+      - '--api-servers'
+      - 'OAI'
+      - '--disable-auth'
+      - 'true'
+      - '--model-dir'
+      - '/models'
+      - '--model-name'
+      - 'qwen3.8-flash-next-exl3-3.05bpw'
+      - '--backend'
+      - 'exllamav3'
+      # ⚠️ 32768 is what was TESTED, not a fitted ceiling. The model declares
+      # 262144. Raising it has NOT been tried on this engine — expect the
+      # CPU-resident fraction, not KV, to be what bites first.
+      # ⭐⭐ 204800 — the same context our moe-cache slug for this model ships,
+      # reached by moving MORE experts to the CPU (split 144). VALIDATED with
+      # 14K / 50K / 100K prompts: zero OOM, and VRAM is FLAT across them
+      # (23,182→23,160 MiB) because exl3 PRE-ALLOCATES the whole cache at
+      # boot — prompt length costs almost nothing extra.
+      - '--max-seq-len'
+      - '${CTX:-204800}'
+      - '--cache-size'
+      - '${CTX:-204800}'
+      # ⭐ Q4 — chosen to MAXIMISE CONTEXT (maintainer, 2026-09-18). exl3's
+      # modes are FP16|Q8|Q6|Q4; there is no q5_1/q4_1 (those are GGUF names).
+      # ⚠️ Q4 is BELOW this stack's q8-grade serving floor, so this slug is a
+      # speed/capacity EXHIBIT — consistent with its 🐣 Incubating status.
+      # Q8 would cap 3.05 at 65536, LESS context than Q4 buys.
+      - '--cache-mode'
+      - '${KV_TYPE:-Q4}'
+      # exl3 autosplit. ⚠️ NOT tensor-parallel: `tensor_parallel` stays false.
+      # Autosplit was accurate on THIS model (cards within ~30 MiB). It was NOT
+      # on GLM-5.3-Flash, where it left a 3.0/7.8 GiB imbalance and needed a
+      # manual `--gpu-split`. If your cards come up lopsided, pin it.
+      - '--tensor-parallel'
+      - 'false'
+      - '--gpu-split-auto'
+      - 'true'
+      # ⚠️ Autosplit leaves FAR more idle than this reserve asks for: at
+      # 204800/Q4/split-160 the cards sat at 22,002/20,994 MiB with ~6.2 GB
+      # free AND 1 GB of imbalance. Reclaiming it lets a LOWER split hold the
+      # same context, which is strictly better (context unchanged, more
+      # experts stay on GPU, so decode improves).
+      - '--autosplit-reserve'
+      - '${RESERVE:-512}'
+      - '${RESERVE:-512}'
+      # ⭐ TIER choice, not a tuning knob — see Caveats. 128 of 512 = 25% of
+      # experts CPU-resident, which is what this bit rate buys.
+      - '--cpu-moe-split-experts'
+      - '${MOE_SPLIT:-144}'
+      # 31 GB n-gram/PLE table into system RAM. Upstream default is to stream it
+      # from disk; it is NEVER in VRAM either way.
+      - '--ngram-ram'
+      - '${NGRAM_RAM:-true}'
+      - '--chunk-size'
+      - '${CHUNK:-4096}'
+      # Vision is built into the quant — there is no mmproj to mount.
+      - '--vision'
+      - 'true'
+      - '--vision-offload'
+      - '${VISION_OFFLOAD:-true}'
+      - '--tool-format'
+      - 'qwen3_coder'
+      - '--tool-calls-in-reasoning'
+      - 'true'
+      - '--reasoning'
+      - '${REASONING:-true}'
+      - '--reasoning-start-token'
+      - '<think>'
+      - '--reasoning-end-token'
+      - '</think>'
+      - '--start-in-reasoning'
+      - 'auto'
+      # Sampler comes from the engine's own vetted preset rather than a third
+      # copy of the card's rows. ⚠️ bench/quality runs must state which sampler
+      # they used — the stack protocol sampler and this preset are NOT the same.
+      - '--override-preset'
+      - 'safe_defaults'
+      - '--sysmem-recurrent-cache'
+      - '${SYSMEM_RECURRENT:-8192}'
+      - '--sysmem-kv-cache'
+      - '${SYSMEM_KV:-4096}'
+    healthcheck:
+      # ⚠️ Probes the container's OWN ROUTABLE address, not loopback. A
+      # loopback probe stays green even when the server bound 127.0.0.1 and
+      # docker's port forward has nothing to reach (club-3090#1295), so it
+      # cannot fail for the one bug a healthcheck exists to catch.
+      test: ["CMD-SHELL", "curl -sf \"http://$${HOSTNAME:-$$(hostname)}:5000/health\" || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 40
+      # Load is slow: 80 GB of weights plus a 31 GB table into RAM.
+      start_period: 900s

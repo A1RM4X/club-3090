@@ -211,7 +211,13 @@ _measure_vllm_arm() {
     # entirely (grep -m1 = first match). ENGINE_FAMILY is a global set at engine
     # resolution, so it is in scope here — no private re-classification
     # (test-engine-kind-resolver arm 4).
-    cn="$(docker ps --format '{{.Names}}' | command grep -m1 -E "$ENGINE_FAMILY" || true)"
+    # ⚠️ The family TOKEN is not always present in the container NAME. vllm-*
+    # and sglang-* carry theirs; exl3 does NOT — its containers are `tabbyapi-…`,
+    # so grepping for "exllamav3" matched nothing and the arm printed an
+    # honest-looking '—' forever. Map family -> name pattern.
+    _cn_pat="$ENGINE_FAMILY"
+    [[ "$ENGINE_FAMILY" == "exllamav3" ]] && _cn_pat='tabbyapi|exl3|exllamav3'
+    cn="$(docker ps --format '{{.Names}}' | command grep -m1 -E "$_cn_pat" || true)"
     # Two engines word this differently. vLLM: "SpecDecoding metrics: ... acceptance
     # rate: 85.0%". SGLang: "accept len: 5.66, accept rate: 0.67" (a RATE in [0,1],
     # so scale to % to keep the column comparable). Until 2026-09-11 only the vLLM
@@ -223,6 +229,15 @@ _measure_vllm_arm() {
         acc="$(docker logs "$cn" 2>&1 | command grep -oE 'accept rate: [0-9.]+' | tail -1 | command grep -oE '[0-9.]+' \
                | awk '{printf "%.1f", $1*100}' || true)"
       fi
+        # exl3/TabbyAPI logs neither a rate nor a length — only per-request
+        # accepted/drafted counters on the completion line:
+        #     ... total 3.18 s · draft 108/173
+        # Average the last few requests as a PERCENT so the /100 below lands it
+        # in the same [0,1] column as every other engine.
+        if [[ -z "$acc" ]]; then
+          acc="$(docker logs "$cn" 2>&1 | command grep -oE 'draft [0-9]+/[0-9]+' | tail -5 \
+                 | awk -F'[ /]' '{a+=$2; d+=$3} END{if(d>0) printf "%.1f", 100*a/d}' || true)"
+        fi
       # ⚠ NOT carried here: SGLang also reports accept LENGTH (tok/step), which is the
       # more diagnostic quantity for a block drafter — a dead one reads ~1.0
       # (sglang#39087) while its RATE can still look unremarkable. This sweep's

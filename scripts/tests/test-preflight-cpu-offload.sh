@@ -47,6 +47,11 @@ INK_M4=models/inkling-small/llamacpp-club3090/compose/multi4/unsloth-ud-iq4xs/mo
 # and the one Inkling compose that legitimately DOES carry the bundle headers.
 # Its presence is why the no-residency-headers assertions below are per-file.
 INK_RES=models/inkling-small/llamacpp-club3090/compose/dual/unsloth-ud-iq4xs/residency.yml
+# exl3/TabbyAPI — offloads by splitting EXPERT INDICES to the host and COMPUTING
+# them there, so these carry host_ram_gb like any CPU-offload slug even though
+# they pass no `-ot`.
+EXL3_305=models/qwen3.8-flash-next/exllamav3/compose/dual/exl3-3.05bpw/cpumoe.yml
+EXL3_405=models/qwen3.8-flash-next/exllamav3/compose/dual/exl3-4.05bpw/cpumoe.yml
 GLM_DUAL=models/glm-5.3-flash/llamacpp-club3090/compose/dual/unsloth-ud-iq4xs/moecache.yml
 GLM_M4=models/glm-5.3-flash/llamacpp-club3090/compose/multi4/unsloth-ud-iq4xs/moecache.yml
 GLM_M8=models/glm-5.3-flash/llamacpp-club3090/compose/multi8/unsloth-ud-iq4xs/moecache.yml
@@ -452,6 +457,8 @@ while IFS='|' read -r slug reg_gb; do
     *dual-iq4xs-moecache)   f="$INK_CACHE" ;;
     *multi4-iq4xs-moecache) f="$INK_M4" ;;
     *dual-iq4xs-residency)  f="$INK_RES" ;;
+    *dual-exl3-305-cpumoe)  f="$EXL3_305" ;;
+    *dual-exl3-405-cpumoe)  f="$EXL3_405" ;;
     *dual-q8)   f="$Q8" ;;
     *dual-iq2)  f="$IQ2" ;;
     *multi4-q8) f="$M4" ;;

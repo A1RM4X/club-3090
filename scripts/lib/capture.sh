@@ -521,6 +521,45 @@ elif mode == "acceptance":
         if m2:
             accepted += int(m2.group(1))
             drafted += int(m2.group(2))
+        # ---- vLLM, MODERN wording (2026-09-18) -------------------------------
+        # The `draft acceptance rate = X` form above is OLD vLLM. Current vLLM
+        # emits a SpecDecoding block instead, and matched NONE of the patterns
+        # above -- so our PRIMARY engine was reading as "spec-dec off" on every
+        # bench. Caught on the bucko rebuild, whose log carried 26 of these while
+        # bench.sh printed "no acceptance data in the measured window":
+        #   SpecDecoding metrics: Mean acceptance length: 3.37, Accepted
+        #   throughput: 7.10 tokens/s, Drafted throughput: 9.00 tokens/s,
+        #   Accepted: 71 tokens, Drafted: 90 tokens, Per-position acceptance
+        #   rate: 0.867, 0.767, 0.733, Avg Draft acceptance rate: 78.9%
+        # ⚠️ The rate is a PERCENT here, not a [0,1] fraction -- do not append it
+        # raw next to the vLLM/SGLang rates or the mean becomes meaningless.
+        if "SpecDecoding metrics" in ln:
+            m_v = re.search(r"Mean acceptance length:\s*([0-9.]+)", ln)
+            if m_v:
+                alen.append(float(m_v.group(1)))
+            m_vr = re.search(r"Avg Draft acceptance rate:\s*([0-9.]+)\s*%", ln)
+            if m_vr:
+                acc.append(float(m_vr.group(1)) / 100.0)
+            m_va = re.search(r"Accepted:\s*(\d+)\s*tokens", ln)
+            m_vd = re.search(r"Drafted:\s*(\d+)\s*tokens", ln)
+            if m_va and m_vd:
+                accepted += int(m_va.group(1))
+                drafted += int(m_vd.group(1))
+            continue
+        # ---- exl3 / TabbyAPI -------------------------------------------------
+        # Per-request, appended to the completion line, accepted/drafted:
+        #   ... total 3.18 s · draft 108/173
+        # There is no rate and no length in the log -- derive the rate, and let
+        # accepted/drafted accumulate so the summary carries real counters.
+        # ⚠️ `continue` above keeps the vLLM block from reaching this: vLLM's
+        # "Drafted throughput: 9.00 tokens/s" must never be read as a ratio.
+        m_exl = re.search(r"(?:^|\s|·)draft\s+(\d+)\s*/\s*(\d+)(?:\s|$)", ln)
+        if m_exl:
+            a, d = int(m_exl.group(1)), int(m_exl.group(2))
+            if d > 0:
+                accepted += a
+                drafted += d
+                acc.append(a / d)
     if not acc and not alen:
         sys.exit(1)
     # SGLang emits a length but the caller's summary line is rate-shaped; surface the

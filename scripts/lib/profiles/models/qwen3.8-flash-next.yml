@@ -115,6 +115,90 @@ weights:
     verify_glob: "*.gguf"
     manual_note: "Vision projector. ⚠️ `clip.projector_type = qwen3vl_merger` -> PROJECTOR_TYPE_QWEN3VL: there is NO PROJECTOR_TYPE_QWEN4EXP, vision works by REUSING the Qwen3VL path, so a future change there affects this model. Declares 27 deepstack layers. Validated 4/4 on ground truth 2026-08-29, both with the projector on CUDA0 and (since the default flip) on the HOST. ⭐ Shipped `-mmdev none`: the encoder costs ~1,114 MiB on CUDA0 and is allocated AFTER the moe-cache pool is sized, so nothing budgets for it — on-GPU placement left only 830 MiB headroom with a drafter active, a latent OOM on the first image request. Host placement costs ZERO cache slots."
 
+  exl3-3.05bpw:
+    path: qwen3.8-flash-next-exl3-3.05bpw
+    local_subdir: qwen3.8-flash-next-exl3-3.05bpw
+    size_gb: 80
+    format: exl3
+    status: experimental
+    hf_repo: turboderp/Qwen3.8-Flash-Next-exl3
+    # ⚠️⚠️ THE QUANT TIER IS A BRANCH, NOT A SUBFOLDER. turboderp publishes one
+    # branch per bpw off a near-empty `main`, so `revision:` is LOAD-BEARING —
+    # without it the fetch lands on `main` and gets the wrong (or no) weights.
+    # ⚠️ 3.05 is `_h5_ng5`, NOT `_h6_ng6` like its 4.05 sibling. Confirmed against
+    # quantization_config.json on disk: bits 3.05 / head_bits 5 / mtp_bits 3 /
+    # codebook mul1. A BENCHMARKS row briefly carried the wrong suffix.
+    revision: 3.05bpw_h5_ng5          # commit 69e33439ae95
+    shards: 7
+    files:
+      - model-00001-of-00007.safetensors
+      - model-00002-of-00007.safetensors
+      - model-00003-of-00007.safetensors
+      - model-00004-of-00007.safetensors
+      - model-00005-of-00007.safetensors
+      - model-00006-of-00007.safetensors
+      - model-00007-of-00007.safetensors
+      # ⭐ The MTP head ships INSIDE the quant — there is no separate drafter
+      # artifact to fetch, unlike every GGUF path on this stack. This is the
+      # file that makes `draft_mode: mtp` work.
+      - mtp_hyper_connection_mixer_patch.safetensors
+      - model.safetensors.index.json
+      - ngram_embedding.safetensors
+      - config.json
+      - quantization_config.json
+      - generation_config.json
+      - chat_template.jinja
+      - tokenizer.json
+      - tokenizer_config.json
+      - vocab.json
+      - merges.txt
+      - preprocessor_config.json
+      - video_preprocessor_config.json
+    engine: exllamav3
+    kind: main
+    verify_glob: "*.safetensors"
+    manual_note: "⭐ THE FASTER TIER, and the one the tuned recipe was built on: 57.37 narrative / 74.51 code / 1566.0 prefill@10K (BENCHMARKS row 6). Beats its own 4.05 sibling by +18% on ALL THREE axes simultaneously, because dropping the bit rate cuts CPU-resident experts 44% -> 25% and on exl3 the host computes that share — bit rate buys throughput twice. ⚠️⚠️ QUALITY IS UNMEASURED AT THIS BIT RATE. No 8-pack, no verify-stress, no soak were run, and 3.05bpw is low enough that the speed win is partly BECAUSE it is smaller. Deliberately left to community validation (maintainer, 2026-09-17). Prefer `exl3-4.05bpw` if you want the safer bit rate. ⚠️ Vision weights are folded into the shards here (no `vision_k6.safetensors`, unlike 4.05) — `vision: true` still works. ⚠️ Measured in a HOST VENV, not the shipped container."
+  exl3-4.05bpw:
+    path: qwen3.8-flash-next-exl3-4.05bpw
+    local_subdir: qwen3.8-flash-next-exl3-4.05bpw
+    size_gb: 101
+    format: exl3
+    status: experimental
+    hf_repo: turboderp/Qwen3.8-Flash-Next-exl3
+    revision: 4.05bpw_h6_ng6          # commit 55a732e0c4c3
+    shards: 9
+    files:
+      - model-00001-of-00009.safetensors
+      - model-00002-of-00009.safetensors
+      - model-00003-of-00009.safetensors
+      - model-00004-of-00009.safetensors
+      - model-00005-of-00009.safetensors
+      - model-00006-of-00009.safetensors
+      - model-00007-of-00009.safetensors
+      - model-00008-of-00009.safetensors
+      - model-00009-of-00009.safetensors
+      # ⚠️ This branch factors the vision tower into its own file and carries NO
+      # `mtp_hyper_connection_mixer_patch.safetensors` — the 3.05 branch does the
+      # opposite. The layouts are NOT interchangeable; do not copy one file list
+      # onto the other variant.
+      - vision_k6.safetensors
+      - model.safetensors.index.json
+      - ngram_embedding.safetensors
+      - config.json
+      - quantization_config.json
+      - generation_config.json
+      - chat_template.jinja
+      - tokenizer.json
+      - tokenizer_config.json
+      - vocab.json
+      - merges.txt
+      - preprocessor_config.json
+      - video_preprocessor_config.json
+    engine: exllamav3
+    kind: main
+    verify_glob: "*.safetensors"
+    manual_note: "The SAFER bit rate, at a throughput cost: 48.53 narrative / 62.94 code / 1335.7 prefill@10K tuned (BENCHMARKS row 5) — about 18% behind the 3.05 sibling on every axis. Ships for users who would rather not take an unquantified quality risk, since neither tier has an 8-pack. ⚠️ BENCHMARKS row 4 (43.54/62.16) is the UNTUNED FIRST BOOT of this same variant and is ~12% low for reasons never attributed — cite row 5, not row 4. ⚠️ QUALITY UNMEASURED here too; 4.05 is merely the more conservative choice, not a validated one. ⚠️ Measured in a HOST VENV, not the shipped container."
+
 default_weight_variant: unsloth-ud-q4kxl
 
 # ---------------------------------------------------------------------------

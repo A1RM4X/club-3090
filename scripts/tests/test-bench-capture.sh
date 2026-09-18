@@ -27,7 +27,19 @@ export PYTHONUTF8="${PYTHONUTF8:-1}"   # repo rule: locale must not decide pytho
 BENCH="$ROOT_DIR/scripts/bench.sh"
 LIB="$ROOT_DIR/scripts/lib/capture.sh"
 FIX="$ROOT_DIR/scripts/tests/fixtures/offload-matrix"
-PORT_BASE="${TEST_PORT:-8147}"
+# ⚠️⚠️ FIXTURE PORTS LIVE ABOVE THE PRODUCT'S PORT SPACE, ON PURPOSE.
+# This test binds fake servers across PORT_BASE..PORT_BASE+20. The registry
+# allocates real slug `default_port`s across 8010-8199, so a base inside that
+# span silently collides: any slug parked on one of these 21 ports makes this
+# guard fail WHENEVER THAT MODEL IS SERVING, and the failure reads as a broken
+# test rather than a port clash. Measured 2026-09-18: the old 8147 base overlapped
+# ELEVEN registry slugs (eight sgl/qwen38-27b-multi* on 8147-8154 plus three
+# newer ones), and three suite failures were misdiagnosed as pre-existing before
+# the cause was found. 18147+ is clear of the product space entirely.
+# ⚠️ Other fixtures still sit INSIDE 8010-8199 (test-bench-card 8171,
+# test-offload-matrix-mocked 8137, tier2/test-offload-matrix-real 8138) and carry
+# the same latent clash — not addressed here.
+PORT_BASE="${TEST_PORT:-18147}"
 fail() { echo "FAIL: $1" >&2; exit 1; }
 
 for f in "$BENCH" "$LIB" "$FIX/fake-llama-server" "$FIX/fake-nvidia-smi"; do
@@ -374,6 +386,58 @@ acc2=$(cap_moe_parse acceptance "$TMP/end.log")
 command grep -q 'last=0.500' <<<"$acc2" || fail "last= must track the FINAL value: $acc2"
 command grep -q 'mean=0.746' <<<"$acc2" || fail "mean= must average both values: $acc2"
 echo "  ✓ acceptance exposes last= (sweep) and mean= (bench) from one scrape"
+
+# --- acceptance across ALL FOUR ENGINES (club-3090-todo §D) -------------------
+# Each engine words acceptance differently, and an unrecognised wording reads as
+# "spec-dec OFF" rather than as a parser gap. That is not hypothetical: modern
+# vLLM's SpecDecoding block matched NOTHING until 2026-09-18, so our PRIMARY
+# engine silently reported no drafter on every bench while its log carried 26
+# acceptance lines. Pin one fixture per engine.
+
+# vLLM, MODERN wording. ⚠️ the rate is a PERCENT, not a [0,1] fraction.
+cat > "$TMP/acc-vllm.log" <<'EOF'
+(APIServer pid=1) INFO [metrics.py:120] SpecDecoding metrics: Mean acceptance length: 3.37, Accepted throughput: 7.10 tokens/s, Drafted throughput: 9.00 tokens/s, Accepted: 71 tokens, Drafted: 90 tokens, Per-position acceptance rate: 0.867, 0.767, 0.733, Avg Draft acceptance rate: 78.9%
+EOF
+a_v=$(cap_moe_parse acceptance "$TMP/acc-vllm.log")   || fail "vLLM SpecDecoding wording not parsed (reads as spec-dec OFF)"
+command grep -q 'mean=0.789' <<<"$a_v" || fail "vLLM percent rate must scale to [0,1]: $a_v"
+command grep -q 'accepted=71 drafted=90' <<<"$a_v" || fail "vLLM token counters lost: $a_v"
+command grep -q 'accept_len_mean=3.370' <<<"$a_v" || fail "vLLM acceptance LENGTH lost: $a_v"
+echo "  ✓ acceptance: vLLM modern SpecDecoding block"
+
+# exl3 / TabbyAPI: per-request accepted/drafted appended to the completion line.
+cat > "$TMP/acc-exl3.log" <<'EOF'
+INFO: #1 chat/completions (stream): 24 prompt tokens · 41.1 T/s · total 3.18 s · draft 108/173
+INFO: #2 chat/completions (stream): 24 prompt tokens · 42.0 T/s · total 3.02 s · draft 96/171
+EOF
+a_e=$(cap_moe_parse acceptance "$TMP/acc-exl3.log")   || fail "exl3 'draft N/M' wording not parsed (reads as spec-dec OFF)"
+command grep -q 'fired=2' <<<"$a_e" || fail "exl3 fire count wrong: $a_e"
+command grep -q 'accepted=204 drafted=344' <<<"$a_e" || fail "exl3 counters must accumulate: $a_e"
+echo "  ✓ acceptance: exl3 draft N/M"
+
+# SGLang: a LENGTH and a rate, in separate lists (averaging one into the other
+# yields a number that is neither).
+cat > "$TMP/acc-sgl.log" <<'EOF'
+[INFO] accept len: 3.71, accept rate: 0.67
+EOF
+a_s=$(cap_moe_parse acceptance "$TMP/acc-sgl.log") || fail "SGLang wording regressed"
+command grep -q 'accept_len_mean=3.710' <<<"$a_s" || fail "SGLang length lost: $a_s"
+echo "  ✓ acceptance: SGLang accept len/rate"
+
+# ⚠️ vLLM's "Drafted throughput: 9.00 tokens/s" must NOT be read as a ratio by
+# the exl3 arm. Guarded by the `continue` in capture.sh; assert it here so a
+# future edit that drops it fails loudly instead of inflating vLLM counters.
+command grep -q 'drafted=90' <<<"$a_v" || fail "vLLM drafted counter contaminated by the exl3 pattern: $a_v"
+echo "  ✓ acceptance: engine wordings do not cross-contaminate"
+
+# NEGATIVE CONTROL — a log with no drafter must still fail, not invent a rate.
+cat > "$TMP/acc-none.log" <<'EOF'
+INFO: serving on 0.0.0.0:8080
+INFO: request completed in 3.2s
+EOF
+if cap_moe_parse acceptance "$TMP/acc-none.log" >/dev/null 2>&1; then
+  fail "no-drafter log must NOT yield an acceptance figure"
+fi
+echo "  ✓ acceptance: no-drafter log correctly yields nothing"
 
 # --- timings: prefill and decode must not be confused; short runs filtered ----
 tim=$(cap_moe_parse timings "$TMP/end.log") || fail "timings scrape returned nothing"

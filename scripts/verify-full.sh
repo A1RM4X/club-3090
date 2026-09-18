@@ -126,8 +126,19 @@ skip() { printf "  \033[33m⊘\033[0m %s (skipped)\n" "$1"; }
 # that the user can't act on. Surfaced by @lamentofhighborne in #85, fixed
 # per #87. Engine class is detected ONCE at startup and cached.
 detect_engine() {
-  # Hint 1: llama-server's /props endpoint (vLLM doesn't ship it)
+  # Hint 1: a /props endpoint (vLLM does not ship one).
+  # ⚠️⚠️ /props IS NO LONGER llama.cpp-EXCLUSIVE. TabbyAPI (exl3) serves a
+  # compatible /props AND emits no `system_fingerprint`, so this hint alone
+  # classified every exl3 run as llamacpp — which sent step 9 down the llamacpp
+  # branch to SKIP, reading as "no drafter" on an engine whose MTP was running
+  # at ~0.69 acceptance the whole time. Prefer container/image evidence whenever
+  # it names a family; fall back to llamacpp otherwise, so host builds and
+  # unconventional container names behave exactly as before.
   if curl -sf -m 3 "${URL}/props" >/dev/null 2>&1; then
+    local _props_kind
+    _props_kind="$(engine_kind_from_container "$CONTAINER")"
+    [[ "$_props_kind" == "unknown" ]] && _props_kind="$(engine_kind_from_image "$CONTAINER")"
+    [[ "$_props_kind" != "unknown" ]] && { echo "$_props_kind"; return 0; }
     echo "llamacpp"; return 0
   fi
   # Hint 2: the chat-completion response's system_fingerprint. vLLM emits
@@ -244,6 +255,7 @@ check_patches() {
   case "$ENGINE_KIND" in
     llamacpp) skip "llama.cpp engine — Genesis is vLLM-only, not applicable"; return 0 ;;
     sglang)   skip "SGLang engine — Genesis is vLLM-only, not applicable";    return 0 ;;
+    exllamav3) skip "exl3/TabbyAPI engine — Genesis is vLLM-only, not applicable"; return 0 ;;
     unknown)  ;;  # fall through; might still be vLLM under a non-standard container name
   esac
   if ! command -v docker >/dev/null 2>&1; then
@@ -378,6 +390,9 @@ except Exception as e:
       sglang)
         fail "model emitted <tool_call> as inline text (tool_calls[] empty)" \
              "Check --tool-call-parser matches the model family (qwen3_coder on the Qwen3.x composes) and that the chat template emits the format that parser expects." ;;
+          exllamav3)
+            fail "model emitted <tool_call> as inline text (tool_calls[] empty)" \
+                 "exl3/TabbyAPI picks the parser with --tool-format (qwen3_coder for Qwen3.x, glm4_5 for GLM); unset, the server emits the tags as plain text. Also check --tool-calls-in-reasoning matches how the model emits calls while reasoning is on." ;;
       *)
         fail "model emitted <tool_call> as inline text (tool_calls[] empty)" \
              "On the Qwen3.6 vLLM tiers this is the MTP x TurboQuant incompat - use docker-compose.tools.yml or .tools-text.yml (README Known issues). On other stacks check --tool-call-parser and the chat template first." ;;
@@ -656,6 +671,44 @@ check_mtp_acceptance() {
   # generalized harness).
   case "$ENGINE_KIND" in
     llamacpp) skip "llama.cpp engine — MTP acceptance check is vLLM-log-format-specific (run engine-side verification separately)"; return 0 ;;
+    exllamav3)
+      # ⚠️ A `skip` here is exactly the failure the SGLang branch below documents:
+      # a drafter that is dead — or absent — looks identical to a healthy one,
+      # because speculative decoding REJECTS bad drafts and the output stays
+      # correct, only slower. exl3 was skipping for a WORSE reason still: it was
+      # misclassified as llamacpp (see detect_engine), so this branch was never
+      # even reached and the run read as "no drafter" while MTP was live.
+      # exl3/TabbyAPI wording is per-request, appended to the completion line:
+      #     ... total 3.18 s · draft 108/173      (accepted/drafted)
+      # There is no rate and no accept-len in the log — derive the rate.
+      if ! container_is_real; then
+        skip "container '\''${CONTAINER}'\'' not found (CONTAINER=none for host endpoints)"
+        return 0
+      fi
+      curl -sf -m 120 "${URL}/v1/chat/completions" \
+        -H "Content-Type: application/json" \
+        -d "{
+          \"model\": \"${MODEL}\",
+          \"messages\": [{\"role\": \"user\", \"content\": \"Count from 1 to 80, one number per line.\"}],
+          \"max_tokens\": 500,
+          \"temperature\": 0.0
+        }" >/dev/null 2>&1 || { fail "acceptance-trigger request failed" "Check docker logs"; return 1; }
+      sleep 2
+      local exl_rate
+      exl_rate="$(docker logs --tail 400 "${CONTAINER}" 2>&1 \
+                  | command grep -oE 'draft [0-9]+/[0-9]+' | tail -5 \
+                  | awk -F'[ /]' '{a+=$2; d+=$3} END{if(d>0) printf "%.3f", a/d}')"
+      if [[ -z "$exl_rate" ]]; then
+        skip "no '\''draft N/M'\'' in the last 400 log lines (draft_mode unset for this compose?)"
+        return 0
+      fi
+      if awk -v a="$exl_rate" -v m="${EXL3_ACCEPT_MIN:-0.25}" 'BEGIN{exit !(a+0 >= m+0)}'; then
+        pass "draft acceptance ${exl_rate} >= ${EXL3_ACCEPT_MIN:-0.25} (exl3)"
+      else
+        fail "draft acceptance ${exl_rate} < ${EXL3_ACCEPT_MIN:-0.25} (exl3)" \
+             "The MTP head is drafting tokens that get rejected — output stays correct, decode collapses. Check draft_mode is 'mtp', that the quant actually CONTAINS an MTP head (some conversions drop it: grep the GGUF/safetensors index for nextn/mtp tensors), and that draft_num_tokens is a ceiling used with dynamic_draft rather than a fixed depth."
+      fi
+      return 0 ;;
     sglang)
       # ⚠ THIS USED TO `skip`, AND THAT IS HOW A DEAD DRAFTER PASSED verify-full.
       # sglang#39087: a compressed-tensors DFlash2 drafter drafts garbage — accept

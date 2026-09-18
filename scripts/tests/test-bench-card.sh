@@ -21,7 +21,16 @@ BENCH="$ROOT_DIR/scripts/bench.sh"
 CARDLIB="$ROOT_DIR/scripts/lib/card.sh"
 FIX="$ROOT_DIR/scripts/tests/fixtures/offload-matrix"
 CFIX="$ROOT_DIR/scripts/tests/fixtures/bench-card"
-PORT_BASE="${TEST_PORT:-8171}"
+# ⚠️⚠️ FIXTURE PORTS LIVE ABOVE THE PRODUCT PORT SPACE, ON PURPOSE.
+# The registry allocates real slug `default_port`s across 8010-8199, so a
+# fixture base inside that span silently collides: a slug parked on one of
+# these ports makes this guard fail WHENEVER THAT MODEL IS SERVING, and the
+# failure reads as a broken test rather than a port clash. Measured
+# 2026-09-18 on test-bench-capture, whose 8147 base overlapped ELEVEN
+# registry slugs; three suite failures were misdiagnosed as pre-existing
+# before the cause was found. 18xxx is clear — the product never allocates
+# above 8199. Keep the last three digits so the old base stays greppable.
+PORT_BASE="${TEST_PORT:-18171}"
 fail() { echo "FAIL: $1" >&2; exit 1; }
 
 for f in "$BENCH" "$CARDLIB" "$CFIX/baseline.log" "$CFIX/baseline-mismatched.log" \
