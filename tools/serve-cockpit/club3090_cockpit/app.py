@@ -505,6 +505,25 @@ def _spec_token(drafter: str, spec_method: str = "") -> str:
         sm = (spec_method or "").strip().lower()
         if sm.startswith("ngram"):
             return "ngram"      # ngram-mod / -map-k / -simple / -cache
+        # ⚠️ The drafter-less branch must speak the SAME vocabulary as the
+        # drafter branch below, or the column renders the same speculation two
+        # different ways depending on which field carries it.  It used to
+        # `return sm.split("-")[0]`, i.e. the RAW registry token — so a slug with
+        # drafter=null + spec_method="mtp" printed lowercase "mtp" while every
+        # drafter-keyed MTP row printed "MTP".  Caught 2026-09-18 with three
+        # rows diverging (bucko-vllm/qwen3.8-flash-next-ple and both
+        # exllamav3/…-cpumoe slugs) against ~130 core rows — all of them
+        # BUILT-IN heads that need no external drafter artifact, which is
+        # exactly why they keep drafter=null and fell down this path.
+        if sm.startswith("mtp"):
+            # mtp_assistant / mtp-assistant → the gemma-style assistant head
+            return "MTP·asst" if "assistant" in sm else "MTP"
+        if "dflash2" in sm:         # must precede the generic dflash check
+            return "DFlash2"
+        if "dflash" in sm:
+            return "DFlash"
+        if "dspark" in sm:
+            return "DSpark"
         return sm.split("-")[0] if sm else ""
     if "dflash2" in dr:       # DFlash2 external block-drafter (must precede the
         return "DFlash2"          # generic dflash check — "dflash2" contains "dflash")

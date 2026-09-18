@@ -1842,6 +1842,33 @@ class TestCatalogWired:
         assert _spec_token("") == ""
         assert _spec_token("some-future-ngram-drafter") == "ngram"
 
+    def test_spec_token_drafterless_matches_drafter_vocabulary(self):
+        """A built-in speculation head needs NO external drafter artifact, so its
+        slug keeps ``drafter: null`` and the method arrives on ``spec_method``.
+        That branch must render the SAME token the drafter branch would, or the
+        column spells one method two ways depending on which field carries it.
+
+        Regression (2026-09-18): the branch returned the raw registry token
+        (``sm.split("-")[0]``), so ``drafter=null`` + ``spec_method="mtp"``
+        printed lowercase "mtp" on three rows — bucko-vllm/qwen3.8-flash-next-ple
+        and both exllamav3/…-cpumoe slugs — against ~130 core rows printing "MTP".
+        """
+        from club3090_cockpit.app import _spec_token
+
+        for spec_method, want in {
+            "mtp": "MTP",
+            "mtp_assistant": "MTP·asst",
+            "ngram-mod": "ngram",
+            "dflash": "DFlash",
+            "dflash2": "DFlash2",
+            "dspark": "DSpark",
+        }.items():
+            assert _spec_token("", spec_method) == want, spec_method
+        # Drafter still wins when both are set, and an unknown method degrades
+        # to its leading token rather than inventing a label.
+        assert _spec_token("anbeeld-qwen-dflash", "mtp") == "DFlash"
+        assert _spec_token("", "") == ""
+
     def test_byo_result_route_c_reframes_as_servable(self):
         """A Route-C swap (curated-arch fine-tune) reframes the engine's
         'no-fit-model' verdict into a positive, actionable card — regression guard
