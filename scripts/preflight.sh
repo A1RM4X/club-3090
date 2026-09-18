@@ -27,6 +27,8 @@
 # processes and nested scripts inherit it. Guarded by test-locale-utf8.sh.
 export PYTHONUTF8="${PYTHONUTF8:-1}"
 [[ -n "${_PREFLIGHT_LOADED:-}" ]] && return 0
+# shellcheck source=lib/club-containers.sh
+source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/lib/club-containers.sh"
 _PREFLIGHT_LOADED=1
 _PREFLIGHT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -1525,7 +1527,7 @@ preflight_autodetect_endpoint() {
   fi
   # Prefer a recognised club-3090 engine-family prefix when several match.
   found_line=$(printf '%s\n' "$engine_lines" \
-    | command grep -E '^(vllm-|llama-cpp-|ik-llama-|sglang-|beellama-)' | head -1 || true)
+    | command grep -E "$(club_container_re)" | head -1 || true)
   [[ -z "$found_line" ]] && found_line=$(printf '%s\n' "$engine_lines" | head -1)
   # Several inference containers up → we picked one; tell the user how to override.
   if [[ "$(printf '%s\n' "$engine_lines" | command grep -c .)" -gt 1 ]]; then

@@ -26,6 +26,8 @@
 #   0 — already up-to-date or successfully updated
 #   1 — dirty tree / wrong branch / missing dep / git pull failed / setup.sh failed
 
+# shellcheck source=lib/club-containers.sh
+source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/lib/club-containers.sh"
 set -euo pipefail
 
 ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -132,7 +134,13 @@ run bash "${ROOT_DIR}/scripts/setup.sh" "$MODEL"
 echo ""
 echo "[update] ✓ done."
 echo ""
-running=$(docker ps --format '{{.Names}}' 2>/dev/null | command grep -E '^(vllm-qwen36-27b|llama-cpp-qwen36-27b)' | head -1 || true)
+# "Is a club container running?" — registry-derived. This asked the question
+# with a TWO-NAME list (vllm-qwen36-27b|llama-cpp-qwen36-27b), so it stayed
+# silent for every other model and engine on the stack, not just the new ones.
+# ⚠️ Not caught by test-engine-kind-resolver arm 5: that arm polices the ENGINE
+# prefix alternation, and a model-specific name is legitimate elsewhere (report.sh
+# deliberately prefers `name=vllm-qwen36` before falling back to the full set).
+running=$(docker ps --format '{{.Names}}' 2>/dev/null | command grep -E "$(club_container_re)" | head -1 || true)
 if [[ -n "$running" ]]; then
   echo "[update] A club-3090 container is currently running: ${running}"
   echo "[update] To pick up the latest config, restart it:"

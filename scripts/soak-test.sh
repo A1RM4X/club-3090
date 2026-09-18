@@ -261,6 +261,8 @@ if [[ "$SOAK_MODE" == "continuous" && "$SOAK_TURNS" -ne 5 ]]; then
 fi
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=lib/club-containers.sh
+source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/lib/club-containers.sh"
 HELPER="${REPO_ROOT}/scripts/soak-helper.py"
 cd "$REPO_ROOT"
 
@@ -300,12 +302,16 @@ auto_container() {
   # diffusiongemma-26b-a4b compose — same bug class as the #310 preflight fix).
   # Among port matches, prefer a recognised club-3090 engine-family prefix;
   # otherwise take the first. The `|| true` is load-bearing under set -euo pipefail.
+  # PREFERENCE is registry-derived (scripts/lib/club-containers.sh): the
+  # hand-written alternation here carried no `tabbyapi-`, so an exl3 server
+  # was never the PREFERRED match — it was only ever picked up by the
+  # take-the-first fallback below, i.e. by luck rather than by recognition.
   local lines name
   lines=$(docker ps --format '{{.Names}}|{{.Ports}}' 2>/dev/null \
     | command grep -E '([0-9]{1,3}\.){3}[0-9]{1,3}:[0-9]+->(8000|8080|30000)/tcp' || true)
   [[ -z "$lines" ]] && return 0
   name=$(printf '%s\n' "$lines" \
-    | command grep -E '^(vllm-|llama-cpp-|ik-llama-|sglang-|beellama-)' | head -1 || true)
+    | command grep -E "$(club_container_re_loose)" | head -1 || true)
   [[ -z "$name" ]] && name=$(printf '%s\n' "$lines" | head -1)
   printf '%s\n' "${name%%|*}"
 }

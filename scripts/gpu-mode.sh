@@ -1123,7 +1123,7 @@ mode_off() {
     # (#535 class; caught live 2026-07-04 when off left vllm-qwen36-27b-minimal
     # serving and the 27b TP=2 scene booted into its residue).
     _stragglers=$(docker ps --format '{{.Names}}' 2>/dev/null \
-        | command grep -E '^(vllm-|llama-cpp-|ik-llama-|sglang-|beellama-)' || true)
+        | command grep -E "$(club_container_re)" || true)
     if [ -n "$_stragglers" ]; then
         echo -e "  ${YELLOW}▼${NC} Stopping catalog-launched engine(s): $(echo "$_stragglers" | tr '\n' ' ')"
         echo "$_stragglers" | xargs -r docker stop >/dev/null 2>&1 || true

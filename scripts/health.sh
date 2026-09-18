@@ -51,11 +51,20 @@ CONTAINER="${CONTAINER:-}"
 LOG_LINES="${LOG_LINES:-200}"
 WATCH_INTERVAL="${WATCH_INTERVAL:-5}"
 
-# Engine-prefix regex used when CONTAINER= is unset: any recognized inference
-# engine, not just qwen36-27b. (qwen36-27b containers — vllm-qwen36-27b /
-# llama-cpp-qwen36-27b — still match the first two alternatives, so a running
-# qwen container is selected identically to before.)
-ENGINE_PREFIX_RE='^(vllm-|llama-cpp-|ik-llama-|sglang-|beellama-)'
+# Container matcher used when CONTAINER= is unset: any inference container the
+# REGISTRY knows, plus a prefix arm for estate/ad-hoc instances that rename their
+# container. Registry-derived so a new engine is covered the moment its slug
+# lands.
+#
+# ⚠️ This was a hand-written list — '^(vllm-|llama-cpp-|ik-llama-|sglang-|beellama-)'
+# — and it had already fallen behind: exl3 serves as `tabbyapi-*`, so on a rig
+# running it health.sh reported no engine container over a healthy server. The
+# same list in report.sh was missing sglang- as well. #281 fixed exactly this in
+# switch.sh by deriving the set from the registry; the other copies were never
+# converted. See scripts/lib/club-containers.sh.
+# shellcheck source=lib/club-containers.sh
+source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/lib/club-containers.sh"
+ENGINE_PREFIX_RE="$(club_container_re)"
 
 # Color helpers
 if [[ -t 1 ]]; then
