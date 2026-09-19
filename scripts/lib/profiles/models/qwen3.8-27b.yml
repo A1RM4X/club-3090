@@ -226,6 +226,33 @@ weights:
     # indistinguishable to weights_state_for() (2026-09-18).
     verify_glob: "*PQ2_0.gguf"
     manual_note: "🧪 Bonsai 2 27B — a TERNARY g128 quant of Qwen3.8-27B ({-1,0,+1} weights, one FP16 scale per 128, Hadamard-rotated basis), architecture unchanged. PQ2_0 packs one trit per 2-bit slot: 2.13 bpw, 7.21 GB — so a 27B-class model fits ONE 3090 whole, with no offload and no expert cache. ⭐ BOOTED 2026-09-18 in the shipped image: loads as `ftype: PQ2_0 - 2.13 bpw (group 128)`, thinking mode works, 71.1 tok/s decode / 350.9 tok/s prompt on llama-cli at 4096 ctx (upstream reports A100 73.9 / RTX 4090 81.2 on this pack, so the rig is in family). ⚠️ That is llama-cli's own counter on ONE generation, NOT bench.sh — not a citable BENCHMARKS figure. ⛔ NO bench.sh / verify-full / stress / soak / 8-pack / vision / concurrency, and nothing above 4096 ctx (the model declares 262144). ⚠️ VENDOR QUALITY CLAIM UNVERIFIED AND ITS METHOD DOES NOT MATCH THIS ARTIFACT: the card's headline (84.78 thinking avg = 98.2% of FP16, vs IQ2_XXS 72.59) was measured 'with EvalScope + vLLM on NVIDIA H100' — but these packs require the PrismML llama.cpp fork, not vLLM, so that number was not demonstrably taken on this GGUF. ⚠️ The sibling PTQ1_0 pack (1.75 bpw, 5.95 GB) was NOT downloaded; the two packs INVERT by architecture (PQ2_0 wins on H100/A100/Blackwell, PTQ1_0 on Ada/L4) and the 3090 appears in neither row, so the pack choice here is UNDETERMINED."
+  prism-ternary-mtp:
+    path: qwen3.8-27b-gguf/prism-ternary-mtp
+    local_subdir: qwen3.8-27b-gguf/prism-ternary-mtp
+    size_gb: 7.66
+    format: gguf
+    status: community-experimental
+    hf_repo: ProCreations/Ternary-Bonsai-2-27B-MTP
+    # ⚠️ EXPLICIT and pack-specific. Defaulting it gives "*.safetensors" on a GGUF
+    # variant, which the weights gate rejects. Its own subdir holds exactly one
+    # file today, but the -pq2 sibling shows why specificity matters: that subdir
+    # is shared with the mmproj, and a loose glob there would claim a neighbour.
+    verify_glob: "*PQ2_0-MTP-Q8_0.gguf"
+    # ⭐ The prism-ternary-pq2 TARGET with the MTP head re-bundled IN (7.66 GB vs
+    # 7.21). prism-ml's ternary conversion dropped the blk.64.nextn.* head that
+    # unsloth's GGUFs of this model carry; ProCreations put it back. Same qwen3_5
+    # arch, so it serves as a PLAIN model too — measured at parity with the -pq2
+    # file (42.35/40.72 vs 40.95/40.94 decode, 828.96 vs 833.04 prefill, bench.sh)
+    # and at IDENTICAL VRAM, because with spec off llama.cpp does not load the MTP
+    # tensors at all. So the +450 MB on disk costs nothing until you draft.
+    # ⚠️⚠️ NEEDS THE PrismML FORK *AND* A PATCHED BUILD. Same ternary-type caveat
+    # as prism-ternary-pq2 (stock llama.cpp loads it as Q2_0 and emits GARBAGE with
+    # no warning), PLUS: --spec-type draft-mtp cannot START on the stock prism
+    # release either — llama_verify_hadamard_graph refuses the graph. Engine
+    # `llama-cpp-prism-mtp` vendors the fix (upstream #205, still OPEN).
+    # ⚠️ Download ONLY the .gguf. The repo carries ~86 files including an
+    # SM120-only runtime tarball and experiment logs that are useless here.
+    manual_note: "Bundled target+MTP head for Bonsai 2 27B ternary. MEASURED on 2x3090 sm_86 (one card) with engine llama-cpp-prism-mtp: 1.84x at --spec-draft-n-max 4 (89.58 vs 48.70 tok/s spec-off), acceptance 58-95%. Depth is NOT free to guess -- n=2 gives only 1.64x and n=5 collapses to 1.50x. Cross-platform corroboration in PrismML-Eng/llama.cpp#205: 1.76-1.82x on RX 7900 XTX (41.6 t/s baseline) and 1.34x on RTX 4080 SUPER (~67 t/s), i.e. speculation pays more where the target decodes slower -- our ~48 t/s baseline sits between them and so does our speedup. ⚠️ QUALITY UNMEASURED at time of cataloguing, as for the -pq2 sibling."
   prism-ternary-mmproj-q8:
     path: qwen3.8-27b-gguf/prism-ternary
     local_subdir: qwen3.8-27b-gguf/prism-ternary

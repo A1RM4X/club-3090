@@ -1,0 +1,35 @@
+schema_version: 1
+id: prism-mtp-bundled
+display_name: Bonsai 2 27B MTP head, bundled INTO the ternary target GGUF
+spec_method: mtp_gguf
+model_compat:
+  - qwen3.8-27b
+engine_compat:
+  engine_type: llama.cpp
+# ⭐ n=4 is MEASURED, not inherited. On 2x3090 sm_86 (one card), /completion,
+# temp 0 / top_k 1 / seed 7, fresh boot per rung:
+#   n=1 74.96 (1.54x, 94% acc) · n=2 79.78 (1.64x, 86%) · n=3 82.57 (1.70x, 82%)
+#   n=4 89.58 (1.84x, 77%)  <-- peak · n=5 73.21 (1.50x, 61%) · n=6 69.68 (1.43x)
+# ⚠️⚠️ Every figure published before that sweep used n=2 — inherited from an
+# upstream reproducer's protocol — and UNDERSTATED this drafter at 1.65x.
+# ⚠️ SHARP CLIFF past the peak: n=5 is -18% for one extra draft token.
+# ⚠️⚠️ n_default IS A WORKLOAD CHOICE. Code/format peak at n=4 (89.58/90.47);
+# FREE-FORM PROSE peaks at n=2 (67.85) and by n=5 falls to 49.69 — within 2% of
+# no-spec, i.e. full draft cost for nothing. Use SPEC_N=2 for prose-heavy serving.
+n_default: 4
+n_max: 6
+# ⭐ NOT a separate download: the head ships INSIDE the target GGUF
+# (Ternary-Bonsai-2-27B-PQ2_0-MTP-Q8_0.gguf, 7.66 GB vs the plain target's 7.21).
+# That is load-bearing, not packaging trivia — sharing the target's
+# token_embd/output is what makes MTP profitable here. A separate -md sidecar
+# duplicates the vocabulary (~92% of its bytes) and turns even 40% acceptance
+# into a net LOSS (PrismML-Eng/llama.cpp#205). So: -m <bundle>, never -md.
+download: false
+vram_footprint_gb: 0
+status: experimental
+# ⚠️⚠️ REQUIRES engine `llama-cpp-prism-mtp`, NOT `llama-cpp-prism`. The stock
+# prism release CANNOT load this head: llama_verify_hadamard_graph refuses the
+# graph because the MTP path reads the Hadamard-folded token_embd without the
+# inverse transform. Fixed only by vendored PR #205, which is still OPEN upstream.
+speculative_config_template: null   # N/A — llama.cpp engine, not vLLM
+local_model_path: null

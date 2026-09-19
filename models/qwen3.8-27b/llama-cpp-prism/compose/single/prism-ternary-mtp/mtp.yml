@@ -1,0 +1,309 @@
+# ===========================================================================
+# Profile (at-a-glance):
+#   Model:     Qwen3.8-27B — prism-ml "Bonsai 2 27B", TERNARY g128 PQ2_0
+#              (7.21 GB, 2.13 bpw). Weights are {-1, 0, +1} with one FP16 scale
+#              per 128, stored in a blockwise Hadamard-rotated basis folded in
+#              offline. Architecture UNCHANGED from Qwen3.8-27B; the GGUF
+#              declares `general.architecture = qwen35`, 64 blocks, 851 tensors.
+#   Engine:    llama.cpp PrismML ternary fork, SOURCE-BUILT b10709 + 3 PRs
+#              ⚠️ NOT upstream's binary — see engines/llama-cpp-prism-mtp.yml
+#   Topology:  Single 3090 — the whole 27B fits one card with room to spare.
+#              No offload, no expert cache, no split tuning.
+#   Drafter:   ⭐ BUILT-IN MTP, via the bundled target+head GGUF. This is the
+#              ONLY difference that matters from the prism-ternary-pq2 sibling,
+#              which is UN-DRAFTED because prism-ml's ternary conversion dropped
+#              the `blk.64.nextn.*` head. ProCreations re-bundled it:
+#              ...-PQ2_0-MTP-Q8_0.gguf (7.66 GB vs the plain target's 7.21 GB),
+#              same `qwen3_5` arch, so it loads with -m and NO -md. Sharing the
+#              target's token_embd/output is what makes MTP profitable here — a
+#              separate -md sidecar duplicates the vocabulary (~92% of its bytes)
+#              and turns even 40% acceptance into a net loss (upstream #205).
+#              MEASURED 1.84x at n=4 — see the SPEC block below.
+#   KV:        q8_0 (KV_TYPE). ⭐ MEASURED at 262144: q8_0 uses 17,108 MiB vs
+#              f16's 23,806 — 6.5 GB saved for a 0.2% decode difference (45.71
+#              vs 45.80 tok/s, i.e. noise). q8_0 is this stack's serving floor.
+#   Vision:    ✅ available — separate mmproj (Q8_0, 0.63 GB), loaded only for
+#              image input so text-only serving never pays for it.
+#              ⛔ DOWNLOADED BUT NEVER LOADED — vision is UNVALIDATED here.
+#   Max ctx:   262144 — the model's FULL declared context, MEASURED on ONE card.
+#              The whole ladder boots: 32768/65536/98304/131072/196608/262144.
+#   Genesis:   N/A — llama.cpp engine
+#   Status:    🧪 Experimental
+#   Best for:  a 27B-class reasoning model on ONE 24 GB card, at ~1/2.4 the
+#              footprint of the UD-Q4_K_XL sibling (7.2 GB vs 17.6 GB).
+#   Caveats:
+#     • ⚠️⚠️ STOCK llama.cpp CANNOT RUN THIS FILE, AND FAILS SILENTLY.
+#       Upstream's card: stock "rejects PQ2_0 and PTQ1_0 as unknown types,
+#       and it loads Q2_0 WITHOUT ANY WARNING AND PRODUCES GARBAGE,
+#       because it has no Hadamard activation runtime." Verified from the
+#       header before download: `general.file_type: 141`, 402 of 851
+#       tensors of type 142 — mainline's enum ends at TQ2_0 = 35.
+#       ⛔ NEVER repoint this slug at llama-cpp-local, llamacpp-club3090
+#       or ik-llama. The output would look plausible and be wrong.
+#     • ⚠️⚠️ QUALITY IS UNVERIFIED, AND THE VENDOR'S NUMBER DOESN'T
+#       DESCRIBE THIS FILE. The card claims 84.78 thinking avg (98.2% of
+#       FP16, vs 72.59 for IQ2_XXS) — but measured "with EvalScope +
+#       vLLM on NVIDIA H100", and these packs need the PrismML llama.cpp
+#       fork, not vLLM. So that figure was not demonstrably taken on this
+#       GGUF. No 8-pack has been run here either.
+#     • ⭐⭐ FULL 262144 CONTEXT ON A SINGLE 3090, AND IT IS ~FREE.
+#       Decode is FLAT across the whole range — 46.15/46.58 tok/s at
+#       32768 vs 45.66/45.28 at 262144, a ~2% difference across an 8x
+#       context increase. Everything is GPU-resident, so unlike the
+#       CPU-offload engines here there is no budget to trade context
+#       against. VRAM scales dead linearly at +2,080 MiB per 32,768
+#       tokens on f16 (= 65 KiB/token, which solves to 16 full-attention
+#       layers x 8 KV heads x 128 head_dim x 2 bytes — consistent with
+#       the card's "~25% full attention" over 64 blocks).
+#       f16 @262144 fills 97% of the card; q8_0 drops that to 70%.
+#     • ⚠️ `reasoning_effort: low` IS NOT SUPPORTED by this model and
+#       SILENTLY BEHAVES LIKE xhigh (upstream's own card). This compose
+#       therefore defaults to `medium`, NOT to the `low` its sibling
+#       qwen3.8-27b composes use — copying that default here would buy
+#       full xhigh reasoning cost while the config claimed otherwise.
+#     • ⚠️ PACK CHOICE IS UNDETERMINED ON THIS RIG. Upstream also ships
+#       PTQ1_0 (1.75 bpw, 5.95 GB) and the two INVERT by architecture:
+#       PQ2_0 wins decode on H100/A100/Blackwell, PTQ1_0 on Ada and L4.
+#       The 3090 is Ampere-with-GDDR6X and is in neither row. Only PQ2_0
+#       was downloaded; a PTQ1_0 A/B is the obvious next measurement.
+#     • ⚠️ ATTRIBUTION: the ternary kernels, the quantization method and
+#       both packings are prism-ml's work (Apache 2.0). This slug
+#       packages their release binary; it does not originate any of it.
+#       github.com/PrismML-Eng/Bonsai-demo is upstream's stated "source
+#       of truth for running these models" — consult it before tuning.
+# ---------------------------------------------------------------------------
+# Measured 2026-09-18, first boot, in the shipped image:
+#   loads as `ftype: PQ2_0 - 2.13 bpw (group 128)`; thinking mode works;
+#   71.1 tok/s decode / 350.9 tok/s prompt (llama-cli, 4096 ctx, -ngl 99).
+#   ⚠️ llama-cli's own counter on ONE generation — NOT bench.sh, NOT citable
+#   against a BENCHMARKS row. Upstream's table: A100 73.9, RTX 4090 81.2.
+# ===========================================================================
+
+services:
+  llama-cpp-prism-qwen38-27b-ternary-mtp:
+    # Digest-pinned, not tag-pinned: tags move, digests do not (#940 precedent).
+    # The engine profile (engines/llama-cpp-prism.yml) is authoritative.
+    # Image = upstream's linux-cuda-12.8 release tarball + libgomp1, nothing else.
+    image: ${LLAMACPP_PRISM_MTP_IMAGE:-ghcr.io/noonghunna/llamacpp-prism-mtp:b10709-pr205-189-216}
+    container_name: "${ESTATE_CONTAINER:-llama-cpp-prism-qwen38-27b-ternary-mtp}"
+    restart: ${CLUB3090_RESTART:-unless-stopped}
+    # Reap orphaned children — a wedged server otherwise becomes a <defunct>
+    # PID 1 child docker cannot kill, holding GPU memory until every later
+    # boot is refused.
+    init: true
+    ports:
+      # ⚠️⚠️ PORT MUST STAY OUTSIDE 8147-8167. scripts/tests/test-bench-capture.sh
+      # allocates its fixture servers from PORT_BASE=8147 through +20, so a slug
+      # parked in that span makes that guard fail whenever this model is serving.
+      # That cost real triage: three failures were misread as pre-existing before
+      # the cause was found (2026-09-18), and a first fix to 8163/8164 was STILL
+      # inside the span. ⚠️ Eight sgl/qwen38-27b-multi* slugs remain on 8147-8154
+      # and have the same latent problem — pre-existing, tracked separately.
+      - "${BIND_HOST:-0.0.0.0}:${ESTATE_PORT:-${PORT:-8182}}:8080"
+    volumes:
+      - "${MODEL_DIR:-../../../../../../models-cache}:/models:ro"
+    environment:
+      # ⚠️ Bare form on purpose: `- VAR=${VAR:-}` sets the var EMPTY-but-present,
+      # and an empty string parses as 0 in several consumers. Declare, don't assign.
+      # ⚠️ THINKING is deliberately NOT declared. The flip keys on INSTRUCT and
+      # thinking is already the DEFAULT (sampler_default_mode: thinking), so a
+      # THINKING knob here would be a no-op that looks like a control. The
+      # sibling qwen3.8-27b compose keeps one only as documented back-compat.
+      - INSTRUCT
+      - REASONING
+      - SPEC
+      - SPEC_N
+      - SPEC_TYPE
+      # Reasoning knobs read by the entrypoint. Bare form on purpose: `- VAR=${VAR:-}`
+      # sets them EMPTY-but-present, and an empty budget lands as `--reasoning-budget ''`.
+      - REASONING_BUDGET
+      - REASONING_BUDGET_MESSAGE
+      - REASONING_PRESERVE
+      - TEMP
+      - TEMPERATURE
+      - TOP_P
+      - TOP_K
+      - MIN_P
+      - PRESENCE_PENALTY
+      # ⚠️⚠️ `medium`, NOT `low`. Upstream states low "is not supported and when
+      # selected the model will behave close to xhigh" — so a `low` default would
+      # silently buy the most expensive reasoning mode while claiming the cheapest.
+      # This is the same class of trap as GLM's reasoning_effort coercion.
+      - LLAMA_ARG_CHAT_TEMPLATE_KWARGS=${LLAMA_ARG_CHAT_TEMPLATE_KWARGS:-{"reasoning_effort":"${REASONING_EFFORT:-medium}"}}
+      # Single card by default — the model is 7.21 GB and splitting it across two
+      # cards buys nothing but cross-PCIe traffic.
+      - CUDA_VISIBLE_DEVICES=${ESTATE_GPUS:-${CUDA_VISIBLE_DEVICES:-0}}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ['${ESTATE_GPUS:-0}']
+              capabilities: [gpu]
+    # ⚠️ The image ENTRYPOINT is ["/app/llama-server"]; this wrapper replaces it and
+    # execs the same binary. It exists to resolve the sampler ROW in one place.
+    entrypoint:
+      - /bin/bash
+      - -c
+      - |
+        # -- Sampler row: the card publishes TWO, and they must move TOGETHER ----
+        # prism-ml's card gives thinking (1.0/0.95/20/0.0/0.0/1.0) and instruct
+        # (0.7/0.80/20/0.0/1.5/1.0) — byte-identical to the qwen3.8-27b rows already
+        # in the registry, which is unsurprising: this IS Qwen3.8-27B, ternary-quantised.
+        # Registry `sampler_profiles` is the source of truth; this derives from it
+        # rather than hardcoding a third copy (test-compose-sampler-profiles).
+        # ⚠️ THINKING is the DEFAULT here (sampler_default_mode: thinking), matching
+        # the sibling llama.cpp compose and the card's "this is a reasoning model and
+        # it thinks by default". INSTRUCT=1 flips reasoning AND the whole row together
+        # — flipping one without the other serves a BLEND of two rows with a clean
+        # boot and no error.
+        # ⚠️ INSTRUCT wins if both INSTRUCT and THINKING are set (matches the sibling).
+        # ⚠️ Every flag is emitted EXACTLY ONCE. Appending a second copy and relying on
+        # llama.cpp's last-wins is DEPRECATED upstream and warns.
+        if [ -n "$${INSTRUCT:-}" ]; then
+          _r="$${REASONING:-off}"; _t="$${TEMP:-$${TEMPERATURE:-0.7}}"
+          _p="$${TOP_P:-0.80}";    _pp="$${PRESENCE_PENALTY:-1.5}"
+          echo "[sampler] INSTRUCT row: reasoning=$$_r temp=$$_t top_p=$$_p presence=$$_pp" >&2
+        else
+          _r="$${REASONING:-on}";  _t="$${TEMP:-$${TEMPERATURE:-1.0}}"
+          _p="$${TOP_P:-0.95}";    _pp="$${PRESENCE_PENALTY:-0.0}"
+          echo "[sampler] THINKING row (default): reasoning=$$_r temp=$$_t top_p=$$_p presence=$$_pp" >&2
+        fi
+        ROW=(--reasoning "$$_r" --temp "$$_t" --top-p "$$_p" --presence-penalty "$$_pp"
+             --top-k "$${TOP_K:-20}" --min-p "$${MIN_P:-0.0}")
+        # -- Reasoning knobs: all six --reasoning-* flags reachable ------------------
+        # ⭐ BUDGET DEFAULTS TO 8192 HERE (maintainer call 2026-09-19), unlike the
+        # llama-cpp siblings which keep llama.cpp's own -1. Semantics confirmed from
+        # BOTH binaries' --help: "-1 unrestricted, 0 immediate end, N>0 token budget".
+        # ⚠️⚠️ Exhaustion force-closes the thinking block. The MESSAGE below is what
+        # makes that visible — upstream defaults it to EMPTY, which is why a truncated
+        # trace otherwise reads as a confident short answer. If quality drops after a
+        # budget change, suspect the budget before the model.
+        ROW+=(--reasoning-budget "$${REASONING_BUDGET:-8192}")
+        ROW+=(--reasoning-budget-message "$${REASONING_BUDGET_MESSAGE:-[reasoning budget exhausted]}")
+        case "$${REASONING_PRESERVE:-}" in
+          1|on|true|yes)   ROW+=(--reasoning-preserve) ;;
+          0|off|false|no)  ROW+=(--no-reasoning-preserve) ;;
+          "")              : ;;
+          *) echo "[reasoning] REASONING_PRESERVE='$${REASONING_PRESERVE}' must be on/off/true/false/yes/no, or unset for the template default" >&2; exit 1 ;;
+        esac
+        echo "[reasoning] budget=$${REASONING_BUDGET:-8192} preserve=$${REASONING_PRESERVE:-<template default>}" >&2
+        # -- Speculative decoding: MTP, disable-able ---------------------------------
+        # ⚠️ CONTRACT: SPEC_N=0 (or SPEC=off) MUST remove the drafter flags entirely,
+        # not pass n-max=0 — test-spec-toggle-contract asserts this, and it caught this
+        # compose passing them unconditionally. A non-numeric SPEC_N is a hard error,
+        # never a silent off.
+        # ⭐⭐ SPECULATIVE DECODING — the point of this slug. MEASURED on this rig
+        # (2x 3090 sm_86, one card), /completion, temp 0 / top_k 1 / seed 7, fresh boot
+        # per rung, acceptance from timings.draft_n / draft_n_accepted:
+        #   n-max   median t/s   speedup   acceptance
+        #   off          48.70     1.00x        --
+        #   1            74.96     1.54x       94%
+        #   2            79.78     1.64x       86%
+        #   3            82.57     1.70x       82%
+        #   4            89.58     1.84x       77%   <-- DEFAULT
+        #   5            73.21     1.50x       61%
+        #   6            69.68     1.43x       58%
+        # ⚠️⚠️ DO NOT LOWER TO 2 'to match upstream'. Every number published before the
+        # depth sweep used n=2 (inherited from the Ada reproducer) and UNDERSTATED this
+        # slug at 1.65x. n=2 is the worst usable depth here.
+        # ⚠️ SHARP CLIFF PAST 4: n=5 drops to 73.21 (-18%) for one extra draft token.
+        # This is not a plateau you can sit above safely.
+        # ⚠️⚠️ WORKLOAD-DEPENDENT, and n=4 is a CHOICE. Code and table/format output peak
+        # at n=4 (89.58 / 90.47). FREE-FORM PROSE peaks at n=2 (67.85) and by n=5 has
+        # fallen to 49.69 — within 2% of no-spec, i.e. paying full draft cost for
+        # nothing. n=4 favours code/structured work. Set SPEC_N=2 for prose-heavy use.
+        # ⭐ n=4 also puts Q=n+1=5 OUTSIDE the Q<=4 window of the vendored FA crash
+        # fallback (PR #189), so that fallback never fires at the shipping depth.
+        _spec_n="$${SPEC_N:-4}"
+        case "$${SPEC:-}" in off|OFF|Off|false|no|0) _spec_n=0 ;; esac
+        case "$$_spec_n" in ""|*[!0-9]*)
+          echo "[spec] SPEC_N='$$_spec_n' is not a non-negative integer." >&2
+          echo "[spec] Fix: SPEC_N=<n> sets depth; SPEC_N=0 (or SPEC=off) disables." >&2
+          exit 1 ;;
+        esac
+        SPEC_ARGS=()
+        if [ "$$_spec_n" -gt 0 ]; then
+          SPEC_ARGS=(--spec-type "$${SPEC_TYPE:-draft-mtp}" --spec-draft-n-max "$$_spec_n")
+          echo "[spec] MTP drafter ON (n-max=$$_spec_n)" >&2
+        else
+          echo "[spec] MTP drafter OFF (SPEC_N=0) — no --spec-type flags emitted" >&2
+        fi
+        exec /app/llama-server "$${ROW[@]}" "$${SPEC_ARGS[@]}" "$$@"
+      - --
+    command:
+      - '-m'
+      - '/models/qwen3.8-27b-gguf/prism-ternary-mtp/Ternary-Bonsai-2-27B-PQ2_0-MTP-Q8_0.gguf'
+      - '--host'
+      - '0.0.0.0'
+      - '--port'
+      - '8080'
+      - '--alias'
+      - 'qwen3.8-27b-prism-ternary-mtp'
+      # ⭐ 262144 = the model's full declared context, MEASURED on one card at
+      # q8_0 (17,108 MiB, 70%). Decode is flat vs 32768, so there is no reason
+      # to ship less. On f16 this same ctx fills 97% — see the KV note below.
+      - '-c'
+      - '${CTX:-262144}'
+      - '-np'
+      - '${NPARALLEL:-1}'
+      - '-ngl'
+      - '99'
+      # ⛔ LEAVE THIS AT 512. Raising ubatch is MEASURED NEGATIVE on this model,
+      # monotonically, on an uncached 14,010-token prompt (2026-09-18):
+      #     ub  512 -> 903.65 tok/s   17,114 MiB   (default, BEST)
+      #     ub 1024 -> 883.27 (-2.3%) 17,468 MiB
+      #     ub 2048 -> 824.82 (-8.7%) 18,182 MiB
+      #     ub 4096 -> 758.27 (-16.1%) 19,606 MiB  (+2.5 GB for a 16% LOSS)
+      # ⚠️⚠️ DO NOT carry the moe-cache `ub4096` result here. That +18% came from
+      # a DIFFERENT MECHANISM — shrinking the compute buffer grew the EXPERT CACHE
+      # POOL, and the pool was the lever. This model is dense and fully
+      # GPU-resident: there is no pool, so a larger ubatch only makes each matmul
+      # bigger, which these ternary kernels do not want.
+      # ⚠️ MEASUREMENT TRAP: send the prompt ONCE per boot. A second identical
+      # request hits llama-server's prompt cache and re-evaluates ~4 tokens, which
+      # reads as a plausible prefill number and is not one.
+      - '-ub'
+      - '${UBATCH:-512}'
+      - '-b'
+      - '${UBATCH:-512}'
+      - '-fa'
+      - 'on'
+      # ⭐ KV cache type — q8_0 by default, MEASURED at 262144 on this rig:
+      #     f16  -> 23,806 MiB (97% of a 24 GB card), decode 45.80 tok/s
+      #     q8_0 -> 17,108 MiB (70%),                 decode 45.71 tok/s
+      # 6.5 GB saved for a 0.2% decode delta, i.e. free. f16 at full context
+      # leaves ~770 MiB, too little for the projector or a second slot.
+      # q8_0 is also this stack's SERVING-GRADE FLOOR — never go below it.
+      # ⚠️ Quantised KV requires `-fa on` (set above) on this engine.
+      - '--cache-type-k'
+      - '${KV_TYPE:-q8_0}'
+      - '--cache-type-v'
+      - '${KV_TYPE:-q8_0}'
+      # ⭐ ADDED 2026-09-19 — this compose was the ONLY one of the six llama.cpp-family
+      # composes on this stack with no --reasoning-format, so it ran at `auto` while
+      # every sibling pinned `deepseek`. That decides WHERE thoughts land: `deepseek`
+      # routes them to message.reasoning_content, `none` leaves them inline in
+      # message.content — which changes what OpenWebUI / LiteLLM / benchlocal see.
+      # ⚠️ THIS IS A BEHAVIOUR CHANGE for this slug (auto -> deepseek), not just a
+      # default being written down. Verify at boot before relying on it.
+      - '--reasoning-format'
+      - '${REASONING_FORMAT:-deepseek}'
+      # Vision. The projector is a SEPARATE artifact here (not embedded), and
+      # upstream keeps it off the hot path: it is loaded only when an image
+      # arrives, so text-only serving costs nothing for it.
+      # ⛔ NEVER LOADED ON THIS RIG — vision is entirely unvalidated.
+      - '--mmproj'
+      - '${MMPROJ:-/models/qwen3.8-27b-gguf/prism-ternary/Ternary-Bonsai-2-27B-mmproj-Q8_0.gguf}'
+      - '-mmdev'
+      - '${MMPROJ_DEVICE:-none}'
+      # (sampler flags are emitted by the entrypoint wrapper above, exactly once)
+    healthcheck:
+      # ⚠️ Probes the container's OWN ROUTABLE address, not loopback: a loopback
+      # probe stays green even when the server bound 127.0.0.1 and docker's port
+      # forward has nothing to reach (club-3090#1295).
+      test: ["CMD-SHELL", "curl -sf \"http://$${HOSTNAME:-$$(hostname)}:8080/health\" || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 30
+      start_period: 300s

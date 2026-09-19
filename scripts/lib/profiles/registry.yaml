@@ -3399,6 +3399,55 @@ entries:
         presence_penalty: 0.0
         repetition_penalty: 1.0
     sampler_default_mode: thinking
+  llama-cpp-prism-mtp/qwen38-27b-single-ternary-mtp:
+    origin: core
+    model: qwen3.8-27b
+    weights_variant: prism-ternary-mtp
+    workload: long-ctx-single
+    engine: llama-cpp-prism-mtp
+    drafter: prism-mtp-bundled
+    spec_method: draft-mtp
+    kv_format: q8_0
+    act_format: 16bit
+    act8_capable: false
+    offload: null
+    moe_cache: false
+    host_ram_gb: null
+    chat_template: native
+    tp: 1
+    max_ctx: 262144
+    max_num_seqs: 1
+    mem_util: null
+    compose_path: models/qwen3.8-27b/llama-cpp-prism/compose/single/prism-ternary-mtp/mtp.yml
+    requires_nvlink: false
+    requires_homogeneous_arch: false
+    required_engine_features: []
+    default_port: 8183
+    kvcalc_key: SKIP
+    status: experimental
+    status_note: "🧪 MTP-ENABLED sibling of llama-cpp-prism/qwen38-27b-single-ternary-pq2. SAME ternary Bonsai-2-27B target, but the BUNDLED target+MTP-head GGUF (Ternary-Bonsai-2-27B-PQ2_0-MTP-Q8_0.gguf, 7.66 GB vs the plain target's 7.21 GB) so `-m <bundle> --spec-type draft-mtp` builds the draft context against the target with NO -md. ⭐⭐ MEASURED ON THIS RIG (2x3090 sm_86, one card; /completion, temp 0/top_k 1/seed 7, fresh boot per rung, acceptance from timings.draft_n/draft_n_accepted): 1.84x at the shipped SPEC_N=4 (89.58 vs 48.70 tok/s spec-off), acceptance 58-95%. Depth curve: n=1 74.96/1.54x, n=2 79.78/1.64x, n=3 82.57/1.70x, n=4 89.58/1.84x, n=5 73.21/1.50x, n=6 69.68/1.43x. ⚠️⚠️ DO NOT LOWER TO n=2 'to match upstream' -- every figure published before the depth sweep used n=2 and UNDERSTATED this slug at 1.65x. ⚠️ SHARP CLIFF past 4: n=5 is -18%. ⚠️⚠️ WORKLOAD-DEPENDENT AND n=4 IS A CHOICE: code/format peak at n=4 (89.58/90.47) but FREE-FORM PROSE peaks at n=2 (67.85) and by n=5 falls to 49.69, within 2% of no-spec -- set SPEC_N=2 for prose-heavy use. ⚠️⚠️ REQUIRES A SOURCE-BUILT ENGINE, NOT UPSTREAM'S BINARY: llama-cpp-prism-mtp vendors THREE OPEN upstream PRs (PrismML-Eng/llama.cpp #205 MTP Hadamard inverse -- without it draft-mtp cannot START on this Hadamard-folded target; #216 GDN Ampere gate, MEASURED +8.6% prefill here; #189 short-query FA guard for quantized V). Each has a drop trigger in the engine profile: when the PR merges AND ships in a prism release, drop it. The plain -pq2 sibling stays on the stock patch-free image. ⭐ #205 confirmed by us on sm_86 and independently on gfx1100/ROCm and sm_89/Ada in the PR thread. ⚠️ QUALITY: inherits every caveat of the -pq2 sibling (the vendor's 84.78 thinking avg was measured with vLLM on H100 and does NOT describe this fork-only artifact; PTQ1_0 vs PQ2_0 pack choice is UNDETERMINED on a 3090). ⚠️ MTP verify makes speculative output equivalence a NEW question this slug introduces over its sibling. ⚠️ ATTRIBUTION: ternary kernels, method and packings are prism-ml's (Apache 2.0); the MTP head re-bundling is ProCreations'; the three patches are their authors' -- we vendor, we do not claim them."
+    weights_companions:
+      - prism-ternary-mmproj-q8
+    gateway: false
+    serve_aliases: []
+    required_sm: 8.6
+    category: frontier
+    sampler_profiles:
+      instruct:
+        temperature: 0.7
+        top_p: 0.8
+        top_k: 20
+        min_p: 0.0
+        presence_penalty: 1.5
+        repetition_penalty: 1.0
+      thinking:
+        temperature: 1.0
+        top_p: 0.95
+        top_k: 20
+        min_p: 0.0
+        presence_penalty: 0.0
+        repetition_penalty: 1.0
+    sampler_default_mode: thinking
   llamacpp/qwen38-27b-dual-q8kxl:
     origin: core
     model: qwen3.8-27b

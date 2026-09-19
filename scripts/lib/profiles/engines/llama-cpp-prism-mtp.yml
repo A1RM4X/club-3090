@@ -1,0 +1,214 @@
+schema_version: 1
+id: llama-cpp-prism-mtp
+display_name: llama.cpp PrismML ternary fork + MTP (SOURCE-BUILT, 3 vendored PRs)
+type: llama.cpp
+stability: experimental
+install:
+  method: docker_image
+  # Digest-pinned, not tag-pinned: tags move, digests do not (#940 precedent).
+  # Built 2026-09-18 by WRAPPING upstream's own release tarball —
+  # `llama-prism-b10685-7dffb15-bin-linux-cuda-12.8-x64.tar.gz` from
+  # PrismML-Eng/llama.cpp release `prism-b10685-7dffb15` — NOT from source.
+  #
+  # ⚠️ THE NEWEST TAG IS NOT THE RIGHT ONE. `prism-b10687-5d80cff` (2026-09-17)
+  # ships WINDOWS assets only — three cudart zips, no Linux archive at all. The
+  # previous tag `prism-b10685-7dffb15` carries the full Linux matrix
+  # (cuda-12.4 / 12.8 / 13.3, ubuntu-x64/arm64, rocm, vulkan). Check the asset
+  # list before bumping, not just the tag date.
+  #
+  # ⚠️ CUDA **12.8**, deliberately. This rig's host is CUDA 13.2, and a host-run
+  # cu12 binary dies with `libcudart.so.12: cannot open shared object file`.
+  # 12.8 is also what our other serving images use, so the base image supplies
+  # the matching libcudart. Do NOT swap to the cuda-13.3 tarball to "match the
+  # host" — the container is the runtime, not the host.
+  #
+  # ⚠️ `libgomp1` is INSTALLED BY THE IMAGE and is REQUIRED. The CUDA runtime
+  # base does not carry it, and without it EVERY binary in the tarball fails at
+  # exec with `libgomp.so.1: cannot open shared object file`. Found by booting.
+  spec: ghcr.io/noonghunna/llamacpp-prism-mtp:b10709-pr205-189-216
+
+# ---------------------------------------------------------------------------
+# WHY A SEPARATE ENGINE RATHER THAN A FLAG ON AN EXISTING ONE
+#
+# This fork adds quantization types that mainline cannot decode. Verified from
+# the GGUF header before downloading: `general.file_type: 141`, and 402 of 851
+# tensors carry type **142** — mainline's enum ends at TQ2_0 = 35.
+#
+# ⚠️⚠️ THE FAILURE MODE IS SILENT, WHICH IS WHY THIS CANNOT SHARE AN ENGINE.
+# Upstream's own card: stock llama.cpp "rejects PQ2_0 and PTQ1_0 as unknown
+# types, and it loads Q2_0 WITHOUT ANY WARNING AND PRODUCES GARBAGE, because it
+# has no Hadamard activation runtime." The weights are stored in a blockwise
+# Hadamard-rotated basis folded in offline; a runtime that does not apply the
+# matching activation transform emits plausible nonsense rather than an error.
+# ⇒ Never point a Bonsai slug at llama-cpp-local / llamacpp-club3090 / ik-llama.
+#
+# ⭐ Its base is mainline **b10685**, ~10 builds off llamacpp-club3090-v1.6's
+# b10675 — so the ternary kernels and our moe-cache deltas sit on nearly the
+# same substrate and are plausibly combinable later. Not attempted, and not
+# needed for Bonsai: that model is DENSE (qwen35-dense, 64 blocks, no experts)
+# and fits one 3090 whole, so there is nothing for an expert cache to do.
+# ---------------------------------------------------------------------------
+
+min_sm: 8.6
+# ⭐ VERIFIED, not assumed — `cuobjdump --list-elf libggml-cuda.so` on the
+# shipped binary:
+#     native SASS : sm_86  sm_89  sm_120
+#     PTX (JIT)   : sm_50 sm_61 sm_70 sm_75 sm_80 sm_90
+# sm_86 is compiled NATIVE, so Ampere takes no JIT path and cannot hit the
+# silent-CPU-fallback class that bit ik_llama's cu13 build. Note sm_80 is
+# PTX-only here, so an A100 WOULD JIT — the opposite of the usual ordering.
+
+supported_model_families:
+  - qwen35-dense          # Qwen3.8-27B and its derivatives.
+                          # ⚠️ must match models/qwen3.8-27b.yml `family:`
+                          # EXACTLY — the resolver gates on the FAMILY tag.
+                          # Bonsai 2 27B is a ternary QUANT of Qwen3.8-27B with
+                          # the architecture unchanged (the GGUF declares
+                          # `general.architecture = qwen35`), so it is a weights
+                          # variant of that model, not a new model.
+
+features:
+  ternary_g128: true      # {-1, 0, +1} weights, one FP16 scale per 128, stored
+                          # in a Hadamard-rotated basis. Two packings:
+                          #   PTQ1_0 — dense trits, 1.75 bpw, 5.95 GB
+                          #   PQ2_0  — one trit per 2-bit slot, 2.13 bpw, 7.21 GB
+                          # Packed weights are consumed directly and never
+                          # expanded to FP16.
+
+supported_kv_formats:
+  - fp16                  # llama.cpp's own default; the whole context ladder was
+                          # first measured on it. At 262144 it fills 23,806 of
+                          # 24,576 MiB — 97% of the card.
+  - q8_0                  # ⭐ ADDED 2026-09-18 WITH BOOT EVIDENCE, not by
+                          # assumption. A/B at 262144 on one 3090, one variable:
+                          #     f16  -> 23,806 MiB (97%), decode 45.80 tok/s
+                          #     q8_0 -> 17,108 MiB (70%), decode 45.71 tok/s
+                          # 6.5 GB saved for a 0.2% decode delta, so it is free,
+                          # and it is what the shipped compose defaults to.
+                          # ⚠️ Requires `-fa on` (quantised KV needs flash-attn
+                          # on this engine, as on its llama.cpp siblings).
+                          # ⚠️ q8_0 is the SERVING-GRADE FLOOR on this stack — do
+                          # NOT extend this list below it for a serving slug.
+                          # q4_0 etc. remain UNBOOTED here; add them only from a
+                          # boot, never from upstream's docs.
+
+supported_drafters: [mtp_gguf]
+  # ⭐ mtp_gguf ONLY, and only because vendored PR #205 makes it loadable. The
+  # `llama-cpp-prism` sibling correctly declares [] — on the stock release this
+  # drafter cannot start at all (llama_verify_hadamard_graph refuses the graph).
+  # ⚠️ This field holds spec_method VALUES, not drafter ids. Added on a MEASURED
+  # boot (1.84x at n=4, acceptance 58-95%), not on the assumption that it works.
+  # ⛔ EMPTY, AND FOR THE BONSAI PACKS IT IS NOT EVEN AVAILABLE — VERIFIED IN THE
+  # GGUF, not assumed:
+  #     qwen35.block_count = 64 · blk indices 0..63 · nextn/mtp tensors = 0
+  # ⚠️⚠️ THIS DIFFERS FROM THE SAME MODEL'S OTHER GGUFs. The unsloth Qwen3.8-27B
+  # packs carry a BUILT-IN MTP head at `blk.64.nextn.*` (see
+  # models/qwen3.8-27b/llama-cpp/compose/single/.../q4kv-vision.yml), and
+  # prism-ml's ternary conversion DROPPED it. "Qwen3.8-27B has MTP" is therefore
+  # true of the model and FALSE of this artifact — do not carry the assumption
+  # across. Every throughput figure on this engine is UN-DRAFTED.
+  # ⭐ The remaining spec-dec option is an EXTERNAL draft model; upstream's card
+  # points at Bonsai-demo for that. Untried here.
+  # ⚠️ This field holds spec_method VALUES, not drafter ids — adding one without
+  # a measured boot is how the sibling llamacpp profile got it wrong three
+  # revisions running.
+
+supported_weight_formats:
+  - gguf
+
+required_overlays: []
+vendored_overlays:
+  # ⚠️⚠️ UNLIKE THE `llama-cpp-prism` SIBLING, THIS IS NOT UPSTREAM'S BINARY. That
+  # profile documents `vendored_overlays: GENUINELY EMPTY — we patch nothing`.
+  # This one is SOURCE-BUILT from PrismML-Eng/llama.cpp at tag prism-b10709-9a9394a
+  # with three OPEN upstream PRs applied. Each carries a drop trigger: when the PR
+  # merges AND ships in a prism release, drop it and re-point at the stock tarball.
+  # The entire reason this profile exists is that #205 has not shipped yet.
+  - id: prism-pr205-mtp-hadamard
+    image_baked: true   # compiled into the binary at build time, not a mounted overlay
+    vendored_diff: models/qwen3.8-27b/llama-cpp-prism/patches/prism-mtp-b10709
+    source: https://github.com/PrismML-Eng/llama.cpp/pull/205
+    files: [src/models/qwen35.cpp]
+    diff: '+14/-0'
+    local_status: vendored
+    upstream: open
+    why: >
+      Without it `--spec-type draft-mtp` cannot START on a Hadamard-folded target:
+      the MTP graph does its own ggml_get_rows on token_embd and never restores the
+      primal basis, so llama_verify_hadamard_graph refuses the graph. This is the
+      patch the slug exists for. Confirmed by us on sm_86, and independently on
+      gfx1100/ROCm and sm_89/Ada in the PR thread.
+    drop_trigger: merged upstream AND present in a prism release tarball
+  - id: prism-pr216-gdn-ampere-gate
+    image_baked: true   # compiled into the binary at build time, not a mounted overlay
+    vendored_diff: models/qwen3.8-27b/llama-cpp-prism/patches/prism-mtp-b10709
+    source: https://github.com/PrismML-Eng/llama.cpp/pull/216
+    files: [ggml/src/ggml-cuda/gated_delta_net.cu]
+    diff: '+5/-2'
+    local_status: vendored
+    upstream: open
+    why: >
+      gated_delta_net_cuda's cols_per_warp=4 layout was gated to
+      GGML_CUDA_CC_DGX_SPARK; this widens it to >= AMPERE. MEASURED +8.6% prefill
+      on sm_86 (831.31 -> 902.84, CVs 0.1-0.2%, bench.sh, spec off). Upstream
+      claimed +6% on sm_89. Pure win, decode unchanged.
+    drop_trigger: merged upstream AND present in a prism release tarball
+  - id: prism-pr189-shortq-fa-quantv
+    image_baked: true   # compiled into the binary at build time, not a mounted overlay
+    vendored_diff: models/qwen3.8-27b/llama-cpp-prism/patches/prism-mtp-b10709
+    source: https://github.com/PrismML-Eng/llama.cpp/pull/189
+    files: [ggml/src/ggml-cuda/fattn.cu]
+    diff: '+6/-0'
+    local_status: vendored
+    upstream: open
+    why: >
+      Guards a CUDA illegal memory access in short-query MMA FlashAttention with a
+      QUANTIZED V cache (Q length 3-4). This compose runs -ctv q8_0, so the shape is
+      reachable. At the shipped SPEC_N=4 the verify query is Q=5, OUTSIDE the
+      patch's Q<=4 gate, so it does not fire at the default depth and costs nothing
+      there; it is carried for SPEC_N=2 or 3, which are reachable via env.
+      An earlier '#189 costs 13-15% of MTP decode' figure was SINGLE-BOOT and is
+      RETRACTED (a repeat of the identical config differed by 13.5%). Its real cost
+      is UNMEASURED. Do not quote the retracted number.
+    drop_trigger: merged upstream AND present in a prism release tarball, or the
+      ncols=32 kernel fixed so the fallback is unnecessary
+required_genesis: false
+
+notes: >
+  🧪 EXPERIMENTAL — catalogued 2026-09-18. VALIDATED BY BOOT on this rig: the
+  model loads (`ftype: PQ2_0 - 2.13 bpw (group 128)`), thinking mode works, and
+  a single-turn generation returned a correct answer at **71.1 tok/s decode /
+  350.9 tok/s prompt** (`llama-cli`, 4096 ctx, -ngl 99, in the shipped image).
+  ⚠️ That figure is `llama-cli`'s own counter on ONE generation, NOT `bench.sh`
+  — it is not a citable BENCHMARKS number and must not be compared against one.
+  For context, upstream's table gives A100 73.9 and RTX 4090 81.2 tok/s on this
+  pack, so the rig lands in family.
+  ⭐⭐ CONTEXT IS MEASURED AND ESSENTIALLY FREE HERE. The full ladder boots on a
+  SINGLE 3090 — 32768 / 65536 / 98304 / 131072 / 196608 / 262144, the model's
+  entire declared context — and decode is FLAT across it (46.15/46.58 tok/s at
+  32768 vs 45.66/45.28 at 262144, ~2% over an 8x increase). Everything is
+  GPU-resident, so unlike this stack's CPU-offload engines there is no budget to
+  trade context against. VRAM scales dead linearly at +2,080 MiB per 32,768
+  tokens on f16 (65 KiB/token, which solves to 16 full-attention layers x 8 KV
+  heads x 128 head_dim x 2 bytes — matching the card's "~25% full attention"
+  over 64 blocks).
+  ⛔ NOT RUN: bench.sh, verify-full, verify-stress, soak, the quality 8-pack,
+  any concurrency, and vision (the mmproj is downloaded and wired but was never
+  loaded).
+  ⚠️ PACK CHOICE IS OPEN. Upstream ships PTQ1_0 (5.95 GB) as well, and the two
+  INVERT by architecture: PQ2_0 wins decode on H100/A100/Blackwell, PTQ1_0 wins
+  on Ada and the L4. The 3090 is Ampere-with-GDDR6X and appears in neither row,
+  so which pack wins here is UNDETERMINED — only PQ2_0 was downloaded.
+  ⚠️ Upstream names github.com/PrismML-Eng/Bonsai-demo as "the source of truth
+  for running these models"; it pins known-good binaries and carries the run
+  scripts for server/tools/vision/spec-dec. Consult it before tuning flags here.
+  ⚠️ ATTRIBUTION: the ternary kernels, the quantization method and both GGUF
+  packings are PrismML's work (Apache 2.0). We wrap their release binary and
+  patch nothing; what we contribute is measurement.
+
+feature_provenance:
+  ternary_g128:
+    author: prism-ml
+    source: https://github.com/PrismML-Eng/llama.cpp
+    upstream: https://github.com/PrismML-Eng/Bonsai-demo
+    status: fork-only
