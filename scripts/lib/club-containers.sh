@@ -32,6 +32,20 @@
 # falls back to the union of the legacy prefixes, so callers are never WORSE off
 # than the hardcoded version they replaced.
 
+# ⚠️ PICK THE RIGHT FORM. club_container_re anchors registry names at BOTH ends;
+# club_container_re_loose anchors only at the start. A caller that greps a
+# COMPOSITE line — `{{.Names}}|{{.Ports}}`, `{{.Names}}\t{{.Image}}…` — must use
+# _loose, because a `$`-anchored name can never match there. Getting this wrong is
+# silent: the exact arms simply never fire and the matcher quietly degrades to the
+# legacy prefix list, i.e. back to the bug. preflight.sh shipped that way for one
+# commit. Audit with: for each call site, look at the `docker ps --format` feeding it.
+#
+# COST: club_container_names shells out to registry-emit.sh --json (~2.5 s cold)
+# because the container name is NOT in registry.yaml — it is derived per slug from
+# the compose `container_name:`. Cached for the process, and every caller reaches it
+# only after cheaper checks have already found something serving, so no launch pays
+# it on the empty-rig path.
+#
 # Cache: the registry is static for a process, and callers poll in loops
 # (health.sh --watch re-resolves every WATCH_INTERVAL seconds).
 _CLUB_CONTAINERS_CACHE=""

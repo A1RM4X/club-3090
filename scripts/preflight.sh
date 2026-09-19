@@ -1527,7 +1527,7 @@ preflight_autodetect_endpoint() {
   fi
   # Prefer a recognised club-3090 engine-family prefix when several match.
   found_line=$(printf '%s\n' "$engine_lines" \
-    | command grep -E "$(club_container_re)" | head -1 || true)
+    | command grep -E "$(club_container_re_loose)" | head -1 || true)
   [[ -z "$found_line" ]] && found_line=$(printf '%s\n' "$engine_lines" | head -1)
   # Several inference containers up → we picked one; tell the user how to override.
   if [[ "$(printf '%s\n' "$engine_lines" | command grep -c .)" -gt 1 ]]; then
