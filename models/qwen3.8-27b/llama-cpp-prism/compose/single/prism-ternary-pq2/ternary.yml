@@ -213,6 +213,30 @@ services:
       - '${KV_TYPE:-q8_0}'
       - '--cache-type-v'
       - '${KV_TYPE:-q8_0}'
+      # ⭐ Thinking token budget. VERIFIED against this image's own --help (not
+      # assumed): `--reasoning-budget N` takes "-1 for unrestricted, 0 for immediate
+      # end, N>0 for token budget (default: -1)". Env alias: LLAMA_ARG_THINK_BUDGET.
+      # ✅ NOT fork-specific: MAINLINE llama.cpp (ggml-org@sha256:6ac92152…, the image
+      # the sibling qwen3.8-27b llama-cpp composes run) prints IDENTICAL semantics and
+      # carries all six --reasoning-* knobs, so this flag ports to those composes as-is.
+      # Checked 2026-09-19 against BOTH binaries' --help, after an earlier draft of this
+      # comment asserted the opposite from the prism help alone.
+      #
+      # ⚠️⚠️ THIS CAN TRUNCATE REASONING AND THE TRUNCATION IS SILENT. Upstream's card
+      # says `low` "is not supported and the model behaves close to xhigh" (see
+      # Caveats above), so this model reasons LONG by default. When the budget is
+      # exhausted the engine force-closes the thinking block, and
+      # `--reasoning-budget-message` defaults to NONE — so a cut-off trace carries no
+      # marker and reads downstream as a confident short answer, not as a truncation.
+      # ⇒ IF QUALITY DROPS AFTER THIS CHANGE, SUSPECT THE BUDGET BEFORE THE MODEL.
+      # That misattribution is a known trap on this stack: our harnesses have blamed
+      # models for budgets that were simply too small for a reasoning trace.
+      # ⛔ UNVALIDATED — set 2026-09-19 with NO boot (rig was mid-measurement). No
+      # quality run, no coherence check, and no evidence that 8192 is enough headroom
+      # for this model's traces. Revert to upstream behaviour with REASONING_BUDGET=-1
+      # (unrestricted); 0 disables thinking entirely.
+      - '--reasoning-budget'
+      - '${REASONING_BUDGET:-8192}'
       # Vision. The projector is a SEPARATE artifact here (not embedded), and
       # upstream keeps it off the hot path: it is loaded only when an image
       # arrives, so text-only serving costs nothing for it.
