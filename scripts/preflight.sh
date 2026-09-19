@@ -27,6 +27,8 @@
 # processes and nested scripts inherit it. Guarded by test-locale-utf8.sh.
 export PYTHONUTF8="${PYTHONUTF8:-1}"
 [[ -n "${_PREFLIGHT_LOADED:-}" ]] && return 0
+# shellcheck source=lib/club-containers.sh
+source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/lib/club-containers.sh"
 _PREFLIGHT_LOADED=1
 _PREFLIGHT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -1525,7 +1527,7 @@ preflight_autodetect_endpoint() {
   fi
   # Prefer a recognised club-3090 engine-family prefix when several match.
   found_line=$(printf '%s\n' "$engine_lines" \
-    | command grep -E '^(vllm-|llama-cpp-|ik-llama-|sglang-|beellama-)' | head -1 || true)
+    | command grep -E "$(club_container_re_loose)" | head -1 || true)
   [[ -z "$found_line" ]] && found_line=$(printf '%s\n' "$engine_lines" | head -1)
   # Several inference containers up → we picked one; tell the user how to override.
   if [[ "$(printf '%s\n' "$engine_lines" | command grep -c .)" -gt 1 ]]; then
@@ -2259,8 +2261,15 @@ preflight_cpu_offload_ram() {
     return 0
   fi
   local kb total_gb avail_gb
-  kb="$(awk '/^MemTotal:/{print $2}' /proc/meminfo)";     total_gb=$(( kb / 1024 / 1024 ))
-  kb="$(awk '/^MemAvailable:/{print $2}' /proc/meminfo)"; avail_gb=$(( kb / 1024 / 1024 ))
+  # ⚠️ DECIMAL GB, because the header key is `CPU-Offload-Host-RAM-GB` and every
+  # value authored against it is decimal GB (weights sizes, `size_gb`, the
+  # measured cgroup figures). This used to be `kb / 1024 / 1024`, i.e. GiB
+  # compared against a GB budget — the gate was ~7% STRICTER than its own
+  # documented contract on every offload slug, silently. /proc/meminfo is in KiB,
+  # so bytes = kb * 1024, and GB = bytes / 1e9. (241 GB reads as 224 in GiB: on a
+  # 135 GB slug that is the difference between "fits with room" and a refusal.)
+  kb="$(awk '/^MemTotal:/{print $2}' /proc/meminfo)";     total_gb=$(( kb * 1024 / 1000000000 ))
+  kb="$(awk '/^MemAvailable:/{print $2}' /proc/meminfo)"; avail_gb=$(( kb * 1024 / 1000000000 ))
 
   if (( total_gb < need_gb )); then
     echo "[preflight] ERROR: this compose offloads experts to host RAM and needs ~${need_gb} GB" >&2

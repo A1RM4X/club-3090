@@ -130,7 +130,10 @@ weights:
     # prefix — same trap the unsloth-ud-iq3xxs entry documents (pointing local_subdir
     # at the quant dir NESTS IT TWICE).
     local_subdir: glm-5.3-flash-gguf/devquasar-q2k
-    size_gb: 107
+    # ⚠️ WAS 107 — that is GiB. `du -sh` prints GiB under a bare "G", and the
+    # field is size_gb (decimal). MEASURED 2026-09-19 from the verify_glob files:
+    # 114.4 GB.
+    size_gb: 114
     format: gguf
     status: experimental
     hf_repo: DevQuasar/zai-org.GLM-5.3-Flash-GGUF
@@ -153,7 +156,10 @@ weights:
     # prefix — same trap the unsloth-ud-iq3xxs entry documents (pointing local_subdir
     # at the quant dir NESTS IT TWICE).
     local_subdir: glm-5.3-flash-gguf/devquasar-q3km
-    size_gb: 140
+    # ⚠️ WAS 140 — that is GiB. `du -sh` prints GiB under a bare "G", and the
+    # field is size_gb (decimal). MEASURED 2026-09-19 from the verify_glob files:
+    # 149.4 GB.
+    size_gb: 149
     format: gguf
     status: experimental
     hf_repo: DevQuasar/zai-org.GLM-5.3-Flash-GGUF
@@ -186,7 +192,13 @@ weights:
     kind: draft
     files:
       - GLM-5.3-Flash-DFlash2-Q4_K_M.gguf
-    verify_glob: "*.gguf"
+    # ⚠️ MUST be pack-specific. A bare "*.gguf" also matched the UNDECLARED
+    # GLM-5.3-Flash-DFlash2-Q8_0.gguf (1.25 GB) sitting in the same directory,
+    # so deleting the Q4_K_M would still have reported this variant PRESENT.
+    # Same class as the prism/mudler collisions, but with a neighbour that is
+    # not in the registry at all — which is why the declaration-based half of
+    # test-weights-glob-distinct could not see it (2026-09-19).
+    verify_glob: "*Q4_K_M.gguf"
     manual_note: "External DFlash2 drafter, SHIPPED default on the GLM slugs at n=3 pinned to CUDA1. See drafters/anbeeld-glm53-dflash2.yml for the placement and depth measurements."
   mmproj-f16:
     path: glm-5.3-flash-gguf/mmproj

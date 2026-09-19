@@ -85,11 +85,45 @@ from scripts.lib.profiles.compose_registry import COMPOSE_REGISTRY
 for name in sorted(COMPOSE_REGISTRY):
     print(name)
 PY
-  out="$(bash "${ROOT_DIR}/scripts/diagnose-profile.sh" "$compose" 2>&1)" || {
-    echo "ASSERTION FAILED: diagnose-profile failed for $compose" >&2
-    echo "$out" >&2
-    exit 1
-  }
+  # ⚠️ EXIT CODES ARE A CONTRACT, NOT A BOOLEAN: GREEN=0, YELLOW=1, RED=2,
+  # bad-args/crash=3. This loop used to treat ANY non-zero as a failure, which
+  # made it assert something untrue — that every catalogued slug must triage
+  # clean on the DEFAULT hardware profile (1x-rtx-3090). A slug whose documented
+  # target class is a bigger card is YELLOW there BY DESIGN, and saying so is the
+  # config being honest. RED and crashes stay hard failures for everyone.
+  # `set -e` aborts an assignment whose command fails BEFORE `rc=$?` is read,
+  # so the status must be captured with `|| rc=$?` — the exact trap the repo
+  # guide calls out (never interpolate a status you did not capture).
+  rc=0
+  out="$(bash "${ROOT_DIR}/scripts/diagnose-profile.sh" "$compose" 2>&1)" || rc=$?
+  case "$compose" in
+    # EXPECTED-YELLOW REGISTER — each entry names WHY. Keep it short; a slug that
+    # is yellow for any OTHER reason is a real regression and must still fail.
+    #
+    # vllm/qwen38-27b-single-nvfp4: 20.44 GiB of NVFP4 weights on a 24 GB card
+    # leaves ~0 GB for the KV pool, so kv-calc [4/6] verdicts FAIL. Deliberate —
+    # its registry note says "on a 3090 expect an OOM at KV init, which is the
+    # config being honest rather than broken"; target class is 32 GB+ (5090 /
+    # RTX 6000 Pro / H100), where the A4 groups also actually execute.
+    vllm/qwen38-27b-single-nvfp4)
+      if [[ "$rc" -eq 0 ]]; then
+        echo "ASSERTION FAILED: $compose triaged GREEN on 1x-rtx-3090 — it is" >&2
+        echo "  registered as expected-YELLOW (does not fit 24 GB). If the slug or" >&2
+        echo "  kv-calc changed so it now fits, DROP it from this register." >&2
+        exit 1
+      fi
+      [[ "$rc" -eq 1 ]] || {
+        echo "ASSERTION FAILED: $compose exit=$rc, expected 1 (YELLOW)" >&2
+        echo "$out" >&2; exit 1; }
+      ;;
+    *)
+      [[ "$rc" -eq 0 ]] || {
+        echo "ASSERTION FAILED: diagnose-profile exit=$rc for $compose (expected 0/GREEN)" >&2
+        echo "$out" >&2
+        exit 1
+      }
+      ;;
+  esac
   assert_contains "$out" "[6/6] Vendored overlays applied"
 done
 

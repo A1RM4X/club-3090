@@ -82,3 +82,10 @@ results/*
 *.bak
 *.orig
 *.rej
+
+# LiteLLM RUNTIME view — rendered per-rig by scripts/lib/litellm-sync.sh from the
+# endpoints that are actually serving. The tracked config.yaml is the CATALOG
+# view and stays in git; this one is rig state and must never be committed, or
+# every checkout would conflict on a file nobody edited.
+services/litellm/config.runtime.yaml
+services/litellm/config.runtime.yaml.tmp

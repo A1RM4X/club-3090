@@ -156,6 +156,13 @@ compose_cmd() {
 }
 
 start_service() {
+    # litellm mounts services/litellm/config.runtime.yaml, which is GITIGNORED —
+    # render it first or docker creates a DIRECTORY at that path for the missing
+    # bind source and the proxy fails to parse its config. This is also the
+    # bootstrap on a fresh checkout. --no-restart: we are about to start it.
+    if [[ "$1" == "litellm" ]]; then
+        bash "$(dirname "${BASH_SOURCE[0]}")/lib/litellm-sync.sh" --no-restart --quiet || true
+    fi
     printf "  ${GREEN}▲${NC} Starting %-12s" "$1..."
     compose_cmd "$1" "up -d" && echo "done" || { echo "failed"; c3_mark_start_failure "$1"; }
 }
@@ -1123,7 +1130,7 @@ mode_off() {
     # (#535 class; caught live 2026-07-04 when off left vllm-qwen36-27b-minimal
     # serving and the 27b TP=2 scene booted into its residue).
     _stragglers=$(docker ps --format '{{.Names}}' 2>/dev/null \
-        | command grep -E '^(vllm-|llama-cpp-|ik-llama-|sglang-|beellama-)' || true)
+        | command grep -E "$(club_container_re)" || true)
     if [ -n "$_stragglers" ]; then
         echo -e "  ${YELLOW}▼${NC} Stopping catalog-launched engine(s): $(echo "$_stragglers" | tr '\n' ' ')"
         echo "$_stragglers" | xargs -r docker stop >/dev/null 2>&1 || true

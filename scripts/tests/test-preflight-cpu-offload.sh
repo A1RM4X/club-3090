@@ -516,5 +516,32 @@ command grep -q "preflight_cpu_offload_ram" scripts/switch.sh \
 command grep -q "preflight_offload_split_mode" scripts/switch.sh \
   && ok "switch.sh calls the split-mode guard" || bad "switch.sh does not call the split-mode guard"
 
+# --- unit contract: the -GB key is compared in DECIMAL GB --------------------
+# The header key is `CPU-Offload-Host-RAM-GB` and every value authored against it
+# is decimal GB. preflight_cpu_offload_ram() once computed `kb/1024/1024` (GiB)
+# and compared THAT against it, so the gate ran ~7% stricter than its own
+# documented contract on every offload slug — silent, surfacing only as a refusal
+# on a rig that should have passed.
+#
+# ⚠️ Scoped to THIS function on purpose: preflight.sh has other `/1024/1024`
+# sites (general RAM reporting) that are not the -GB path and must not be
+# dragged along by a file-wide grep — an earlier version of this assertion
+# matched one of those and reported a fixed file as broken.
+_fn="$(awk '/^preflight_cpu_offload_ram\(\)/{f=1} f{print} f&&/^}/{exit}' scripts/preflight.sh)"
+if command grep -q 'kb \* 1024 / 1000000000' <<<"$_fn"; then
+  ok "preflight_cpu_offload_ram sizes host RAM in DECIMAL GB, matching the -GB key"
+else
+  bad "preflight_cpu_offload_ram host-RAM unit" "decimal GB (kb * 1024 / 1000000000)" \
+      "$(command grep -oE 'kb [*/] 1024 [*/] [0-9]+' <<<"$_fn" | head -1)"
+fi
+# ⚠️ Strip comments first: the fix's own comment QUOTES the old expression to
+# explain what changed, and a naive grep scores that as the bug still being
+# present — a gate failing on its own documentation.
+if command grep -vE '^\s*#' <<<"$_fn" | command grep -q 'kb / 1024 / 1024'; then
+  bad "preflight_cpu_offload_ram still has a GiB expression in CODE" "none" "kb / 1024 / 1024"
+else
+  ok "no GiB expression remains in the -GB comparison path (comments excluded)"
+fi
+
 [[ $fail -eq 0 ]] && echo "test-preflight-cpu-offload: ok" || echo "test-preflight-cpu-offload: FAIL"
 exit $fail

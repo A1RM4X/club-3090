@@ -85,7 +85,10 @@ weights:
   unsloth-ud-q4kxl:
     path: qwen3.8-flash-next-gguf/UD-Q4_K_XL
     local_subdir: qwen3.8-flash-next-gguf
-    size_gb: 105
+    # ⚠️ WAS 105 — that is GiB. `du -sh` prints GiB under a bare "G", and the
+    # field is size_gb (decimal). MEASURED 2026-09-19 from the verify_glob files:
+    # 111.3 GB.
+    size_gb: 111
     format: gguf
     status: experimental
     hf_repo: unsloth/Qwen3.8-Flash-Next-GGUF
@@ -118,7 +121,10 @@ weights:
   exl3-3.05bpw:
     path: qwen3.8-flash-next-exl3-3.05bpw
     local_subdir: qwen3.8-flash-next-exl3-3.05bpw
-    size_gb: 80
+    # ⚠️ WAS 80 — that is GiB. `du -sh` prints GiB under a bare "G", and the
+    # field is size_gb (decimal). MEASURED 2026-09-19 from the verify_glob files:
+    # 85.0 GB.
+    size_gb: 85
     format: exl3
     status: experimental
     hf_repo: turboderp/Qwen3.8-Flash-Next-exl3
@@ -161,7 +167,10 @@ weights:
   exl3-4.05bpw:
     path: qwen3.8-flash-next-exl3-4.05bpw
     local_subdir: qwen3.8-flash-next-exl3-4.05bpw
-    size_gb: 101
+    # ⚠️ WAS 101 — that is GiB. `du -sh` prints GiB under a bare "G", and the
+    # field is size_gb (decimal). MEASURED 2026-09-19 from the verify_glob files:
+    # 107.3 GB.
+    size_gb: 107
     format: exl3
     status: experimental
     hf_repo: turboderp/Qwen3.8-Flash-Next-exl3

@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# shellcheck source=lib/club-containers.sh
+source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/lib/club-containers.sh"
 #
 # rebench-full.sh — canonical rebench against the currently-running model
 # (a fail-fast verify-full preflight + 5 measured steps). Built to eliminate
@@ -318,7 +320,7 @@ echo
 # preflight uses. Silently no-ops in endpoint-first mode (CONTAINER=none).
 if [[ "${CONTAINER:-}" != "none" ]] && command -v docker >/dev/null 2>&1; then
   CONTAINER_NAME=$(docker ps --format '{{.Names}}' 2>/dev/null \
-    | command grep -E '^(vllm-|llama-cpp-|sglang-)' | head -1 || true)
+    | command grep -E "$(club_container_re)" | head -1 || true)
   if [[ -n "$CONTAINER_NAME" ]]; then
     docker inspect "$CONTAINER_NAME" > "$OUT_DIR/container-config.json" 2>/dev/null || true
     # Boot log: capture lines that the report parser needs (KV pool size,

@@ -363,6 +363,16 @@ def section_name(compose_path: str, served: str, tp: str, container: str) -> str
     if "gemma" in served or "gemma" in container or "gemma-4-31b" in compose_path:
         return "Gemma 4 31B (community-experimental)"
     path = compose_path.replace("\\", "/")
+    # ⚠️ exl3 BEFORE the topology arms. It autosplits LAYERS across cards and is
+    # NOT tensor-parallel, so falling through to the "/dual/" arm would label its
+    # rows "TP=2" — a factual error in the published table, which states
+    # "layer-split (autosplit, not TP)" for exactly these rows. Keyed on the
+    # engine dir / container, since the compose path still says /dual/.
+    if "exllamav3" in path or "/exl3-" in path or "tabbyapi" in container:
+        return ("Dual-card (2× RTX 3090, layer-split) — exl3" if "/dual/" in path
+                else "Single-card (1× RTX 3090) — exl3")
+    # NB llama-cpp-prism matches here and that is correct — it is a llama.cpp fork
+    # (its engine profile declares `type: llama.cpp`).
     if "llama-cpp" in path or "llama-cpp" in container:
         return "Single-card (1× RTX 3090) — llama.cpp"
     m = re.search(r"/multi([1-9][0-9]*)/", path)

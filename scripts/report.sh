@@ -104,6 +104,8 @@ cd "$REPO_ROOT"
 # Canonical engine classification (club-3090#1282) — single source of truth.
 # shellcheck source=lib/engine-kind.sh
 source "$REPO_ROOT/scripts/lib/engine-kind.sh"
+# shellcheck source=lib/club-containers.sh
+source "$REPO_ROOT/scripts/lib/club-containers.sh"
 source "$REPO_ROOT/scripts/lib/report_calib.sh"
 # shellcheck source=lib/p2p-state.sh
 source "$REPO_ROOT/scripts/lib/p2p-state.sh"
@@ -777,7 +779,7 @@ section "Display / desktop state"
     # NB: top-level (not in a function) — plain assignment, not `local`.
     our_container=""
     if have docker && docker info >/dev/null 2>&1; then
-      our_container=$(docker ps --format '{{.Names}}' --filter 'name=vllm-' --filter 'name=llama-cpp-' --filter 'name=beellama-' --filter 'name=club3090-' --filter 'name=ik-llama-' 2>/dev/null | head -1)
+      our_container=$(club_running_container)
     fi
     nvidia-smi --query-gpu=index,memory.used --format=csv,noheader,nounits 2>/dev/null \
       | while IFS=, read -r idx used; do
@@ -894,7 +896,7 @@ fi
 # then map it to a kv-calc engine family + model id via scripts/lib/report_calib.sh.
 _calib_container="${CONTAINER:-}"
 if [[ -z "$_calib_container" ]] && have docker && docker info >/dev/null 2>&1; then
-  _calib_container=$(docker ps --format '{{.Names}}' --filter 'name=vllm-' --filter 'name=llama-cpp-' --filter 'name=beellama-' --filter 'name=club3090-' --filter 'name=ik-llama-' 2>/dev/null | head -1)
+  _calib_container=$(club_running_container)
 fi
 CALIB_ENGINE_KIND="${ENGINE_KIND:-$(calib_engine_for_container "$_calib_container")}"
 CALIB_MODEL_ID="$(calib_model_for_container "$_calib_container")"
@@ -1026,11 +1028,12 @@ section "Active container"
 # with CONTAINER=... env var for non-standard naming (microk8s deployments,
 # host engine builds via CONTAINER=none, etc.).
 if [[ -z "$CONTAINER" ]] && have docker && docker info >/dev/null 2>&1; then
+  # Prefer the stack default if it happens to be up, then ANY container the
+  # registry knows. The ladder used to be five hardcoded prefixes, which meant a
+  # rig serving exl3 (tabbyapi-*) or SGLang reported "no engine container" over a
+  # healthy server — silently, since "not found" reads the same as "not there".
   CONTAINER=$(docker ps --format '{{.Names}}' --filter 'name=vllm-qwen36' 2>/dev/null | head -1)
-  [[ -z "$CONTAINER" ]] && CONTAINER=$(docker ps --format '{{.Names}}' --filter 'name=vllm-' 2>/dev/null | head -1)
-  [[ -z "$CONTAINER" ]] && CONTAINER=$(docker ps --format '{{.Names}}' --filter 'name=llama-cpp-' 2>/dev/null | head -1)
-  [[ -z "$CONTAINER" ]] && CONTAINER=$(docker ps --format '{{.Names}}' --filter 'name=beellama-' 2>/dev/null | head -1)
-  [[ -z "$CONTAINER" ]] && CONTAINER=$(docker ps --format '{{.Names}}' --filter 'name=club3090-' 2>/dev/null | head -1)
+  [[ -z "$CONTAINER" ]] && CONTAINER=$(club_running_container)
 fi
 
 # Engine class — drives which probes run inside the container body. Inferred
@@ -1382,7 +1385,7 @@ else
   exited_lines=$(docker ps -a \
     --format '{{.Names}}\t{{.Image}}\t{{.Status}}\t{{.ID}}' \
     --filter 'status=exited' 2>/dev/null \
-    | command grep -E '^(vllm-|llama-cpp-)' || true)
+    | command grep -E "$(club_container_re_loose)" || true)
 
   if [[ -z "$exited_lines" ]]; then
     echo "_No recently-exited vLLM or llama.cpp containers found._"

@@ -58,7 +58,17 @@ fi
 # --- 2: spec-sweep.sh must classify an SGLang slug as sglang (#1282) ---------
 # Drive the real script against a dead URL so it prints its classification and
 # exits before touching a server. The banner line is the observable.
-out="$(cd "$ROOT" && SWEEP_N="0 1" SLUG=sgl/qwen38-27b-dual-max \
+#
+# ⚠️⚠️ SWEEP_DRY=1 IS LOAD-BEARING, NOT DECORATION. The banner prints BEFORE the
+# dry-run check, so without it the script sails past and does the real thing: for
+# any non-llamacpp family that means `switch.sh --force <slug>` per arm, i.e. this
+# "resolver" unit test BOOTS A 27B MODEL on the rig's GPUs. `timeout 120` does not
+# save you — it TERMs spec-sweep only, and the switch.sh GRANDCHILD survives and
+# keeps launching after the test has moved on. Observed 2026-09-18: a suite run
+# left `sglang-qwen38-27b-max-dual` serving on :8145 with the test long gone, and
+# the 120s timeout had been exceeded threefold. `| head -40` does not help either
+# — nothing sends SIGPIPE while the child is quiet.
+out="$(cd "$ROOT" && SWEEP_DRY=1 SWEEP_N="0 1" SLUG=sgl/qwen38-27b-dual-max \
         URL=http://127.0.0.1:9 timeout 120 bash scripts/spec-sweep.sh 2>&1 | head -40 || true)"
 line="$(command grep -oE '\[spec-sweep\] engine=[a-z]+' <<<"$out" | head -1)"
 case "$line" in
@@ -70,7 +80,8 @@ esac
 # --- 3: controls — the other two kinds must NOT regress ---------------------
 for pair in "vllm/minimal:vllm" "llamacpp/default:llamacpp"; do
   slug="${pair%:*}"; want="${pair##*:}"
-  out="$(cd "$ROOT" && SWEEP_N="0 1" SLUG="$slug" URL=http://127.0.0.1:9 \
+  # SWEEP_DRY=1: same reason as arm 2 — without it the vllm control boots a model.
+  out="$(cd "$ROOT" && SWEEP_DRY=1 SWEEP_N="0 1" SLUG="$slug" URL=http://127.0.0.1:9 \
           timeout 120 bash scripts/spec-sweep.sh 2>&1 | head -40 || true)"
   got="$(command grep -oE '\[spec-sweep\] engine=[a-z]+' <<<"$out" | head -1)"; got="${got##*engine=}"
   [[ "$got" == "$want" ]] || bad "spec-sweep control $slug" "$want" "${got:-<no banner>}"
@@ -92,6 +103,36 @@ if [[ -n "$priv" ]]; then
   bad "private classifier re-implementation" "none outside scripts/lib/engine-kind.sh" "$priv"
 else
   ok "no script re-implements the engine mapping privately"
+fi
+
+# --- 5: no script may hand-list CONTAINER NAME PREFIXES ---------------------
+# The sibling defect to arm 4. Arm 4 polices "which engine is this?"; this one
+# polices "is this container ours at all?" — a different question that was ALSO
+# copy-pasted per script, so every new engine silently fell out of every copy.
+#
+# #281 already fixed this once, in switch.sh: teardown used a fixed
+# `^(vllm-|llama-cpp-)` regex, missed beellama-/ik-llama-/sglang- containers and
+# leaked their VRAM across switches. The other copies were never converted, so by
+# 2026-09-18 report.sh's filter was missing BOTH sglang- and exl3, and health.sh
+# was missing exl3 — a rig serving exl3 was told "no engine container running"
+# over a healthy server. "Not found" reads exactly like "not there".
+#
+# The set is registry-derived in scripts/lib/club-containers.sh.
+# ⚠️ TWO SHAPES. The first pass of this arm only knew the `--filter 'name=X-'`
+# form and therefore missed soak-test.sh, which hand-listed the SAME set as a
+# grep alternation `^(vllm-|llama-cpp-|...)`. A gate that knows one spelling of a
+# copy-paste is a gate that certifies the other spelling as clean.
+hand="$(command grep -rnE "name=(vllm|llama-cpp|beellama|ik-llama|sglang|tabbyapi)-|\\^\\((vllm|llama-cpp|ik-llama|sglang|beellama)-\\|" \
+          "${ROOT}/scripts" --include='*.sh' 2>/dev/null \
+          | command grep -v '/scripts/tests/' \
+          | command grep -v '/scripts/lib/club-containers.sh' \
+          | command grep -vE ':[0-9]+:[[:space:]]*#' \
+          | command grep -vE "name=vllm-qwen36" || true)"
+if [[ -n "$hand" ]]; then
+  bad "hand-listed container prefixes" \
+      "discovery via club_running_container / club_container_re" "$hand"
+else
+  ok "no script hand-lists container-name prefixes (registry-derived discovery)"
 fi
 
 if [[ $FAIL -ne 0 ]]; then echo "FAIL: $NAME" >&2; exit 1; fi
