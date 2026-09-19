@@ -423,6 +423,11 @@ services:
         # It costs ~HICACHE_GB x TP of host RAM for nothing. Re-test when #33713
         # merges. See learnings/sglang-engine.md 2026-09-14.
         # --- W4A8 opt-in (patch from club-3090#1226; not vendored here) ---
+        # ⛔ STAYS 0 — deliberately, unlike the autoround-int4 siblings which
+        # went default-on 2026-09-19. The vendored patch adds an AUTO-ROUND
+        # W4A8 Marlin kernel; this compose serves `--quantization fp8`, so the
+        # patched path is never selected. W4A8=1 here buys nothing and only costs
+        # patch-application time plus a misleading "[w4a8] applying..." log line.
         _w4a8="${W4A8:-0}"
         case "$$_w4a8" in 0|1) : ;; *) echo "[w4a8] W4A8='$$_w4a8' must be 0 or 1" >&2; exit 1 ;; esac
         if [ "$$_w4a8" = "1" ]; then

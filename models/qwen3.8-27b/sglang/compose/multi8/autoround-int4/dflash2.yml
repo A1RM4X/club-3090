@@ -383,7 +383,28 @@ services:
         # It costs ~HICACHE_GB x TP of host RAM for nothing. Re-test when #33713
         # merges. See learnings/sglang-engine.md 2026-09-14.
         # --- W4A8 opt-in (patch from club-3090#1226; not vendored here) ---
-        _w4a8="${W4A8:-0}"
+        # ⭐ DEFAULT-ON since 2026-09-19 (was 0). ⚠️ THE NUMBERS BELOW ARE THE MTP
+        # SLUG'S — sgl/qwen38-27b-dual-fast, v0.5.20, 2 interleaved boots per arm:
+        #                    W4A16    W4A8      delta
+        #   prefill @10K     1128.1   1682.5    +49.1%  ⭐
+        #   prefill @90K      898.7   1234.7    +37.4%  ⭐
+        #   decode narrative   83.91    76.88    -8.4%
+        #   decode code       110.70   104.63    -5.5%
+        # ⛔ THIS SLUG (DFlash2) HAS NO REPEAT-BOOT MEASUREMENT. A single-boot run
+        # on 2026-09-19 suggested prefill +48.2%/+36.6% (consistent with MTP) but
+        # decode code +3.3% — a GAIN, opposite in sign to MTP. That +3.3% sat
+        # INSIDE the boot-to-boot floor and has NOT been reproduced; the repeat-
+        # boot work that retired the other single-boot claims on this file did not
+        # cover this slug. ⚠️ Do NOT cite "+3.3% code" or "W4A8 decode changes sign
+        # by drafter" — neither is established. Treat the MTP decode cost above as
+        # the best available estimate here until this slug is measured properly.
+        # Prefill is the one axis that reproduced across both drafters.
+        # ⛔ RETIRED: the former "v0.5.20 REGRESSES this path ~10% decode" warning —
+        # two boot extremes differenced, killed by repeat boots. The pin bump is a
+        # measured NULL.
+        # ⚠️⚠️ QUALITY ON THE W4A8 PATH IS UNVALIDATED — no 8-pack, no
+        # verify-stress. int8 activations are a real numerical change. Revert W4A8=0.
+        _w4a8="${W4A8:-1}"
         case "$$_w4a8" in 0|1) : ;; *) echo "[w4a8] W4A8='$$_w4a8' must be 0 or 1" >&2; exit 1 ;; esac
         if [ "$$_w4a8" = "1" ]; then
           _p=/etc/club3090/w4a8

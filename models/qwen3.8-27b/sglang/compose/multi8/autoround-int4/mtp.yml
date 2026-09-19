@@ -393,7 +393,33 @@ services:
         # It costs ~HICACHE_GB x TP of host RAM for nothing. Re-test when #33713
         # merges. See learnings/sglang-engine.md 2026-09-14.
         # --- W4A8 opt-in (patch from club-3090#1226; not vendored here) ---
-        _w4a8="${W4A8:-0}"
+        # ⭐ DEFAULT-ON since 2026-09-19 (was 0). MEASURED on this rig,
+        # sgl/qwen38-27b-dual-fast, sglang v0.5.20, TWO fresh boots per arm,
+        # INTERLEAVED, bench.sh 3 warm + 5 measured:
+        #                    W4A16 (old default)  W4A8 (now default)   delta
+        #   prefill @10K     1128.1               1682.5               +49.1%  ⭐
+        #   prefill @90K      898.7               1234.7               +37.4%  ⭐
+        #   decode narrative   83.91                76.88               -8.4%
+        #   decode code       110.70               104.63               -5.5%
+        # All four clear the boot-to-boot floor (1.9-4.7%). This is the first
+        # W4A8 measurement on this stack that is BOTH single-variable (one pin)
+        # AND repeat-boot; every earlier one was one boot across two pins.
+        # ⚠️ SUPERSEDES an earlier table here that read -4.7% / -2.4% decode from
+        # SINGLE boots. The real decode cost is roughly DOUBLE that; the prefill
+        # win is slightly larger (+49% vs +47%). Prefill remains the documented
+        # pain point for these slugs, so the trade still favours W4A8 — but it is
+        # a bigger trade than first published.
+        # ⚠️ Measured on v0.5.20. The v0.5.19 -> v0.5.20 pin bump is a MEASURED
+        # NULL (narrative -2.4%, code +0.4%, prefill -0.3%, all inside noise over
+        # 2 boots/arm), so these numbers transfer to either pin.
+        # ⛔ RETIRED: the former "v0.5.20 REGRESSES this path ~10% decode" warning.
+        # That came from differencing two BOOT EXTREMES on a metric whose
+        # narrative leg swings ~9% between IDENTICAL boots. Repeat boots killed it.
+        # ⚠️⚠️ QUALITY ON THE W4A8 PATH IS UNVALIDATED — no 8-pack, no
+        # verify-stress. int8 activations are a real numerical change, not just a
+        # kernel swap. Maintainer decision 2026-09-19, taken on the throughput
+        # trade with that stated. Revert with W4A8=0.
+        _w4a8="${W4A8:-1}"
         case "$$_w4a8" in 0|1) : ;; *) echo "[w4a8] W4A8='$$_w4a8' must be 0 or 1" >&2; exit 1 ;; esac
         if [ "$$_w4a8" = "1" ]; then
           _p=/etc/club3090/w4a8
