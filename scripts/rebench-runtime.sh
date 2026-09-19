@@ -31,9 +31,13 @@
 #   bash scripts/rebench-runtime.sh --tag ik-262k         # explicit tag
 #   bash scripts/rebench-runtime.sh --skip soak           # ALSO skip soak (merged)
 #
-# llama.cpp / ik_llama (non-vllm container names) — soak-test.sh's container
-# auto-detect only matches vllm-*; pass the endpoint + container explicitly
-# (see #403):
+# ⚠️ STALE ADVICE CORRECTED 2026-09-19. This used to say soak-test.sh's container
+# auto-detect "only matches vllm-*" (see #403) and that you must pass CONTAINER
+# explicitly for llama.cpp / ik_llama. That is no longer true: soak-test.sh now
+# resolves the container from the REGISTRY via scripts/lib/club-containers.sh, so
+# every catalogued engine — including sglang and exl3, which the old hand-written
+# prefix list missed — is auto-detected. Passing them explicitly still works and
+# is still the right move on a multi-model endpoint:
 #   CONTAINER=ik-llama-qwen36-27b URL=http://localhost:8020 MODEL=ik-iq4ks-mtp \
 #     bash scripts/rebench-runtime.sh --engine llama-cpp
 #
