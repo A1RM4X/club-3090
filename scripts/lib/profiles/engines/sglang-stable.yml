@@ -1,6 +1,6 @@
 schema_version: 1
 id: sglang-stable
-display_name: SGLang stable v0.5.19
+display_name: SGLang stable v0.5.20
 type: sglang
 stability: stable
 # ⚠️⚠️ IMAGE PINNING ON THIS ENGINE DOES NOT WORK THE WAY IT DOES FOR vLLM.
@@ -26,7 +26,16 @@ stability: stable
 # translation layer would silently apply one knob and mis-apply another.
 install:
   method: docker_image
-  spec: lmsysorg/sglang:v0.5.19
+  # ⭐ BUMPED v0.5.19 -> v0.5.20 on 2026-09-19. Release adds the qwen4_exp and
+  # glm5_next architectures (sgl#37500 / #36507), neither of which yields a
+  # shippable slug on sm_86 yet — so this bump is taken for currency, not speed.
+  # PERFORMANCE: NULL. Measured dual-fast, 2 fresh boots per arm, interleaved
+  # a,b,a,b: narrative -2.4%, code +0.4%, prefill -0.3% — all far inside the
+  # boot-to-boot spread (narrative alone swings ~9% between identical boots).
+  # ⚠️ An earlier single-boot A/B reported '-10% decode'. That was TWO BOOT
+  # EXTREMES differenced, not an effect; the repeat-boot run retired it.
+  # W4A8 overlay re-verified on this image: applies, boots, serves.
+  spec: lmsysorg/sglang:v0.5.20
 min_sm: 8.0
 supported_drafters:            # ⚠️ keys on spec_method, NOT drafter id.
   - mtp                       # ⭐ native in-checkpoint MTP head — RIG-VALIDATED
