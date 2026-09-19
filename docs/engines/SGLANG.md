@@ -1,8 +1,15 @@
 # SGLang on this stack
 
+
+> ⚠️ **Pin bumped v0.5.19 → v0.5.20 on 2026-09-19.** Performance is a measured NULL
+> (dual-fast, 2 interleaved boots/arm: narrative −2.4%, code +0.4%, prefill −0.3%, all
+> inside a boot-to-boot floor of 3.5–11%). The bump buys the `qwen4_exp` + `glm5_next`
+> architectures, neither shippable on sm_86 yet. Statements below marked **RE-CHECK**
+> were verified on v0.5.19 only.
+
 **Current state (2026-09-14): SGLang IS shipped** — 13 composes for Qwen3.8-27B across
 dual/multi4/multi8, 11 registered `sgl/` slugs, all `🧪 experimental`. Stock
-`lmsysorg/sglang:v0.5.19`, no engine patches (the W4A8 overlay is opt-in and off by default).
+`lmsysorg/sglang:v0.5.20`, no engine patches (the W4A8 overlay is opt-in and off by default).
 
 ⚠️ This page was previously titled *"EAGLE-3 path PARKED; no shipped variant on this stack"* and
 described the 2026-05 Qwen3.6-27B investigation. That is now [archived below](#archive--the-2026-05-qwen3627b-eagle-3-investigation-superseded).
@@ -12,7 +19,7 @@ described the 2026-05 Qwen3.6-27B investigation. That is now [archived below](#a
 | What | State |
 |---|---|
 | Shipped composes | 13 (Qwen3.8-27B), 11 registered slugs, all experimental |
-| Engine | stock `v0.5.19`, no patches required |
+| Engine | stock `v0.5.20`, no patches required |
 | Tiers | `fast` (MTP n=4) · `superfast` (DFlash2) · `max`/`supermax` (fp8 weights) |
 | cuda-graph on Ampere | ✅ **works** — captures decode to bs=24 (the 2026-05 hang is gone) |
 | Concurrency | `--max-running-requests 1` shipped; the engine clamps to `K // r` regardless |
@@ -108,7 +115,7 @@ node whose MAMBA component already committed to host is pruned from the radix tr
 instead of downgraded — the host bytes are orphaned.
 
 ⚠️ **No workaround on this pin.** The `hi_mamba_radix_cache` path the issue calls unaffected does
-not exist in v0.5.19, and `--radix-cache-backend` resolves only externally registered plugins.
+not exist in v0.5.19, and `--radix-cache-backend` resolves only externally registered plugins.  ⚠️ RE-CHECK: verified on v0.5.19; pin moved to v0.5.20 2026-09-19, NOT re-tested.
 Enabling it costs `HICACHE_GB × TP` of host RAM (the flag is **per rank**) for nothing.
 
 **Re-test trigger:** #33713 merges, or the engine pin moves.
@@ -136,7 +143,7 @@ ship the flag nowhere; do not add it.
 this engine.
 
 ### ✅ cuda-graph on Ampere — the 2026-05 hang is GONE
-The archived section below says capture hangs and mandates `--disable-cuda-graph`. On v0.5.19 the
+The archived section below says capture hangs and mandates `--disable-cuda-graph`. On v0.5.19 the  ⚠️ RE-CHECK: verified on v0.5.19; pin moved to v0.5.20 2026-09-19 and this was NOT re-tested.
 shipped composes run `cuda graph: True` and capture decode graphs for bs `[1..24]`. Do not carry
 that advice forward.
 
@@ -153,7 +160,7 @@ A,B,A,B repeat-boot found ~+8% code decode; prefill ~−1%.
 `--enable-session-radix-cache` together (upstream requires both; one alone is inert). It is also
 inert unless clients send a `session_id` — no OpenAI-compatible client does by default.
 `RADIX_EVICTION_POLICY` accepts `lru` (default) / `lfu` / `slru` / `priority`.
-⛔ `--radix-eviction-policy-config` is documented upstream but **does not exist in v0.5.19** —
+⛔ `--radix-eviction-policy-config` is documented upstream but **does not exist in v0.5.19** —  ⚠️ RE-CHECK: verified on v0.5.19; pin moved to v0.5.20 2026-09-19 and this was NOT re-tested.
 passing it hard-fails the boot.
 
 ---

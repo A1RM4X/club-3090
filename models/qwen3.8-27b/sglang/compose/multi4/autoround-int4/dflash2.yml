@@ -2,7 +2,7 @@
 # Profile (at-a-glance):
 #   Model:     Qwen3.8-27B (Qwen3-Next hybrid GDN, arch `Qwen3_5ForConditionalGeneration`)
 #              Frozenlock AutoRound INT4 W4A16 g128 — the collapse-free checkpoint.
-#   Engine:    SGLang STOCK v0.5.19 (`lmsysorg/sglang:v0.5.19`) — NO PATCHES.
+#   Engine:    SGLang STOCK v0.5.20 (`lmsysorg/sglang:v0.5.20`) — NO PATCHES.
 #   Topology:  4x GPU (TP=4) — NOT the reference rig
 #   Drafter:   DFlash2 EXTERNAL block-drafter, 5 layers, `DFlash2DraftModel`
 #              — NOT the in-checkpoint MTP head. DEFAULT is the z-lab BF16
@@ -214,7 +214,7 @@
 #   (club-3090#1178) was cut against v0.5.18 and its eligibility gate omitted the
 #   per-shard `K%128==0 / N%64==0` constraint that `prepare_w4a8` hard-asserts,
 #   so it crashed on the GDN merged `in_proj_ba` tensor (N=96 -> 48/rank at TP4,
-#   not 64-divisible). The vendored re-cut is against v0.5.19 (our pin) AND adds
+#   not 64-divisible). The vendored re-cut is against v0.5.19 (our pin THEN; bumped to v0.5.20 2026-09-19, on which the patch was re-verified to apply, boot and serve) AND adds
 #   the shape guard, which is the reason it is carried rather than referenced.
 #
 #   ⚠️ `W4A8=1` still HARD-FAILS if the installer is missing, rather than
@@ -248,7 +248,7 @@
 # ===========================================================================
 services:
   sglang-qwen38-27b-dflash2-multi4:
-    image: ${SGLANG_IMAGE:-lmsysorg/sglang:v0.5.19}
+    image: ${SGLANG_IMAGE:-lmsysorg/sglang:v0.5.20}
     container_name: ${ESTATE_CONTAINER:-sglang-qwen38-27b-dflash2-multi4}
     restart: ${CLUB3090_RESTART:-unless-stopped}
     init: true
