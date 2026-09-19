@@ -109,6 +109,11 @@ services:
       # sibling qwen3.8-27b compose keeps one only as documented back-compat.
       - INSTRUCT
       - REASONING
+      # Reasoning knobs read by the entrypoint. Bare form on purpose: `- VAR=${VAR:-}`
+      # sets them EMPTY-but-present, and an empty budget lands as `--reasoning-budget ''`.
+      - REASONING_BUDGET
+      - REASONING_BUDGET_MESSAGE
+      - REASONING_PRESERVE
       - TEMP
       - TEMPERATURE
       - TOP_P
@@ -159,10 +164,26 @@ services:
           _p="$${TOP_P:-0.95}";    _pp="$${PRESENCE_PENALTY:-0.0}"
           echo "[sampler] THINKING row (default): reasoning=$$_r temp=$$_t top_p=$$_p presence=$$_pp" >&2
         fi
-        exec /app/llama-server \
-          --reasoning "$$_r" --temp "$$_t" --top-p "$$_p" --presence-penalty "$$_pp" \
-          --top-k "$${TOP_K:-20}" --min-p "$${MIN_P:-0.0}" \
-          "$$@"
+        ROW=(--reasoning "$$_r" --temp "$$_t" --top-p "$$_p" --presence-penalty "$$_pp"
+             --top-k "$${TOP_K:-20}" --min-p "$${MIN_P:-0.0}")
+        # -- Reasoning knobs: all six --reasoning-* flags reachable ------------------
+        # ⭐ BUDGET DEFAULTS TO 8192 HERE (maintainer call 2026-09-19), unlike the
+        # llama-cpp siblings which keep llama.cpp's own -1. Semantics confirmed from
+        # BOTH binaries' --help: "-1 unrestricted, 0 immediate end, N>0 token budget".
+        # ⚠️⚠️ Exhaustion force-closes the thinking block. The MESSAGE below is what
+        # makes that visible — upstream defaults it to EMPTY, which is why a truncated
+        # trace otherwise reads as a confident short answer. If quality drops after a
+        # budget change, suspect the budget before the model.
+        ROW+=(--reasoning-budget "$${REASONING_BUDGET:-8192}")
+        ROW+=(--reasoning-budget-message "$${REASONING_BUDGET_MESSAGE:-[reasoning budget exhausted]}")
+        case "$${REASONING_PRESERVE:-}" in
+          1|on|true|yes)   ROW+=(--reasoning-preserve) ;;
+          0|off|false|no)  ROW+=(--no-reasoning-preserve) ;;
+          "")              : ;;
+          *) echo "[reasoning] REASONING_PRESERVE='$${REASONING_PRESERVE}' must be on/off/true/false/yes/no, or unset for the template default" >&2; exit 1 ;;
+        esac
+        echo "[reasoning] budget=$${REASONING_BUDGET:-8192} preserve=$${REASONING_PRESERVE:-<template default>}" >&2
+        exec /app/llama-server "$${ROW[@]}" "$$@"
       - --
     command:
       - '-m'
@@ -213,30 +234,15 @@ services:
       - '${KV_TYPE:-q8_0}'
       - '--cache-type-v'
       - '${KV_TYPE:-q8_0}'
-      # ⭐ Thinking token budget. VERIFIED against this image's own --help (not
-      # assumed): `--reasoning-budget N` takes "-1 for unrestricted, 0 for immediate
-      # end, N>0 for token budget (default: -1)". Env alias: LLAMA_ARG_THINK_BUDGET.
-      # ✅ NOT fork-specific: MAINLINE llama.cpp (ggml-org@sha256:6ac92152…, the image
-      # the sibling qwen3.8-27b llama-cpp composes run) prints IDENTICAL semantics and
-      # carries all six --reasoning-* knobs, so this flag ports to those composes as-is.
-      # Checked 2026-09-19 against BOTH binaries' --help, after an earlier draft of this
-      # comment asserted the opposite from the prism help alone.
-      #
-      # ⚠️⚠️ THIS CAN TRUNCATE REASONING AND THE TRUNCATION IS SILENT. Upstream's card
-      # says `low` "is not supported and the model behaves close to xhigh" (see
-      # Caveats above), so this model reasons LONG by default. When the budget is
-      # exhausted the engine force-closes the thinking block, and
-      # `--reasoning-budget-message` defaults to NONE — so a cut-off trace carries no
-      # marker and reads downstream as a confident short answer, not as a truncation.
-      # ⇒ IF QUALITY DROPS AFTER THIS CHANGE, SUSPECT THE BUDGET BEFORE THE MODEL.
-      # That misattribution is a known trap on this stack: our harnesses have blamed
-      # models for budgets that were simply too small for a reasoning trace.
-      # ⛔ UNVALIDATED — set 2026-09-19 with NO boot (rig was mid-measurement). No
-      # quality run, no coherence check, and no evidence that 8192 is enough headroom
-      # for this model's traces. Revert to upstream behaviour with REASONING_BUDGET=-1
-      # (unrestricted); 0 disables thinking entirely.
-      - '--reasoning-budget'
-      - '${REASONING_BUDGET:-8192}'
+      # ⭐ ADDED 2026-09-19 — this compose was the ONLY one of the six llama.cpp-family
+      # composes on this stack with no --reasoning-format, so it ran at `auto` while
+      # every sibling pinned `deepseek`. That decides WHERE thoughts land: `deepseek`
+      # routes them to message.reasoning_content, `none` leaves them inline in
+      # message.content — which changes what OpenWebUI / LiteLLM / benchlocal see.
+      # ⚠️ THIS IS A BEHAVIOUR CHANGE for this slug (auto -> deepseek), not just a
+      # default being written down. Verify at boot before relying on it.
+      - '--reasoning-format'
+      - '${REASONING_FORMAT:-deepseek}'
       # Vision. The projector is a SEPARATE artifact here (not embedded), and
       # upstream keeps it off the hot path: it is loaded only when an image
       # arrives, so text-only serving costs nothing for it.
