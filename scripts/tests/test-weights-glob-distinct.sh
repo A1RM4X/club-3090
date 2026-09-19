@@ -132,9 +132,56 @@ if problems:
         print("            `files:` list on both so they register as aliases.")
     sys.exit(1)
 
+# --- ON-DISK LEG ----------------------------------------------------------
+# ⚠️ THE DECLARATION-BASED CHECK ABOVE HAS A BLIND SPOT, found 2026-09-19: it can
+# only see collisions between two REGISTRY variants. glm-5.3-flash dflash2-q4km
+# carried "*.gguf" over a directory that also holds an UNDECLARED
+# GLM-5.3-Flash-DFlash2-Q8_0.gguf, so deleting its own pack would still have read
+# PRESENT — and no amount of comparing declarations could reveal that, because the
+# neighbour is not in the registry.
+#
+# So: where the artifact is actually on disk AND the variant declares its files,
+# assert the glob matches EXACTLY those files. Skipped per-variant when the weights
+# are absent, which is the normal case on a contributor's machine — this leg
+# strengthens the gate on a rig that has the data without making it unrunnable
+# anywhere else.
+import glob as _g, os as _os
+model_dir = _os.environ.get("MODEL_DIR") or "/mnt/models/huggingface"
+disk_bad, checked_on_disk = [], 0
+for r in rows:
+    decl = r.get("files")
+    sub, vg = r.get("subdir"), r.get("verify_glob")
+    if not (decl and sub and vg):
+        continue
+    base = _os.path.join(model_dir, sub)
+    if not _os.path.isdir(base):
+        continue
+    # ⚠️ Compare paths RELATIVE TO subdir, not basenames: `files:` entries carry
+    # the sub-directory prefix where one exists (unsloth-ud-q4kxl declares
+    # "UD-Q4_K_XL/…-00001-of-00004.gguf"), so a basename comparison scores every
+    # correctly-declared shard as an undeclared extra.
+    matched = sorted(_os.path.relpath(f, base).replace("\\", "/")
+                     for f in _g.glob(_os.path.join(base, vg)))
+    if not matched:
+        continue                      # not downloaded; ABSENT is its own signal
+    checked_on_disk += 1
+    declared = {d.replace("\\", "/") for d in decl}
+    extra = [m for m in matched if m not in declared]
+    if extra:
+        disk_bad.append((r["model"], r["variant"], vg, extra))
+
+if disk_bad:
+    print("FAIL: a verify_glob matches files the variant does not declare — deleting its")
+    print("      OWN artifact would still report PRESENT:")
+    for model, var, vg, extra in disk_bad:
+        print(f"  ⛔ {model} / {var}   glob={vg!r}")
+        print(f"       also matches: {', '.join(extra)}")
+        print(f"       Fix: narrow the glob to this variant's own file(s).")
+    sys.exit(1)
+
 print(f"  ✓ no variant's glob claims another's artifact "
       f"({aliases} alias pairing(s) allowed; {pairs} overlapping pair(s) checked "
-      f"across {len(bysub)} subdir(s))")
+      f"across {len(bysub)} subdir(s); {checked_on_disk} verified against files on disk)")
 PY
 
 echo "test-weights-glob-distinct: ok"

@@ -96,7 +96,10 @@ weights:
   unsloth-ud-q8kxl:
     path: deepseek-v4-flash-vision-exp-gguf/unsloth-ud-q8kxl/UD-Q8_K_XL
     local_subdir: deepseek-v4-flash-vision-exp-gguf/unsloth-ud-q8kxl
-    size_gb: 151
+    # ⚠️ WAS 151 — that is GiB. `du -sh` prints GiB under a bare "G", and the
+    # field is size_gb (decimal). MEASURED 2026-09-19 from the verify_glob files:
+    # 161.9 GB.
+    size_gb: 162
     format: gguf
     status: incubating
     hf_repo: unsloth/DeepSeek-V4-Flash-Vision-Exp-GGUF

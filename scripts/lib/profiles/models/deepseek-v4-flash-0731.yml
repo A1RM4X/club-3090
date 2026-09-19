@@ -95,7 +95,10 @@ weights:
   unsloth-q8-kxl:
     path: deepseek-v4-flash-0731-gguf/UD-Q8_K_XL
     local_subdir: deepseek-v4-flash-0731-gguf
-    size_gb: 151
+    # ⚠️ WAS 151 — that is GiB. `du -sh` prints GiB under a bare "G", and the
+    # field is size_gb (decimal). MEASURED 2026-09-19 from the verify_glob files:
+    # 161.9 GB.
+    size_gb: 162
     format: gguf
     status: incubating
     hf_repo: unsloth/DeepSeek-V4-Flash-0731-GGUF
@@ -120,7 +123,10 @@ weights:
   unsloth-iq2-xxs:
     path: deepseek-v4-flash-0731-gguf/UD-IQ2_XXS
     local_subdir: deepseek-v4-flash-0731-gguf
-    size_gb: 85
+    # ⚠️ WAS 85 — that is GiB. `du -sh` prints GiB under a bare "G", and the
+    # field is size_gb (decimal). MEASURED 2026-09-19 from the verify_glob files:
+    # 90.9 GB.
+    size_gb: 91
     format: gguf
     status: incubating
     hf_repo: unsloth/DeepSeek-V4-Flash-0731-GGUF
