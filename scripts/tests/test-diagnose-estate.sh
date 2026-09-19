@@ -159,7 +159,13 @@ case "${1:-}" in
     exit 0
     ;;
   ps)
-    if [[ "$args" == *"{{.Names}}"* && "$args" == *"name=club3090-"* ]]; then
+    # ⚠️ Emulate docker FILTER SEMANTICS, not one caller's argv. This branch
+    # required a literal `name=club3090-`, coupling the stub to a single call
+    # shape: when report.sh moved to registry-derived discovery (a bare
+    # `docker ps --format '{{.Names}}'` piped through a regex, no --filter)
+    # the stub answered nothing and the estate section lost its container.
+    # Rule: honour a name filter when present; otherwise list it, as docker does.
+    if [[ "$args" == *"{{.Names}}"* ]] && { [[ "$args" != *"name="* ]] || [[ "$args" == *"name=club3090-"* ]]; }; then
       echo "club3090-llama-gpu0"
     elif [[ "$args" == *"{{.Status}}"* && "$args" == *"name=club3090-llama-gpu0"* ]]; then
       echo "Up 2 minutes"
