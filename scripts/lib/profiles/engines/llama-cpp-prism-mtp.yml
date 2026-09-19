@@ -25,7 +25,13 @@ install:
   # ⚠️ `libgomp1` is INSTALLED BY THE IMAGE and is REQUIRED. The CUDA runtime
   # base does not carry it, and without it EVERY binary in the tarball fails at
   # exec with `libgomp.so.1: cannot open shared object file`. Found by booting.
-  spec: ghcr.io/noonghunna/llamacpp-prism-mtp:b10709-pr205-189-216
+  # ⚠️ DIGEST-pinned, like the llama-cpp-prism sibling — not the mutable tag it was
+  # first written with. This image is OURS and source-built from three OPEN PRs, so
+  # a retag would silently change what every user runs with no registry-visible
+  # signal. Pushed + verified pullable 2026-09-19 (local tag removed first, then
+  # fetched back by digest, so it is a real registry round-trip and not a cache hit).
+  # Tag b10709-pr205-189-216 points at this same digest today.
+  spec: ghcr.io/noonghunna/llamacpp-prism-mtp@sha256:7f859a6050b32895b2a177590545febad5008b4529db40335fab4765a8b37f48
 
 # ---------------------------------------------------------------------------
 # WHY A SEPARATE ENGINE RATHER THAN A FLAG ON AN EXISTING ONE
