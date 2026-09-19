@@ -46,6 +46,12 @@
 # only after cheaper checks have already found something serving, so no launch pays
 # it on the empty-rig path.
 #
+# Repo convention (#779): UTF-8 mode before any python3, so a rig on a real
+# non-UTF-8 locale cannot mangle reads/stdout/argv. Defaulted, not forced, so a
+# user who deliberately sets PYTHONUTF8=0 keeps control. Guarded by
+# test-locale-utf8.sh.
+export PYTHONUTF8="${PYTHONUTF8:-1}"
+
 # Cache: the registry is static for a process, and callers poll in loops
 # (health.sh --watch re-resolves every WATCH_INTERVAL seconds).
 _CLUB_CONTAINERS_CACHE=""

@@ -156,6 +156,13 @@ compose_cmd() {
 }
 
 start_service() {
+    # litellm mounts services/litellm/config.runtime.yaml, which is GITIGNORED —
+    # render it first or docker creates a DIRECTORY at that path for the missing
+    # bind source and the proxy fails to parse its config. This is also the
+    # bootstrap on a fresh checkout. --no-restart: we are about to start it.
+    if [[ "$1" == "litellm" ]]; then
+        bash "$(dirname "${BASH_SOURCE[0]}")/lib/litellm-sync.sh" --no-restart --quiet || true
+    fi
     printf "  ${GREEN}▲${NC} Starting %-12s" "$1..."
     compose_cmd "$1" "up -d" && echo "done" || { echo "failed"; c3_mark_start_failure "$1"; }
 }

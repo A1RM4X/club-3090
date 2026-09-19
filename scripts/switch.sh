@@ -965,6 +965,10 @@ down_running() {
   if [[ "${OWUI_REGISTER:-1}" -eq 1 ]]; then
     bash "$(dirname "$0")/lib/owui-register.sh" --prune-only || true
   fi
+  # Same for the gateway: after a teardown its local routes point at ports that
+  # are no longer listening, which is the dead-route state this sync exists to
+  # prevent. Cloud routes are untouched.
+  bash "$(dirname "$0")/lib/litellm-sync.sh" --quiet || true
 }
 
 gpu_preflight() {
@@ -1552,5 +1556,12 @@ up_variant "${VARIANT}"
 if [[ "$OWUI_REGISTER" -eq 1 && "$WAIT" -eq 1 ]]; then
   _owui_port="${READY_URL##*:}"; _owui_port="${_owui_port%%/*}"
   bash "$(dirname "$0")/lib/owui-register.sh" "$_owui_port" || true
+fi
+# Gateway sync: the LiteLLM route set follows what is serving, same contract as
+# the OWUI picker above. Independent of OWUI — API clients (aider/opencode/
+# agents) and the AI Studio path reach models through :4000, not the picker.
+# Never fails a launch: the model is already up and serving by this point.
+if [[ "$WAIT" -eq 1 ]]; then
+  bash "$(dirname "$0")/lib/litellm-sync.sh" --quiet || true
 fi
 echo "[switch] done. Try:  curl -s ${READY_URL%/v1/models}/v1/models | jq ."
