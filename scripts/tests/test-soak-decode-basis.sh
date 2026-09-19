@@ -144,16 +144,52 @@ mixed_basis="$(tr -d '\r' < "${SOAK_ENV_DIR}/run-mixed/turn-log.csv" | cut -d, -
 # The leg that matters most. Two plans: a normal stream (measurable window) and
 # the #849 fast-burst shape (82 ms window — sub-threshold but NOT zero). Both
 # must behave exactly as they do on master, per-turn stream included.
+
+# A base run that could not start leaves no summary.md. Without this the gate
+# dies on `cat:` and the reader has no idea the BASE TREE was the problem.
+require_base_summary() {
+  local d="$1"
+  if [[ ! -f "$d/summary.md" ]]; then
+    echo "FAIL: the BASELINE soak run produced no summary.md in $d." >&2
+    echo "      The base tree could not run — almost always a dependency that" >&2
+    echo "      origin/master's soak-test.sh sources but this gate does not extract." >&2
+    exit 1
+  fi
+  cat "$d/summary.md"
+}
 BASE_TREE="${SOAK_ENV_DIR}/base-tree"
-mkdir -p "${BASE_TREE}/scripts"
+mkdir -p "${BASE_TREE}/scripts/lib"
 have_base=1
-for f in soak-test.sh soak-helper.py; do
+# ⚠️ THIS LIST MUST COVER EVERY FILE THE BASE soak-test.sh RESOLVES RELATIVE TO
+# ITSELF (BASH_SOURCE), not just the entrypoints. soak-test.sh sources
+# lib/club-containers.sh; while that was missing, the base tree was unrunnable,
+# the base run produced no summary.md, and this gate died on a bare
+# `cat: .../summary.md: No such file or directory` that named neither the cause
+# nor the fix. The have_base guard below did not catch it because it only tests
+# whether `git show` succeeded — which it did, for the two files it knew about.
+for f in soak-test.sh soak-helper.py lib/club-containers.sh; do
   if ! git show "origin/master:scripts/${f}" > "${BASE_TREE}/scripts/${f}" 2>/dev/null; then
-    echo "SKIP: origin/master not available — cannot run the byte-identity leg" >&2
+    echo "SKIP: origin/master:scripts/${f} not available — cannot run the byte-identity leg" >&2
     have_base=0
     break
   fi
 done
+
+# Coverage check: re-derive the BASE script's own relative dependencies and
+# assert we extracted them. This is what makes the next added `source` fail
+# LOUDLY here instead of silently three steps later at a missing summary.md.
+if [[ -n "$have_base" ]]; then
+  while IFS= read -r dep; do
+    [[ -z "$dep" || -f "${BASE_TREE}/scripts/${dep}" ]] && continue
+    # ⚠️ FAIL, not SKIP. "origin/master unavailable" is an ENVIRONMENT condition and
+    # skipping is honest. An incomplete extraction list is OUR BUG, fixable in-repo —
+    # skipping it would silently retire the byte-identity leg while the gate stayed
+    # green, which is the exact failure this whole guard exists to prevent.
+    echo "FAIL: base tree INCOMPLETE — origin/master's soak-test.sh sources scripts/${dep}," >&2
+    echo "      which this gate does not extract. Add it to the extraction list above." >&2
+    exit 1
+  done < <(command grep -oE 'pwd\)/[A-Za-z0-9_./-]+' "${BASE_TREE}/scripts/soak-test.sh" 2>/dev/null | sed 's|pwd)/||')
+fi
 
 normalise() {
   # The per-turn provenance label and the decode-rate-source banner are new in
@@ -200,7 +236,7 @@ if [[ "$have_base" == "1" ]]; then
     soak_run "$BASE_TREE" "${SOAK_ENV_DIR}/run-ar-base-${shape}"
     soak_stub_stop
     base_out="$SOAK_OUT"
-    base_summary="$(cat "${SOAK_ENV_DIR}/run-ar-base-${shape}/summary.md")"
+    base_summary="$(require_base_summary "${SOAK_ENV_DIR}/run-ar-base-${shape}")"
 
     # No canvas apparatus may appear on an autoregressive run.
     assert_not_contains "$new_out" "canvas"
