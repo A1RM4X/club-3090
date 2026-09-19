@@ -199,7 +199,22 @@ services:
         # binds first and no marker appears.
         # ⚠️ RUNAWAY GUARD, not a latency bound: at ~45 tok/s, 16384 thinking tokens is
         # ~6 minutes before the cap fires.
-        ROW+=(--reasoning-budget "$${REASONING_BUDGET:-16384}")
+        # ⭐ 32768 — CHOSEN BY ARITHMETIC, not by round number. At this model's measured
+        # 52.2 tok/s decode, a budget must be emittable INSIDE the house per-case timeout
+        # (900 s, club-3090#1027) or the wall clock kills the scenario before the budget
+        # can fire — a guard you cannot reach is decoration:
+        #     8192 ->  157 s  fits, but truncates real work (see the table below)
+        #    16384 ->  314 s  fits, but sits INSIDE medium's natural trace range
+        #    32768 ->  628 s  ✅ fits with ~30% headroom, clears observed max by 73%
+        #    65536 -> 1256 s  ⛔ EXCEEDS the 900 s timeout — can never fire
+        # ⚠️ Observed natural traces at medium on this model: 18,895 and 13,013 tokens for
+        # the SAME prompt (two draws, temp 1.0). 16384 falls between them, so it truncates
+        # nondeterministically — the same prompt sometimes completing and sometimes not,
+        # which is the hardest failure to diagnose. 32768 sits clearly ABOVE the range.
+        # ⚠️ Does NOT guarantee no truncation at xhigh: a user report in #1027 cites a
+        # 170k-token trace on this model. The budget MESSAGE below is what keeps any such
+        # truncation visible rather than silent — ship them together, always.
+        ROW+=(--reasoning-budget "$${REASONING_BUDGET:-32768}")
         ROW+=(--reasoning-budget-message "$${REASONING_BUDGET_MESSAGE:-[reasoning budget exhausted]}")
         case "$${REASONING_PRESERVE:-}" in
           1|on|true|yes)   ROW+=(--reasoning-preserve) ;;
@@ -207,7 +222,7 @@ services:
           "")              : ;;
           *) echo "[reasoning] REASONING_PRESERVE='$${REASONING_PRESERVE}' must be on/off/true/false/yes/no, or unset for the template default" >&2; exit 1 ;;
         esac
-        echo "[reasoning] budget=$${REASONING_BUDGET:-8192} preserve=$${REASONING_PRESERVE:-<template default>}" >&2
+        echo "[reasoning] budget=$${REASONING_BUDGET:-32768} preserve=$${REASONING_PRESERVE:-<template default>}" >&2
         exec /app/llama-server "$${ROW[@]}" "$$@"
       - --
     command:
