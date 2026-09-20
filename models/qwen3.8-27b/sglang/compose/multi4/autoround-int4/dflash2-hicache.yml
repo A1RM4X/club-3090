@@ -157,7 +157,7 @@ services:
         if [ ! -f "$$_hm/install.sh" ]; then
           echo "[hicache-mamba] patch installer missing at $$_hm." >&2
           echo "[hicache-mamba] The patch dir IS vendored (models/qwen3.8-27b/sglang/" >&2
-          echo "[hicache-mamba] patches/sglang-hicache-mamba-v0.5.19) and mounted there by default," >&2
+          echo "[hicache-mamba] patches/sglang-hicache-mamba-v0.5.20) and mounted there by default," >&2
           echo "[hicache-mamba] so this means HICACHE_MAMBA_PATCH_DIR points elsewhere or docker" >&2
           echo "[hicache-mamba] created an empty dir because the path was missing. Refusing to boot" >&2
           echo "[hicache-mamba] unpatched (this slug's flags would otherwise crash the engine)." >&2

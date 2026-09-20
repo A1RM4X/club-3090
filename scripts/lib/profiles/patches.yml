@@ -1376,7 +1376,7 @@ patches:
     delivery_gaps: []
     delivery_mechanism: install_script
     delivery_spec:
-      script: models/qwen3.8-27b/sglang/patches/sglang-hicache-mamba-v0.5.19/install.sh
+      script: models/qwen3.8-27b/sglang/patches/sglang-hicache-mamba-v0.5.20/install.sh
       mounted_at: /etc/club3090/hicache-mamba
       invoke: "bash /etc/club3090/hicache-mamba/install.sh"
       invoked_before: sglang-launch
@@ -1384,19 +1384,18 @@ patches:
     drift_guard:
       kind: marker
       check: >-
-        install.sh runs both apply scripts and then re-runs --check on each;
-        either failing (anchor drift, half-patched state, missing file) makes
-        install.sh exit 1, and the compose entrypoint propagates that failure
-        so the container refuses to boot. A re-pinned image that drops any of
-        the anchors the scripts expect will hard-fail rather than silently
-        serve with a broken cache.
+        install.sh applies #39342 and then re-runs --check; a failure
+        (anchor drift, half-patched state, missing file) makes install.sh
+        exit 1, and the compose entrypoint propagates that failure so the
+        container refuses to boot. A re-pinned image that drops any of the
+        anchors the script expects will hard-fail rather than silently serve
+        with a broken cache.
       on_fail: refuse-to-boot
     capability: sglang-hicache-l2-mixed-chunk
     upstream:
-      ref: sgl-project/sglang#39342 + sgl-project/sglang#33713
+      ref: sgl-project/sglang#39342
       status: ours
       drop_when: >-
         SGLang lands a fixed mamba radix-cache donation path under mixed-chunk
-        retraction (#39342) AND the mamba host-leaf match walk is corrected
-        (#33713) natively. At that point the patches are retired; the compose
-        and its HiCache flags stay.
+        retraction (#39342) natively. At that point the patch is retired; the
+        compose and its HiCache flags stay.
