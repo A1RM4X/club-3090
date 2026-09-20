@@ -8,7 +8,7 @@ WHAT IT FIXES
   prefill. merge_batch (called from mix_with_running) then unconditionally
   nulls the batch mamba_track_* tensors, so the GDN checkpoint write is
   skipped (guarded by track_mask is not None). The per-req claim is never
-  rolled back, and mamba_component.prepare_for_caching_req (the v0.5.19
+  rolled back, and mamba.prepare_for_caching_req (the v0.5.20
   unified-cache live path) reads mamba_last_track_seqlen to size the mamba
   donation. Result: a stale ping-pong slot (never written for this seqlen) is
   donated into the unified radix tree under a mismatched key.
@@ -52,9 +52,9 @@ MIGRATION (v1 -> v2)
   v2 (reverts the old tail-B, then applies the head-B); a pristine tree is
   applied directly to v2. See --check for the five-edit state.
 
-TARGETS (lmsysorg/sglang:v0.5.19 layout, verified against the image)
+TARGETS (lmsysorg/sglang:v0.5.20 layout, verified against the image)
   schedule_batch.py   (Req-level, version-stable)   edits A1 A2 B (migr) B2 (head)
-  mamba_component.py  (v0.5.19 unified-cache path)   edits C D
+  mamba.py  (v0.5.20 unified-cache path)   edits C D
 
 SAFETY
   * Idempotent: re-running `apply` on an already-patched (v2) tree is a
@@ -63,7 +63,7 @@ SAFETY
     edit in BOTH files read-only, and only if the whole load-bearing unit is
     pristine-or-patched does it write anything. This is what prevents a
     half-written state where schedule_batch.py is patched but
-    mamba_component.py is not (the v1-crash shape, where B clears the stamp
+    mamba.py is not (the v1-crash shape, where B clears the stamp
     but C never reads the flag).
   * Each edit requires a byte-unique anchor; any missing/duplicate anchor
     aborts the run (no partial writes) with a clear message.
@@ -97,11 +97,11 @@ from pathlib import Path
 # ---------------------------------------------------------------------------
 
 DEFAULT_SB = "/sgl-workspace/sglang/python/sglang/srt/managers/schedule_batch.py"
-DEFAULT_MCM = "/sgl-workspace/sglang/python/sglang/srt/mem_cache/unified_cache/components/mamba_component.py"
+DEFAULT_MCM = "/sgl-workspace/sglang/python/sglang/srt/mem_cache/unified_cache/components/mamba.py"
 
 # Version the anchors were verified against (content match is authoritative;
 # this only warns on drift).
-KNOWN_GOOD_VERSION = "0.5.19"
+KNOWN_GOOD_VERSION = "0.5.20"
 
 
 def _edit(tag, kind, old, new):
@@ -145,7 +145,7 @@ EDITS = {
             "        # SGL-39342 fix: the incoming prefill reqs' mamba claim (stamped in\n"
             "        # prepare_for_extend) is orphaned by the track-tensor nulling in\n"
             "        # merge_batch; the mixed forward never writes that slot. Roll it\n"
-            "        # back so mamba_component does not donate a stale slot.\n"
+            "        # back so mamba does not donate a stale slot.\n"
             "        for req in self.reqs:\n"
             "            if req.kv.mamba_last_track_seqlen is not None:\n"
             "                if req.kv.mamba_last_track_idx is not None:\n"
@@ -175,7 +175,7 @@ EDITS = {
             "        # prefill/extend reqs (running_batch is not merged in yet). Their\n"
             "        # mamba claim was stamped in prepare_for_extend, but the mixed forward\n"
             "        # (merge_batch nulls mamba_track_*) never writes that ping-pong slot.\n"
-            "        # Roll back the claim so mamba_component does not donate a stale slot.\n"
+            "        # Roll back the claim so mamba does not donate a stale slot.\n"
             "        # We deliberately do NOT touch the running decode reqs: their stamps\n"
             "        # point at checkpoints written by their own (possibly non-mixed)\n"
             "        # prefill and remain valid — rolling those back (v1) silently dropped\n"
@@ -188,7 +188,7 @@ EDITS = {
             "                req.mamba_mixed_rollback = True\n",
         ),
     ],
-    "mamba_component.py": [
+    "mamba.py": [
         _edit(
             "C",
             "prepare_for_caching_req: skip mamba value on rollback",
@@ -226,7 +226,7 @@ EDITS = {
 
 FILES = {
     "schedule_batch.py": DEFAULT_SB,
-    "mamba_component.py": DEFAULT_MCM,
+    "mamba.py": DEFAULT_MCM,
 }
 
 
@@ -448,14 +448,14 @@ def main(argv=None):
     ap.add_argument("--revert", action="store_true", help="invert applied edits back to pristine")
     ap.add_argument("--report", action="store_true", help="full per-edit table + version")
     ap.add_argument("--sb", help="override schedule_batch.py path (off-image test)")
-    ap.add_argument("--mcm", help="override mamba_component.py path (off-image test)")
+    ap.add_argument("--mcm", help="override mamba.py path (off-image test)")
     args = ap.parse_args(argv)
 
     root_overrides = {}
     if args.sb:
         root_overrides["schedule_batch.py"] = args.sb
     if args.mcm:
-        root_overrides["mamba_component.py"] = args.mcm
+        root_overrides["mamba.py"] = args.mcm
 
     if args.check:
         sys.exit(cmd_check(root_overrides))

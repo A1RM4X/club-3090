@@ -1345,31 +1345,30 @@ patches:
       drop_when: "SGLang lands AutoRound W4A8 with the K%128/N%64 shape guard natively in the AutoRoundConfig eligibility gate — then this re-cut + guard is retired (keep the compose, drop the mount)."
 
   # ---------------------------------------------------------------------------
-  # SGLang HiCache L2 / mamba radix-cache patches — v0.5.19
+  # SGLang #39342 mixed-chunk mamba radix-cache patch — v0.5.20 re-cut
   #
-  # Two independent fail-closed engine patches, applied together by install.sh.
-  # #39342 is the one that is load-bearing for the concurrent-session flag set
-  # this compose ships; #33713 is the match-side companion for the mamba
-  # host-tier loadback path. Neither patch is a no-op: both are applied
-  # fail-closed at boot and the compose refuses to start if either cannot
-  # apply cleanly.
+  # Single fail-closed engine patch, applied by install.sh before launch.
+  # Load-bearing for the concurrent-session flag set this compose ships
+  # (HiCache L2 + mixed-chunk + slru + mamba-max-states-per-path 1):
+  # without it that flag set crashes the engine. The v0.5.20 re-cut is a
+  # file-rename-only adaptation (mamba_component.py -> mamba.py); all five
+  # functional anchors are byte-identical to the validated v0.5.19 cut.
   # ---------------------------------------------------------------------------
-  - id: qwen38-sglang-hicache-mamba-v0519
+  - id: qwen38-sglang-hicache-mamba-v0520
     model: [qwen3.8-27b]
     status: unverified
     files:
-      - models/qwen3.8-27b/sglang/patches/sglang-hicache-mamba-v0.5.19
+      - models/qwen3.8-27b/sglang/patches/sglang-hicache-mamba-v0.5.20
     load_bearing_when: []
     note: >-
       Disk-only SGLang compose (no registry entry). The patch is load-bearing
       for models/qwen3.8-27b/sglang/compose/multi4/autoround-int4/dflash2-hicache.yml
       — the only slug in the repo that ships HiCache L2 + mixed-chunk + slru
-      + mamba-max-states-per-path 1 on SGLang v0.5.19 for a hybrid-GDN model.
+      + mamba-max-states-per-path 1 on SGLang v0.5.20 for a hybrid-GDN model.
       Without the #39342 patch that exact flag set crashes the engine (stale
       mamba slot donated into the unified radix tree under a mismatched key).
-      The #33713 patch is applied as the match-side companion for the mamba
-      host-tier loadback path; it is NOT the evict-fork fix and is
-      HYPOTHESIS-ONLY on this GDN model.
+      v0.5.20 re-cut of the validated v0.5.19 patch; the only functional
+      change is the unified-cache file rename mamba_component.py -> mamba.py.
     delivery:
       dockerfile_bake: false
       entrypoint_invoke: true

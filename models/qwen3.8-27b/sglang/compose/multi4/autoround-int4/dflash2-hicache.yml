@@ -2,7 +2,7 @@
 # Profile (at-a-glance):
 #   Model:     Qwen3.8-27B (Qwen3-Next hybrid GDN, arch `Qwen3_5ForConditionalGeneration`)
 #              Frozenlock AutoRound INT4 W4A16 g128 — the collapse-free checkpoint.
-#   Engine:    SGLang v0.5.19 (`lmsysorg/sglang:v0.5.19`) + TWO PATCHES (below).
+#   Engine:    SGLang v0.5.20 (`lmsysorg/sglang:v0.5.20`) + ONE PATCH (below).
 #   Topology:  4x GPU (TP=4) — NOT the reference rig.
 #   Drafter:   DFlash2 EXTERNAL block-drafter, 5 layers, z-lab BF16 (same as sibling).
 #   KV:        fp8_e4m3 (inherited from the multi4/dflash2 sibling).
@@ -14,7 +14,7 @@
 #              falls out of the device (L1) pool and must be re-hydrated from
 #              host RAM (L2) instead of re-prefilled.
 # ---------------------------------------------------------------------------
-#   ⚠️⚠️ WHY THE TWO PATCHES ARE MOUNTED AND APPLIED FAIL-CLOSED (read this)
+#   ⚠️⚠️ WHY THE PATCH IS MOUNTED AND APPLIED FAIL-CLOSED (read this)
 #
 #   The multi4/dflash2 sibling ships WITHOUT HiCache — deliberately. Its header
 #   records that on this hybrid-GDN model, `--enable-hierarchical-cache` used
@@ -28,39 +28,30 @@
 #   mamba slot into the unified radix tree under a mismatched key — a hard
 #   crash, not a perf issue.
 #
-#   This compose turns those two known bugs on by applying two patches:
+#   This compose enables HiCache by applying the #39342 patch (v0.5.20
+#   re-cut; the only functional change from the v0.5.19 cut is the unified-
+#   cache file rename mamba_component.py → mamba.py):
 #
-#   1. apply_39342.py  (sglang#39342) — MIXED-CHUNK MAMBA RADIX-CACHE FIX.
-#      STATUS: VALIDATED. 4-edit load-bearing unit. Measured 90/90 clean on a
-#      4x3090 TP4 rig running exactly this flag set (mixed-chunk + slru +
-#      mamba-max-states-per-path 1 + HiCache L2); the exact trigger that
-#      crashed the unpatched engine is neutralized. The edit-C `return 0` is
-#      what routes the rolled-back request into the early-return guard before
-#      the insert walk, skipping the stale mamba donation.
+#   apply_39342.py  (sglang#39342) — MIXED-CHUNK MAMBA RADIX-CACHE FIX.
+#   STATUS: VALIDATED. 5-edit load-bearing unit (schedule_batch.py A1/A2/B2
+#   + mamba.py C/D). Measured 90/90 clean on a 4×3090 TP4 rig running exactly
+#   this flag set (mixed-chunk + slru + mamba-max-states-per-path 1 + HiCache
+#   L2); the exact trigger that crashed the unpatched engine is neutralized.
+#   Edit-C `return 0` routes the rolled-back request into the early-return
+#   guard before the insert walk, skipping the stale mamba donation. The
+#   rollback (edit B2) is scoped to the HEAD of mix_with_running (incoming
+#   prefills only) so the v1 tail placement's decode-req over-reach — a
+#   pervasive cache-hit regression invisible to a crash test — cannot recur.
+#   The apply is two-pass all-or-nothing across both files.
 #
-#   2. apply_33713.py  (sglang#33713) — MAMBA HOST-LEAF MATCH-SIDE FIX.
-#      STATUS: HYPOTHESIS-ONLY / NOT VALIDATED on this model. 2-edit change to
-#      unified_tree_core.py: a node is a host leaf if ANY component (FULL or
-#      MAMBA) has a host copy, not only the FULL (KV) component. On the GDN
-#      model this compose serves the KV-level "no host loadback" symptom does
-#      NOT reproduce (the evict-fork the reporter's data points to still keys
-#      off the FULL component, which this edit does not touch); the bug
-#      reproduces on the issue's KDA model (Ling-3.0-flash). It is idempotent
-#      and is applied FAIL-OPEN: if it cannot apply cleanly (anchor drift /
-#      half-patched tree) the boot WARNs and CONTINUES — a drifted hypothesis
-#      anchor must not refuse to serve. DO NOT read this compose's mamba
-#      host-loadback behaviour as validation of it.
+#   The patch applies FAIL-CLOSED: if it cannot apply cleanly (anchor drift /
+#   half-patched tree) the compose refuses to boot rather than serve with a
+#   broken cache. Removing the patch mount + the install.sh block restores the
+#   sibling's stock (unpatched, no HiCache) behaviour.
 #
-#   #39342 (validated, load-bearing) applies FAIL-CLOSED: if it cannot apply
-#   cleanly the compose refuses to boot rather than serve with a broken cache.
-#   #33713 (hypothesis-only) applies FAIL-OPEN: a drift warns + continues.
-#   Removing both patch mounts + the install.sh block restores the sibling's
-#   stock (unpatched, no HiCache) behaviour.
-#
-#   Provenance: both patches authored by @A1RM4X (SGLang v0.5.19, 2026-09-15).
-#   #39342 validation is on a W8A8 checkpoint at TP=4; the patch itself is
-#   engine-level (schedule_batch.py + mamba_component.py + unified_tree_core.py)
-#   and is quantization-independent.
+#   Provenance: authored by @A1RM4X (SGLang v0.5.19, validated 2026-09-15;
+#   v0.5.20 re-cut 2026-09-19, file rename only). The patch is engine-level
+#   (schedule_batch.py + mamba.py) and quantization-independent.
 # ---------------------------------------------------------------------------
 #   HiCache L2 flags (and the verified constraints behind each):
 #   --enable-hierarchical-cache        turns on the HiRadixTree + L2 host pool.
@@ -97,7 +88,7 @@
 # ---------------------------------------------------------------------------
 services:
   sglang-qwen38-27b-dflash2-multi4-hicache:
-    image: ${SGLANG_IMAGE:-lmsysorg/sglang@sha256:d6e7288627be8b02be88e4bba38e73f6d50e2826869f753c13a4c4385ab3eda9}
+    image: ${SGLANG_IMAGE:-lmsysorg/sglang@sha256:06e4f2ed21afde4ff513cda65070124e727ba23ccaeff7712b8c40e1097d611f}
     container_name: ${ESTATE_CONTAINER:-sglang-qwen38-27b-dflash2-multi4-hicache}
     restart: ${CLUB3090_RESTART:-unless-stopped}
     init: true
@@ -110,7 +101,7 @@ services:
       # trade). Orthogonal to the HiCache path below.
       - "${W4A8_PATCH_DIR:-../../../patches/sglang-autoround-w4a8-v0.5.19}:/etc/club3090/w4a8:ro"
       # NEW: the two mamba/HiCache engine patches (fail-closed, applied at boot).
-      - "${HICACHE_MAMBA_PATCH_DIR:-../../../patches/sglang-hicache-mamba-v0.5.19}:/etc/club3090/hicache-mamba:ro"
+      - "${HICACHE_MAMBA_PATCH_DIR:-../../../patches/sglang-hicache-mamba-v0.5.20}:/etc/club3090/hicache-mamba:ro"
     ipc: host
     shm_size: "16gb"
     # NEW: HiCache L2 needs host RAM sized by --hicache-ratio. 80 GB is the
@@ -157,12 +148,11 @@ services:
         set -euo pipefail
         M=/models/qwen3.8-27b-autoround-int4
 
-        # --- NEW: apply the two fail-closed mamba/HiCache patches (club-3090) ---
-        # #39342 (VALIDATED) + #33713 (HYPOTHESIS-ONLY). install.sh applies both,
-        # idempotently, and hard-fails on any anchor drift / half-patched state.
-        # This compose REQUIRES the patches (they are the fix for the two bugs the
-        # HiCache + mixed-chunk flags would otherwise trip), so a missing mount
-        # refuses to boot rather than serve with a broken cache.
+        # --- NEW: apply the #39342 mamba patch (fail-closed, v0.5.20 re-cut) ---
+        # VALIDATED. install.sh applies + verifies, idempotently, and hard-fails
+        # on any anchor drift / half-patched state. This compose REQUIRES the
+        # patch (it is the fix for the crash the HiCache + mixed-chunk flags
+        # would otherwise trip), so a missing mount refuses to boot.
         _hm=/etc/club3090/hicache-mamba
         if [ ! -f "$$_hm/install.sh" ]; then
           echo "[hicache-mamba] patch installer missing at $$_hm." >&2
