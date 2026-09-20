@@ -16,6 +16,23 @@
 #   Max ctx:   131072 → higher at TP≥4 as weights split (MEASURED; community-validated).
 #   Genesis:   none
 #   Status:    🧪 Experimental
+# ⚠️⚠️ RUNS THE fa2-fp8kv PLUGIN OUTSIDE ITS VALIDATED ENVELOPE (disc #1076).
+#    The plugin's own README states "The compose targets TP=2 and one sequence";
+#    patches.yml scopes it `load_bearing_when composes:[vllm/qwen38-27b-dual-ultramax]`
+#    and docs/UPSTREAM.md names that same single compose. This tier runs it at
+#    TP=4 with MAX_NUM_SEQS=2. Three sources say one compose; it ships in seven.
+#    ⛔ OPEN CRASH, reported by foureight84: `torch.ops.fa2_fp8kv.forward` raises
+#    "Sequence bounds exceed this port's supported envelope", killing EngineCore and
+#    every TP worker, reproducibly at the same point in a multi-turn agent workload
+#    (hermesagent-20, HA-16/17). NOT context exhaustion — 1 request, 3.5% KV used.
+#    ⚠️⚠️ IT FAILS SILENTLY: the container restarts, the harness retries, and the run
+#    reports a PLAUSIBLE BUT TAINTED score — three --full runs read 129/128/127 that
+#    way. quality-test.sh/bench.sh now fail on a RestartCount delta (#1354); do NOT
+#    publish a number from this tier without that guard green.
+#    Reference-rig A/B at TP=2 did NOT reproduce at max_num_seqs 1 OR 2, so
+#    max_num_seqs is RULED OUT and TP is the remaining untested variable.
+#    ⭐ TP=4 resolves to (256,1) local KV geometry, which IS in the plugin's tested
+#    set — so whatever TP is doing here, it is not head geometry.
 # ⛔⛔ #1096 RETRACTED 2026-09-08 — THERE IS NO ACCUMULATED-CTX DECODE CLIFF. The collapse
 #    figures came from OUR harness, not the engine: bench-agentic set TTFT on the first
 #    `content` delta, so a thinking model's entire reasoning phase was charged to prefill and
