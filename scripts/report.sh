@@ -919,15 +919,30 @@ if have python3 && [[ -f tools/kv-calc.py ]]; then
       echo "- _Scoped to the running model \`${CALIB_MODEL_ID}\` — pass \`--full-calibration\` for all calibrated models._"
     fi
     calib_output=$(python3 tools/kv-calc.py --calibration 2>&1 | calib_filter_model_section "$calib_scope" || true)
+    # #1076: the scoped model may have NO calibration section (no measured
+    # BENCHMARKS anchor yet). The global Overall line must NOT be reported as
+    # this model's verdict then -- that is a clean-looking result for a model
+    # nothing was checked against. Reported by foureight84.
+    calib_no_section=0
+    if echo "$calib_output" | command grep -q "__CALIB_NO_SECTION__"; then
+      calib_no_section=1
+      calib_output=$(echo "$calib_output" | command grep -v "__CALIB_NO_SECTION__")
+    fi
     overall=$(echo "$calib_output" | command grep -E '^Overall:' | head -1)
     fail_rows=$(echo "$calib_output" | command grep -E '\bFAIL\b' || true)
     {
-      if [[ -n "$overall" ]]; then
+      if [[ "$calib_no_section" == "1" ]]; then
+        echo "- ⚠ **NOT CALIBRATED for \`${calib_scope}\`** -- kv-calc has no calibration rows for this model, so there is no verdict to report. This is NOT a pass."
+        echo "- A model gets rows once it has a measured BENCHMARKS.md anchor; until then kv-calc projections for it are unvalidated."
+        echo "- \`--full-calibration\` shows the catalog-wide matrix (OTHER models) -- do not read it as covering this one."
+      elif [[ -n "$overall" ]]; then
         echo "- ${overall}"
       else
         echo "- _kv-calc --calibration produced no Overall line; see output below._"
       fi
-      if [[ -n "$fail_rows" ]]; then
+      if [[ "$calib_no_section" == "1" ]]; then
+        :
+      elif [[ -n "$fail_rows" ]]; then
         echo "- ⚠ Failing rows:"
         echo '```'
         echo "$fail_rows"
