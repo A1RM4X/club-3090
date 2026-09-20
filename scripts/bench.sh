@@ -348,6 +348,14 @@ fi
 CONTAINER="${CONTAINER:-vllm-qwen36-27b}"
 RUNS="${RUNS:-5}"
 WARMUPS="${WARMUPS:-3}"
+
+# ---- #1076: engine-restart guard -------------------------------------------
+# A fatal engine error mid-bench gets masked by the restart policy: the container
+# comes back and the remaining runs measure a freshly-booted engine, so the
+# numbers silently mix two different engine lifetimes. Snapshot now, compare at
+# the end. See scripts/lib/engine-restart-guard.sh.
+source "${ROOT_DIR}/scripts/lib/engine-restart-guard.sh"
+_RESTARTS_BEFORE="$(restart_guard_snapshot)"
 MAX_TOKENS_NARR="${MAX_TOKENS_NARR:-1000}"
 MAX_TOKENS_CODE="${MAX_TOKENS_CODE:-800}"
 PROMPT_NARR="${PROMPT_NARR:-Write a detailed 800-word essay explaining transformer attention.}"
@@ -2235,4 +2243,13 @@ if [[ -n "${_BENCH_REC_LOG:-}" && -f "${_BENCH_REC_LOG}" && "${QUICK:-0}" != "1"
     --resolve-serving --serving-url "$URL" --result-class bench-measured \
     --bench-output "${_BENCH_REC_LOG}" >/dev/null 2>&1 || true
   rm -f "${_BENCH_REC_LOG}"
+fi
+
+# ---- #1076: did the engine restart during this bench? -----------------------
+# Last, so it cannot suppress the summary — but non-zero, because a bench that
+# spans an engine restart is not a measurement. BENCH_MOCK runs have no real
+# container and skip cleanly via the guard's own unavailable path.
+if [[ -z "${BENCH_MOCK:-}" ]]; then
+  restart_guard_check "${_RESTARTS_BEFORE:-}" "${CONTAINER:-}" "bench" || _RESTART_RC=$?
+  [[ "${_RESTART_RC:-0}" == "1" ]] && exit 90
 fi

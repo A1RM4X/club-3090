@@ -1091,9 +1091,25 @@ if [[ ${#PASSTHROUGH[@]} -gt 0 ]]; then
   echo "[quality-test] pass-through (${#PASSTHROUGH[@]} arg(s)): ${PASSTHROUGH[*]}"
 fi
 
+# ---- #1076: engine-restart guard ------------------------------------------
+# A fatal EngineCore error kills the engine, Docker restarts it, and the harness
+# retries against a booting engine — the run then COMPLETES AND REPORTS A
+# PLAUSIBLE SCORE. RestartCount is the only signal that separates "model got it
+# wrong" from "engine was dead". Snapshot before, compare after.
+source "${ROOT_DIR}/scripts/lib/engine-restart-guard.sh"
+_RESTARTS_BEFORE="$(restart_guard_snapshot)"
+
 # Run; capture exit code so we can also try to emit the compact one-liner
 benchlocal-cli "${CLI_ARGS[@]}" || RC=$?
 RC="${RC:-0}"
+
+restart_guard_check "$_RESTARTS_BEFORE" "${CONTAINER:-}" "run" || _RESTART_RC=$?
+if [[ "${_RESTART_RC:-0}" == "1" ]]; then
+  # Taint the exit code: a restarted engine makes the score uncomparable, and a
+  # warning alone gets scrolled past — which is how three tainted --full scores
+  # were published in #1076 before anyone noticed.
+  RC=90
+fi
 
 # ---- #1270: structural-zero guard — refuse a bare TOTAL when a pack scored 0/N
 # The #960 preflight above guards ONE cause of a zeroed pack (endpoint not
