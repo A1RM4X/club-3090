@@ -42,16 +42,35 @@ calib_model_for_container() {
 # Keeps everything before the first "== " header (banner + legend), the matching
 # "== <model> ==" block, and any trailing "Overall:" line; drops other models.
 # Arg 1: model id. If empty, passes stdin through unchanged (full matrix).
+# ⚠️⚠️ The `Overall:` line is GLOBAL — it is the verdict across every calibrated
+# model, not the scoped one. Printing it unconditionally while the target model
+# has NO section produced a false clean: report.sh read the borrowed verdict,
+# found no FAIL rows (because no rows were emitted at all), and asserted "No FAIL
+# rows. kv-calc projections should agree with measured VRAM" for a model that was
+# never evaluated. Reported by foureight84 on discussion #1076: `report.sh --full`
+# scored 8/8 on a qwen3.8-27b multi4 boot while calibrating only qwen3.6-27b /
+# 35b-a3b / agentworld / gemma-4-31b rows, because multi4-ultramax has no measured
+# BENCHMARKS.md anchor.
+#
+# Emits a machine-readable marker when the scoped model has no section, so the
+# caller can refuse to report a verdict it did not earn.
+CALIB_NO_SECTION_MARKER="__CALIB_NO_SECTION__"
+
 calib_filter_model_section() {
   local model="$1"
   if [[ -z "$model" ]]; then cat; return; fi
-  awk -v target="== ${model} ==" '
-    BEGIN { before_first = 1 }
-    /^== / { before_first = 0; in_section = ($0 == target) }
+  awk -v target="== ${model} ==" -v marker="__CALIB_NO_SECTION__" '
+    BEGIN { before_first = 1; seen = 0 }
+    /^== / { before_first = 0; in_section = ($0 == target); if (in_section) seen = 1 }
     {
       if (before_first)       { print; next }   # banner + legend
-      if ($0 ~ /^Overall:/)   { print; next }   # global verdict line
+      if ($0 ~ /^Overall:/)   { overall = $0; next }  # HELD, not printed yet
       if (in_section)         { print }         # the wanted section only
+    }
+    END {
+      # Only surface the global verdict when this model actually contributed rows.
+      if (seen) { if (overall != "") print overall }
+      else      { print marker }
     }
   '
 }

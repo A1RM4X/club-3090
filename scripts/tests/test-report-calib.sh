@@ -58,6 +58,27 @@ check "filter keeps target rows" "1" "$(printf '%s\n' "$scoped" | grep -c 'dual 
 full="$(printf '%s\n' "$fixture" | calib_filter_model_section '')"
 check "empty filter = passthrough" "$(printf '%s\n' "$fixture" | wc -l)" "$(printf '%s\n' "$full" | wc -l)"
 
+# --- #1076: a model with NO section must not borrow the global verdict ---------
+# foureight84 hit this on a qwen3.8-27b multi4 boot: report.sh --full printed
+# "Overall: 8/8" and "No FAIL rows" while calibrating only qwen3.6-27b /
+# 35b-a3b / agentworld / gemma-4-31b rows, because multi4-ultramax has no
+# measured BENCHMARKS anchor. A clean verdict for a model nothing checked.
+
+# POSITIVE CONTROL — the bug itself. Asserted first: a gate that cannot detect
+# the defect it was written for is theatre.
+absent="$(printf '%s\n' "$fixture" | calib_filter_model_section qwen3.8-27b)"
+check "absent model emits the marker" "1" "$(printf '%s\n' "$absent" | grep -c '__CALIB_NO_SECTION__')"
+check "absent model does NOT borrow Overall" "0" "$(printf '%s\n' "$absent" | grep -cE '^Overall:')"
+check "absent model leaks no foreign rows" "0" "$(printf '%s\n' "$absent" | grep -c '19.91')"
+
+# NEGATIVE CONTROL — a present model keeps its rows AND the global verdict, and
+# is not flagged. Suppressing both would be worse than the bug.
+check "present model keeps Overall" "1" "$(printf '%s\n' "$scoped" | grep -cE '^Overall:')"
+check "present model is not flagged" "0" "$(printf '%s\n' "$scoped" | grep -c '__CALIB_NO_SECTION__')"
+
+# passthrough (empty id) must be unaffected by the marker logic
+check "passthrough not flagged" "0" "$(printf '%s\n' "$full" | grep -c '__CALIB_NO_SECTION__')"
+
 if [[ "$fail" -ne 0 ]]; then
   echo "test-report-calib: FAILED" >&2
   exit 1
