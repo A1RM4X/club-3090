@@ -1,0 +1,248 @@
+# ===========================================================================
+# Profile (at-a-glance):
+#   Model:     Qwen3.8-27B (Qwen3-Next hybrid GDN) — Frozenlock AutoRound INT4.
+#   Engine:    SGLang v0.5.20 (`lmsysorg/sglang:v0.5.20`) + ONE PATCH (below).
+#   Topology:  Dual 3090 (TP=2, PCIe or NVLink pair).
+#   Drafter:   DFlash2 EXTERNAL block-drafter, 5 layers. z-lab BF16 default.
+#   KV:        fp8_e4m3 (same as the multi4/dflash2 sibling).
+#   Concurrency: c2 (max-running-requests 2) — the tested config.
+#   Status:    🧪 DRAFT — patch proven on 2×3090 (c2, no HiCache L2); HiCache L2
+#              is an orthogonal add-on (HICACHE=1 toggle), NOT yet benched at c2.
+#
+#   Best for:  2×3090 rigs that want the #39342 mixed-chunk mamba fix +
+#              DFlash2 + optional HiCache L2.
+# ---------------------------------------------------------------------------
+#   ⚠️ WHY THE PATCH IS MOUNTED AND APPLIED FAIL-CLOSED
+#
+#   This slug runs --enable-mixed-chunk + --mamba-max-states-per-path 1,
+#   the exact flag set that triggers the sglang#39342 mamba radix-cache
+#   corruption bug. Without the #39342 patch, those flags crash the engine
+#   (stale mamba slot donated into the unified radix tree under a mismatched
+#   key). The patch is therefore LOAD-BEARING: a missing mount or anchor
+#   drift refuses to boot rather than serving broken.
+#
+#   The v0.5.20 re-cut is a file-rename-only adaptation
+#   (mamba_component.py -> mamba.py); all five functional anchors
+#   (A1, A2, B2, C, D) are byte-identical to the validated v0.5.19 cut.
+#   See the patch README for full provenance.
+# ---------------------------------------------------------------------------
+#   HiCache L2 — OPT-IN (HICACHE=1)
+#
+#   The dual/multi4 siblings ship HiCache L2 ON by default (that's the slug's
+#   point). This slug defaults it OFF because the tested c2 config
+#   (sglang-qwen38b27-w4a8-tp2-dflash2-c2-v0520) did not include HiCache L2.
+#   Set HICACHE=1 to enable the host-RAM L2 tier. The #39342 patch is
+#   applied regardless (it fixes the mamba radix-cache under mixed-chunk,
+#   which is orthogonal to whether the L2 host tier is active).
+# ---------------------------------------------------------------------------
+#   W4A8 dense-GEMM — OPT-IN (W4A8=1)
+#
+#   The jb-seo AutoRound W4A8 patch (vendored at
+#   patches/sglang-autoround-w4a8-v0.5.19/). Applies verbatim to v0.5.20
+#   (no re-cut needed). ~+44% prefill, ~flat code decode on this tier.
+#   The tested c2 stack had W4A8 on; this slug follows repo convention
+#   (opt-in, default off).
+# ===========================================================================
+services:
+  sglang-qwen38-27b-dflash2-dual-hicache:
+    image: ${SGLANG_IMAGE:-lmsysorg/sglang@sha256:06e4f2ed21afde4ff513cda65070124e727ba23ccaeff7712b8c40e1097d611f}
+    container_name: ${ESTATE_CONTAINER:-sglang-qwen38-27b-dflash2-dual-hicache}
+    restart: ${CLUB3090_RESTART:-unless-stopped}
+    init: true
+    ports:
+      - "${BIND_HOST:-0.0.0.0}:${ESTATE_PORT:-${PORT:-8144}}:30000"
+    volumes:
+      - "${MODEL_DIR:-../../../../../../models-cache}:/models:ro"
+      - "${HICACHE_MAMBA_PATCH_DIR:-../../../patches/sglang-hicache-mamba-v0.5.20}:/etc/club3090/hicache-mamba:ro"
+      - "${W4A8_PATCH_DIR:-../../../patches/sglang-autoround-w4a8-v0.5.19}:/etc/club3090/w4a8:ro"
+    ipc: host
+    shm_size: "16gb"
+    # HiCache L2 is OPT-IN here (HICACHE=1), so the default host-RAM ceiling is
+    # the base dual-slug 16 GB. When enabling HICACHE=1, ALSO set
+    # HICACHE_MEM_LIMIT=80gb (or higher) so docker sizes the L2 host pool.
+    mem_limit: ${HICACHE_MEM_LIMIT:-16gb}
+    memswap_limit: ${HICACHE_MEM_LIMIT:-16gb}
+    environment:
+      - ESTATE_GPUS
+      - ESTATE_CONTAINER
+      - ESTATE_PORT
+      - BIND_HOST
+      - MODEL_DIR
+      - SGLANG_IMAGE
+      - SPEC_N
+      - CONTEXT_LENGTH
+      - MEM_FRACTION
+      - KV_CACHE_DTYPE
+      - ATTENTION_BACKEND
+      - MAX_RUNNING_REQUESTS
+      - MAX_MAMBA_CACHE_SIZE
+      - HICACHE
+      - HICACHE_RATIO
+      - HICACHE_MAMBA_PATCH_DIR
+      - W4A8
+      - W4A8_PATCH_DIR
+      - SESSION_RADIX_CACHE
+      - RADIX_EVICTION_POLICY
+      - MAMBA_SSM_DTYPE
+      - ENABLE_THINKING
+      - TEMP
+      - TOP_P
+      - TOP_K
+      - MIN_P
+      - PRESENCE_PENALTY
+      - REPEAT_PENALTY
+      - REASONING_EFFORT
+      - CHUNKED_PREFILL_SIZE
+      - DRAFTER_DIR
+      - DRAFT_QUANT
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ['${ESTATE_GPUS:-0,1}']
+              capabilities: [gpu]
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        set -euo pipefail
+        M=/models/qwen3.8-27b-autoround-int4
+
+        # --- #39342 mamba patch (fail-closed, v0.5.20 re-cut) ---
+        _hm=/etc/club3090/hicache-mamba
+        if [ ! -f "$_hm/install.sh" ]; then
+          echo "[hicache-mamba] patch installer missing at $_hm." >&2
+          echo "[hicache-mamba] The patch dir IS vendored (models/qwen3.8-27b/sglang/" >&2
+          echo "[hicache-mamba] patches/sglang-hicache-mamba-v0.5.20) and mounted there by default," >&2
+          echo "[hicache-mamba] so this means HICACHE_MAMBA_PATCH_DIR points elsewhere or docker" >&2
+          echo "[hicache-mamba] created an empty dir because the path was missing. Refusing to boot" >&2
+          echo "[hicache-mamba] unpatched (this slug's flags would otherwise crash the engine)." >&2
+          exit 1
+        fi
+        bash "$_hm/install.sh" || { echo "[hicache-mamba] install FAILED" >&2; exit 1; }
+
+        # --- W4A8 dense-GEMM (opt-in) ---
+        _w4a8="${W4A8:-0}"
+        case "$_w4a8" in 0|1) : ;; *) echo "[w4a8] W4A8='$_w4a8' must be 0 or 1" >&2; exit 1 ;; esac
+        if [ "$_w4a8" = "1" ]; then
+          _wp=/etc/club3090/w4a8
+          if [ ! -f "$_wp/install.sh" ]; then
+            echo "[w4a8] W4A8=1 but no installer at $_wp." >&2
+            echo "[w4a8] The patch IS vendored (sglang-autoround-w4a8-v0.5.19) and mounted" >&2
+            echo "[w4a8] by default. A W4A8_PATCH_DIR override pointing elsewhere, or a missing" >&2
+            echo "[w4a8] path, would explain this. Refusing to serve W4A16 silently." >&2
+            exit 1
+          fi
+          bash "$_wp/install.sh" || { echo "[w4a8] install FAILED" >&2; exit 1; }
+          bash "$_wp/install.sh" --verify || { echo "[w4a8] post-install verify FAILED" >&2; exit 1; }
+          echo "[w4a8] ON — int8 activations (patch by @A1RM4X, re-cut of @jb-seo's)" >&2
+        fi
+
+        # --- DFlash2 drafter (same pattern as the dual/dflash2 sibling) ---
+        D="${DRAFTER_DIR:-/models/qwen3.8-27b-dflash2-zlab-bf16}"
+        _n="${SPEC_N-}"
+        case "$_n" in *[!0-9]*) echo "[spec] SPEC_N='$_n' is not a non-negative integer (leave EMPTY to infer)" >&2; exit 1 ;; esac
+        SPEC=()
+        if [ "$_n" = "0" ]; then
+          echo "[spec] drafter OFF (SPEC_N=0)" >&2
+        else
+          if [ ! -d "$D" ]; then
+            echo "[spec] drafter not found at $D" >&2
+            echo "[spec] Fetch: WEIGHT_KEY=qwen3.8-27b:dflash2-zlab bash scripts/setup.sh qwen3.8-27b" >&2
+            echo "[spec] Or run without the drafter: SPEC_N=0" >&2
+            exit 1
+          fi
+          SPEC=(--speculative-algorithm DFLASH
+                --speculative-draft-model-path "$D"
+                --speculative-draft-model-quantization "${DRAFT_QUANT:-unquant}")
+          if [ -n "$_n" ]; then
+            SPEC+=(--speculative-dflash-block-size "$_n")
+            echo "[spec] DFlash2 drafter ON — block_size=$_n (explicit)" >&2
+          else
+            echo "[spec] DFlash2 drafter ON — block_size INFERRED from $D (expect 8)" >&2
+          fi
+        fi
+
+        # --- Prefix-cache policy (slru is the default for this slug) ---
+        CACHE=()
+        _src="${SESSION_RADIX_CACHE:-0}"
+        case "$_src" in 0|1) : ;; *) echo "[cache] SESSION_RADIX_CACHE='$_src' must be 0 or 1" >&2; exit 1 ;; esac
+        if [ "$_src" = "1" ]; then
+          export SGLANG_ENABLE_UNIFIED_RADIX_TREE=1
+          CACHE+=(--enable-session-radix-cache)
+          echo "[cache] session-aware radix cache ON" >&2
+        fi
+        _ev="${RADIX_EVICTION_POLICY:-slru}"
+        CACHE+=(--radix-eviction-policy "$_ev")
+        echo "[cache] radix eviction policy: $_ev (default slru for this slug)" >&2
+
+        # --- HiCache L2 (opt-in via HICACHE=1) ---
+        HICACHE_FLAGS=()
+        _hc="${HICACHE:-0}"
+        case "$_hc" in 0|1) : ;; *) echo "[hicache] HICACHE='$_hc' must be 0 or 1" >&2; exit 1 ;; esac
+        if [ "$_hc" = "1" ]; then
+          HICACHE_FLAGS=(--enable-hierarchical-cache
+                        --hicache-ratio "${HICACHE_RATIO:-1.8}"
+                        --hicache-host-memory-mode cache
+                        --hicache-mem-layout page_first_direct
+                        --hicache-io-backend direct
+                        --hicache-write-policy write_through
+                        --hicache-storage-prefetch-policy timeout)
+          echo "[hicache] L2 host tier ON (ratio ${HICACHE_RATIO:-1.8})" >&2
+          echo "[hicache] ⚠️ host RAM: this slug's default docker mem_limit is 16gb" >&2
+          echo "[hicache] (HICACHE_MEM_LIMIT unset). HiCache L2 at ratio 1.8 wants ~80gb" >&2
+          echo "[hicache] of host RAM for TP2 3090 — set HICACHE_MEM_LIMIT=80gb in the" >&2
+          echo "[hicache] compose env when enabling HICACHE=1, or the L2 pool will OOM." >&2
+        else
+          echo "[hicache] L2 host tier OFF (HICACHE=1 to enable)" >&2
+        fi
+
+        # --- Sampler + thinking ---
+        _think="${ENABLE_THINKING:-true}"
+        _temp="${TEMP:-}"
+        if [ "$_think" = "true" ]; then
+          : "${_temp:=1.0}" "${TOP_P:=0.95}" "${PRESENCE_PENALTY:=0.0}"
+          echo "[sampler] thinking row: temp=$_temp top_p=$TOP_P" >&2
+        else
+          : "${_temp:=0.7}" "${TOP_P:=0.80}" "${PRESENCE_PENALTY:=1.5}"
+          echo "[sampler] instruct row: temp=$_temp top_p=$TOP_P" >&2
+        fi
+        _reff="${REASONING_EFFORT:-low}"
+        case "$_reff" in low|medium|xhigh) : ;; *) echo "[sampler] REASONING_EFFORT='$_reff' must be low|medium|xhigh" >&2; exit 1 ;; esac
+        echo "[sampler] reasoning_effort=$_reff" >&2
+        SAMPLER=(--default-chat-template-kwargs "{\"enable_thinking\": $_think, \"reasoning_effort\": \"$_reff\"}"
+                 --sampling-defaults model
+                 --preferred-sampling-params "{\"temperature\": $_temp, \"top_p\": $TOP_P, \"top_k\": ${TOP_K:-20}, \"min_p\": ${MIN_P:-0.0}, \"presence_penalty\": $PRESENCE_PENALTY, \"repetition_penalty\": ${REPEAT_PENALTY:-1.0}}")
+
+        # --- Launch ---
+        exec python3 -m sglang.launch_server \
+          --model-path "$M" \
+          --tp-size 2 \
+          --quantization auto-round \
+          --kv-cache-dtype "${KV_CACHE_DTYPE:-fp8_e4m3}" \
+          --mamba-ssm-dtype "${MAMBA_SSM_DTYPE:-bfloat16}" \
+          --chunked-prefill-size "${CHUNKED_PREFILL_SIZE:-2048}" \
+          --attention-backend "${ATTENTION_BACKEND:-flashinfer}" \
+          --context-length "${CONTEXT_LENGTH:-262144}" \
+          --mem-fraction-static "${MEM_FRACTION:-0.82}" \
+          --max-mamba-cache-size "${MAX_MAMBA_CACHE_SIZE:-10}" \
+          --max-running-requests "${MAX_RUNNING_REQUESTS:-2}" \
+          --enable-mixed-chunk \
+          --mamba-max-states-per-path 1 \
+          "${HICACHE_FLAGS[@]}" \
+          "${CACHE[@]}" \
+          --trust-remote-code \
+          --enable-metrics \
+          --enable-cache-report \
+          "${SAMPLER[@]}" \
+          --reasoning-parser "${REASONING_PARSER:-qwen3}" \
+          --tool-call-parser "${TOOL_CALL_PARSER:-qwen3_coder}" \
+          --host 0.0.0.0 --port 30000 \
+          --served-model-name qwen3.8-27b \
+          "${SPEC[@]}"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf \"http://${HOSTNAME:-$(hostname)}:30000/health\" || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 60
+      start_period: 900s
