@@ -73,8 +73,15 @@ cd "$ROOT_DIR"
 export PYTHONPATH="$ROOT_DIR${PYTHONPATH:+:$PYTHONPATH}"
 export LITELLM_EMIT_CHECK="$CHECK"
 
+# Path to the canonical engine-family resolver (#1282), resolved against THIS
+# file rather than the argument root -- it is code, not fixture data, and
+# test-litellm-generate runs the emitter against a synthetic root that has no
+# scripts/ tree of its own.
+export LITELLM_ENGINE_KIND_LIB="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/engine-kind.sh"
+
 python3 - "$ROOT_DIR" <<'PY'
 import difflib
+import functools
 import json
 import shlex
 import os
@@ -84,6 +91,33 @@ import sys
 from pathlib import Path
 
 root = Path(sys.argv[1]).resolve()
+
+# Engine family per engine id. This file used to decide it here with a private
+# `engine.startswith("vllm")` -- the seventh site of exactly the defect
+# scripts/lib/engine-kind.sh exists to prevent (#1282), and the arm 4 of
+# test-engine-kind-resolver.sh reds on it. The DECISION stays in the lib; this
+# only crosses the bash/python boundary, memoised so the shell-out costs one
+# call per DISTINCT engine id (2-3 in a real run), not one per route.
+_ENGINE_KIND_LIB = os.environ.get("LITELLM_ENGINE_KIND_LIB", "")
+
+
+@functools.lru_cache(maxsize=None)
+def engine_kind(engine_id: str) -> str:
+    """vllm | llamacpp | sglang | exllamav3 | unknown — never re-derived here."""
+    if not engine_id or not _ENGINE_KIND_LIB or not Path(_ENGINE_KIND_LIB).is_file():
+        return "unknown"
+    try:
+        out = subprocess.run(
+            ["bash", "-c", f'. "$1"; engine_kind_from_engine_id "$2"',
+             "_", _ENGINE_KIND_LIB, engine_id],
+            capture_output=True, text=True, timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return "unknown"
+    # "unknown" is a VALUE, not an error (the lib's contract) — and it falls to
+    # the generic openai provider, the safe direction: litellm's openai whitelist
+    # DROPS reasoning params rather than the backend 400-ing on them.
+    return out.stdout.strip() or "unknown"
 
 from scripts.lib.profiles.compose_registry import (
     curated_default_target,
@@ -231,7 +265,7 @@ for model in sorted(gw_by_model):
         # params (400 for such clients). llama.cpp backends do not parse
         # reasoning_effort, so keep openai there (drop_params discards it
         # safely instead of the backend rejecting it).
-        prov = "hosted_vllm" if str(entry.get("engine", "")).startswith("vllm") else "openai"
+        prov = "hosted_vllm" if engine_kind(str(entry.get("engine", ""))) == "vllm" else "openai"
         routes.append((model, port, n, entry.get("status", "production"), prov))
 seen = set()
 deduped = []
