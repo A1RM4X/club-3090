@@ -466,7 +466,13 @@ services:
       # page-cache-backed. Validated for GLM 2026-08-28 (two runs, both correct
       # and terminating) — GLM is NOT affected by the --no-mmap defect that
       # blocks Qwen3.8-Flash-Next.
-      - '--no-mmap'
+      # `--load-mode none` replaces `--no-mmap` (#1370 follow-up). Same meaning —
+      # upstream documents `none` as "no special loading mode", i.e. no mmap. The old
+      # flag still WORKS on this fork's pin (with a DEPRECATED warning) but is GONE
+      # from mainline, which already made 3 llamacpp/* slugs unbootable; migrating now
+      # means the next rebase past that removal is a no-op here.
+      - '--load-mode'
+      - 'none'
       - '-md'
       - '/models/glm-5.3-flash-gguf/dflash2/GLM-5.3-Flash-DFlash2-Q4_K_M.gguf'
       # ✅ VERIFIED 2026-08-28 from the drafter GGUF's own metadata

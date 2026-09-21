@@ -24,7 +24,7 @@ export PYTHONUTF8="${PYTHONUTF8:-1}"
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
 
-FAIL=0; CHECKED=0; SKIPPED=0
+FAIL=0; CHECKED=0; SKIPPED=0; SKIPPED_FORK=0; DEPRECATED_HITS=0
 ok()  { echo "  ✓ $1"; }
 bad() { echo "  ✗ $1" >&2; FAIL=1; }
 
@@ -73,6 +73,16 @@ for row in "${ROWS[@]}"; do
     [[ -f "$c" ]] || continue
     # Only a LIST `command:` is a clean argv. A bash -c entrypoint hides flags in
     # a script body; those are reported as uncovered rather than half-parsed.
+    # ⚠️ ONE ENGINE ID, TWO BINARIES. ik-llama/* slugs register against
+    # `llama-cpp-local` but their composes pin ${IK_LLAMA_IMAGE:-…}, a different
+    # fork with a different flag set (that split is why #1365 gave the profile
+    # `image_env: null`). Checking an ik compose against the MAINLINE binary
+    # would be a confident wrong answer in both directions. Today these composes
+    # have no list `command:` so they fall out below anyway — luck, not design.
+    compose_img="$(command sed -nE 's/^[[:space:]]*image:[[:space:]]*"?\$\{[A-Z_0-9]+:-([^}"]+)\}"?.*/\1/p;s/^[[:space:]]*image:[[:space:]]*"?([^$"[:space:]]+)"?[[:space:]]*$/\1/p' "$c" | head -1)"
+    if [[ -n "$compose_img" && "$compose_img" != "$spec" ]]; then
+      SKIPPED_FORK=$((SKIPPED_FORK + 1)); continue
+    fi
     flags="$(python3 - "$c" <<'PY'
 import sys, yaml, re
 d = yaml.safe_load(open(sys.argv[1], encoding="utf-8")) or {}
@@ -96,6 +106,25 @@ PY
       # every flag look "unknown" and reported all 70 composes as broken.
       command grep -qxF -- "$fl" <<<"$accepted" || unknown="${unknown}${unknown:+ }${fl}"
     done <<<"$flags"
+    # ⚠️ ACCEPTED-BUT-DEPRECATED is the state that produced #1370. --no-mmap was
+    # accepted by every fork, with a DEPRECATED marker in --help, right up until
+    # mainline deleted it and three slugs stopped booting. A guard that only asks
+    # "is it accepted?" cannot see that coming, so surface it -- as a WARNING,
+    # not a failure: a deprecated flag is a schedule risk, not a broken config,
+    # and failing on it would block a legitimate pin bump.
+    deprecated=""
+    while read -r fl; do
+      [[ -n "$fl" ]] || continue
+      # ⚠️ `${fl}`, NOT `\${fl}` — the escaped form makes grep search for the
+      # LITERAL string "${fl}", matches nothing, and the check reports a clean
+      # run forever. Caught only by a positive control.
+      command grep -E -- "(^|[[:space:],])${fl}([[:space:],]|$)" <<<"$help_out" \
+        | command grep -qi "DEPRECATED" && deprecated="${deprecated}${deprecated:+ }${fl}"
+    done <<<"$flags"
+    if [[ -n "$deprecated" ]]; then
+      echo "  ⚠ $(echo "$c" | sed 's|models/||'): ${eid} marks these DEPRECATED: ${deprecated}"
+      DEPRECATED_HITS=$((DEPRECATED_HITS + 1))
+    fi
     if [[ -n "$unknown" ]]; then
       bad "$(echo "$c" | sed 's|models/||') passes flag(s) its pin (${eid}) does not accept: ${unknown}"
       echo "       the pinned parser rejects an unknown flag outright — this slug cannot boot" >&2
@@ -103,7 +132,10 @@ PY
   done
 done
 
-echo "  checked ${CHECKED} compose(s); ${SKIPPED} skipped for a non-local image"
+echo "  checked ${CHECKED} compose(s); ${SKIPPED} skipped (image not local); ${SKIPPED_FORK} skipped (compose pins a different fork than its engine profile)"
+if (( DEPRECATED_HITS )); then
+  echo "  ⚠ ${DEPRECATED_HITS} compose(s) pass a flag their pin marks DEPRECATED — not a failure, but it is how #1370 happened"
+fi
 # ⚠️ A run that checked NOTHING is not a pass. This is the guard's own negative
 # control: without it, deleting every local image would turn this green.
 if (( CHECKED == 0 )); then
