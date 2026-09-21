@@ -2,6 +2,16 @@ schema_version: 1
 id: llama-cpp-local
 display_name: llama.cpp local CUDA server (MTP-enabled)
 type: llama.cpp
+# #1365: the compose env var this engine's image is injected as.
+# one profile, TWO binaries: llamacpp/* composes read LLAMACPP_IMAGE and
+# ik-llama/* read IK_LLAMA_IMAGE (15 each). The image is a property of the
+# COMPOSE here, not the engine, so there is no single var to inject. Keying
+# it off the slug prefix would reintroduce the exact fragility #1365 removes
+# from the launchers. The honest fix is splitting this into two engine
+# profiles -- a catalog-shape change touching 30 slugs. Until then the
+# compose default stands, which is what these slugs already get today.
+image_env: null
+
 stability: stable
 install:
   method: docker_image

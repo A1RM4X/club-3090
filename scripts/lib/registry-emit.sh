@@ -644,7 +644,9 @@ def _current_pin(slug: str, compose_path: str):
         exports = resolve_variant_pin(profiles, slug)
         # Nightly pins export a bare SHA (VLLM_NIGHTLY_SHA) — not comparable to
         # an image string; fall through to the compose default for those.
-        if "VLLM_NIGHTLY_SHA" not in exports:
+        # empty == this engine exposes no single injectable image var (#1365);
+        # that is a normal answer now, not a raise -- fall through to the compose default.
+        if exports and "VLLM_NIGHTLY_SHA" not in exports:
             return next(iter(exports.values()))
     except ProfileError:
         pass

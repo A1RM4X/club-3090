@@ -2,6 +2,9 @@ schema_version: 1
 id: llamacpp-club3090-v1.1
 display_name: llama.cpp club-3090 test-bed v1.1 (MoE expert cache + vendored Inkling arch)
 type: llama.cpp
+# #1365: the compose env var this engine's image is injected as.
+image_env: LLAMACPP_CLUB3090_IMAGE
+
 stability: experimental
 install:
   method: docker_image

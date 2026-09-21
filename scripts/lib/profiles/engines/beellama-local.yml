@@ -2,6 +2,9 @@ schema_version: 1
 id: beellama-local
 display_name: beellama.cpp v0.3.2-preview local CUDA server (DFlash + windowed KV + KVarN)
 type: llama.cpp
+# #1365: the compose env var this engine's image is injected as.
+image_env: BEELLAMA_IMAGE
+
 stability: experimental
 install:
   method: docker_image

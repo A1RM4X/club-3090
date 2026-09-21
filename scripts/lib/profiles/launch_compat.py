@@ -182,9 +182,12 @@ def _entry_objects(entry: dict, profiles):
     )
 
 
-# Non-vLLM docker-image engines → the compose env var their image is injected as.
-# (vLLM is special-cased above: VLLM_IMAGE / VLLM_NIGHTLY_SHA.)
-_ENGINE_IMAGE_ENV = {"beellama-local": "BEELLAMA_IMAGE"}
+# #1365: `_ENGINE_IMAGE_ENV = {"beellama-local": "BEELLAMA_IMAGE"}` used to live
+# here -- a hand-maintained code-side map that listed ONE of the 21 engines, so
+# every other non-vLLM engine fell through to a raise. It is superseded by
+# `EngineProfile.image_env`, declared by each profile next to its `install.spec`,
+# so adding an engine can no longer forget to add it here. vLLM nightlies stay
+# special-cased in `resolve_engine_pin` (they pin by SHA, not image tag).
 
 
 # --- #246 Phase 1: arch-aware KV dtype injection (pilot) ---------------------
@@ -212,7 +215,13 @@ def _arch_aware_env(profiles, variant: str, entry: dict, gpu_spec: str,
     allowed = _ARCH_KV_ALLOWED.get(entry.get("kv_format") or "")
     if not allowed:
         return {}  # quant-specific KV (int8-PTH, turbo, bf16, ...) — never override
-    if not ({"VLLM_IMAGE", "VLLM_NIGHTLY_SHA"} & set(pin_exports)):
+    # #1365: this used to read `{"VLLM_IMAGE","VLLM_NIGHTLY_SHA"} & set(pin_exports)`
+    # -- an IMPLICIT vLLM gate that inferred the engine family from which image var
+    # the pin channel happened to emit. It was silently coupled to an unrelated
+    # concern: the moment resolve_engine_pin stopped raising for non-vLLM engines,
+    # the set intersection would have gone on "working" while meaning something
+    # different. Ask the engine profile what family this is, and say so.
+    if _engine_type(profiles, entry) != "vllm":
         return {}  # vLLM-family variants only; KV_CACHE_DTYPE is a vLLM knob
     if os.environ.get("KV_CACHE_DTYPE"):
         return {}  # an explicit user pin always wins
@@ -266,6 +275,26 @@ _ENGINE_TYPE_CONCURRENCY_ENV = {
     "sglang": "MAX_RUNNING_REQUESTS",
 }
 
+# #1365: same idea for the memory-fraction floor. vLLM reads
+# GPU_MEMORY_UTILIZATION, SGLang reads MEM_FRACTION. Before the image pin became
+# total this never surfaced, because sglang slugs raised before any injector ran;
+# the #1363 matrix then caught GPU_MEMORY_UTILIZATION reaching 10 sgl (slug,card)
+# pairs whose compose does not read it. llama.cpp/exllamav3 have no equivalent
+# fraction knob -- absent means no injection, never a guessed name.
+_ENGINE_TYPE_MEM_UTIL_ENV = {
+    "vllm": "GPU_MEMORY_UTILIZATION",
+    "sglang": "MEM_FRACTION",
+}
+
+
+def _engine_type(profiles, entry) -> str | None:
+    if not isinstance(entry, dict):
+        return None
+    try:
+        return getattr(profiles.engines[entry.get("engine")], "type", None)
+    except (KeyError, AttributeError, TypeError):
+        return None
+
 
 def _concurrency_env_key(profiles, entry: dict | None) -> str | None:
     """Env var this entry's engine family reads for its concurrency cap, or None
@@ -317,7 +346,8 @@ def _envelope_env(profiles, variant: str, gpu_spec: str,
     return {env_key: str(seqs)}
 
 
-def _mem_util_env(profiles, variant: str, gpu_spec: str) -> dict[str, str]:
+def _mem_util_env(profiles, variant: str, gpu_spec: str,
+                  entry: dict | None = None) -> dict[str, str]:
     """Phase 2 memory-fraction safety floor. Injects GPU_MEMORY_UTILIZATION
     DOWNWARD only — when a detected card cannot safely give the compose's default
     fraction. Today that means unified-memory cards (DGX Spark: its LPDDR5X is
@@ -328,7 +358,10 @@ def _mem_util_env(profiles, variant: str, gpu_spec: str) -> dict[str, str]:
     automatic bump. Empty dict = no injection (compose default stands)."""
     if not gpu_spec:
         return {}
-    if os.environ.get("GPU_MEMORY_UTILIZATION"):
+    env_key = _ENGINE_TYPE_MEM_UTIL_ENV.get(_engine_type(profiles, entry))
+    if not env_key:
+        return {}  # engine family has no fraction knob -> compose default
+    if os.environ.get(env_key):
         return {}  # explicit user pin always wins
     entry = get_registry().get(variant)
     if not entry:
@@ -347,7 +380,7 @@ def _mem_util_env(profiles, variant: str, gpu_spec: str) -> dict[str, str]:
         return {}
     safe = min(ceilings)
     if safe < compose_gmu:  # downward only — never raise above the tested default
-        return {"GPU_MEMORY_UTILIZATION": f"{safe:g}"}
+        return {env_key: f"{safe:g}"}
     return {}
 
 
@@ -366,6 +399,12 @@ def _deepgemm_env(profiles, variant: str, entry: dict, gpu_spec: str) -> dict[st
     fp8-family weight set — "fp8" AND "fp8-dynamic" (compressed-tensors FP8, e.g.
     agents-a1) — and for "nvfp4" ModelOpt checkpoints, which still route FP8
     attention/linear layers through the same DeepGEMM path. Empty dict = no injection."""
+    # #1365: VLLM_USE_DEEP_GEMM is a vLLM env var. Before the image pin became
+    # total this never surfaced; the #1363 matrix then caught it reaching 108
+    # sgl (slug,card) pairs whose compose does not read it -- a silent no-op
+    # accompanied by a boot line claiming the opposite.
+    if _engine_type(profiles, entry) != "vllm":
+        return {}
     if not gpu_spec:
         return {}
     if os.environ.get("VLLM_USE_DEEP_GEMM"):
@@ -390,26 +429,32 @@ def resolve_engine_pin(profiles, engine_id: str) -> dict[str, str]:
         raise ProfileError(f"unknown engine profile `{engine_id}`") from exc
 
     spec = str(engine.install.get("spec", ""))
-    if engine.install.get("method") != "docker_image":
-        raise ProfileError(f"engine {engine_id!r} install.spec is not a docker image: {spec!r}")
-    if engine.type == "vllm":
-        if ":nightly-" in spec:
-            sha = spec.rsplit(":nightly-", 1)[1].strip()
-            if not sha or any(char.isspace() for char in sha):
-                raise ProfileError(f"engine {engine_id!r} has an invalid nightly SHA in install.spec: {spec!r}")
-            return {"VLLM_NIGHTLY_SHA": sha}
-        if not spec or any(char.isspace() for char in spec):
-            raise ProfileError(f"engine {engine_id!r} has an invalid docker image in install.spec: {spec!r}")
-        return {"VLLM_IMAGE": spec}
-    # Non-vLLM docker-image engines (e.g. beellama-local): inject a plain
-    # <ENGINE>_IMAGE override, mirroring VLLM_IMAGE. The per-compose
-    # ${<ENGINE>_IMAGE:-…} literal is then just a fallback for direct `docker compose`.
-    env_key = _ENGINE_IMAGE_ENV.get(engine_id)
-    if not env_key:
-        raise ProfileError(f"engine {engine_id!r} install.spec is not a docker image: {spec!r}")
+
+    # #1365: NOT AN IMAGE PIN -> {} , never a raise. An engine with no image env
+    # is a normal, expected state (pip installs; llama-cpp-local, whose two
+    # binaries read different vars), and raising here made the whole slug
+    # unresolvable -- which is why both launchers gated the entire call behind a
+    # `vllm/* || beellama/*` prefix test and 73 of 138 slugs got no hardware
+    # injection at all. The image pin and hardware-keyed env injection are
+    # separate concerns; only the first can be absent.
+    if engine.install.get("method") != "docker_image" or not engine.image_env:
+        return {}
+
     if not spec or any(char.isspace() for char in spec):
-        raise ProfileError(f"engine {engine_id!r} has an invalid docker image in install.spec: {spec!r}")
-    return {env_key: spec}
+        raise ProfileError(
+            f"engine {engine_id!r} has an invalid docker image in install.spec: {spec!r}"
+        )
+
+    # vLLM nightlies pin by SHA rather than by image tag.
+    if engine.type == "vllm" and ":nightly-" in spec:
+        sha = spec.rsplit(":nightly-", 1)[1].strip()
+        if not sha or any(char.isspace() for char in sha):
+            raise ProfileError(
+                f"engine {engine_id!r} has an invalid nightly SHA in install.spec: {spec!r}"
+            )
+        return {"VLLM_NIGHTLY_SHA": sha}
+
+    return {engine.image_env: spec}
 
 
 def resolve_variant_pin(profiles, variant: str, gpu_spec: str = "") -> dict[str, str]:
@@ -422,7 +467,7 @@ def resolve_variant_pin(profiles, variant: str, gpu_spec: str = "") -> dict[str,
     # baselines join calls without one and sees pins only).
     exports.update(_arch_aware_env(profiles, variant, entry, gpu_spec, exports))
     exports.update(_envelope_env(profiles, variant, gpu_spec, entry))  # Phase 2 concurrency
-    exports.update(_mem_util_env(profiles, variant, gpu_spec))   # Phase 2 mem-fraction floor
+    exports.update(_mem_util_env(profiles, variant, gpu_spec, entry))  # Phase 2 mem-fraction floor
     exports.update(_deepgemm_env(profiles, variant, entry, gpu_spec))  # fp8w consumer-Blackwell fix
     exports.update(_decode_granularity_env(profiles, entry))     # #809 dLLM decode class
     exports.update(_moe_cache_env(profiles, variant, entry, gpu_spec))  # expert-cache reserve floor
@@ -513,7 +558,11 @@ def _decode_granularity_env(profiles, entry: dict) -> dict[str, str]:
 
 def _print_env(exports: dict[str, str], fmt: str) -> None:
     if fmt == "value":
-        print(next(iter(exports.values())))
+        # #1365: an EMPTY pin is now a normal answer (pip engine; or an engine whose
+        # composes use more than one image var, so there is nothing to inject), not
+        # a raise. Print nothing rather than StopIteration.
+        if exports:
+            print(next(iter(exports.values())))
     elif fmt == "json":
         import json
 

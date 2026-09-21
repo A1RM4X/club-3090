@@ -1190,9 +1190,29 @@ validate_selected_variant() {
   "${cmd[@]}"
 }
 
+# ⚠️ CALLED TWICE on the launch.sh path (launch.sh:1473 exports, then execs
+# switch.sh, which exports again into the inherited env) -- and that is safe:
+# resolve-variant-pin OMITS any key whose env var is already set (the user-env
+# rule at launch_compat.py:217/311/355/401/506), so pass 2 receives an empty or
+# image-only result and re-exports nothing. Pass 1's values stand, and the
+# per-key "keeping your value" branches below stay silent instead of reporting
+# the launcher's own first-pass export as a user override. Guarded by the
+# double-invocation section of test-launch-compat.sh -- if the resolver ever
+# stops suppressing, that test reds before a user sees a doubled message.
 export_variant_engine_pin() {
   local variant="$1" output line key value gpu_spec
-  [[ "$variant" == vllm/* || "$variant" == beellama/* ]] || return 0
+  # #1365: NO engine-family prefix test. It used to read
+  #   [[ "$variant" == vllm/* || "$variant" == beellama/* ]] || return 0
+  # because resolve_engine_pin RAISED for every other engine, so the only way to
+  # keep the launcher working was to skip the call entirely -- which also skipped
+  # the #246 hardware-envelope exports riding along with it. 73 of 138 slugs got
+  # NO hardware injection at all (#1361). resolve_variant_pin is total now, so the
+  # call is safe for every slug and an empty result is a normal answer.
+  # Measured against origin/master before flipping: the effective image is
+  # BYTE-IDENTICAL for all 138 slugs; what changes is that 22-28 moe-cache slugs
+  # now receive their card-class MOE_RESERVE_MB (2048 on 5090, 3072 on A6000,
+  # 5120 on H100, 8192 on Spark) instead of the compose default. On 2x3090 and
+  # 1x4090 the flip is a no-op, so no bench baseline moves.
   # detected-GPU spec enables the #246 arch-aware env for pilot variants;
   # empty (no selection yet / no nvidia-smi) -> pin exports only.
   gpu_spec="$(selected_gpu_profile_spec 2>/dev/null || true)"
@@ -1206,6 +1226,16 @@ export_variant_engine_pin() {
       VLLM_NIGHTLY_SHA) export VLLM_NIGHTLY_SHA="$value" ;;
       VLLM_IMAGE) export VLLM_IMAGE="$value" ;;
       BEELLAMA_IMAGE) export BEELLAMA_IMAGE="$value" ;;
+      # #1365: the remaining engines' image pins. resolve_engine_pin used to RAISE
+      # for these, so the launchers gated the whole call behind a vllm/beellama
+      # prefix test and 73 of 138 slugs got no hardware injection at all. Now that
+      # it returns the engine profile's own image_env, each var needs an arm here
+      # or the `*)` below turns it into exit 2. Caught by the #1363 matrix guard.
+      EXLLAMAV3_IMAGE) export EXLLAMAV3_IMAGE="$value" ;;
+      SGLANG_IMAGE) export SGLANG_IMAGE="$value" ;;
+      LLAMACPP_CLUB3090_IMAGE) export LLAMACPP_CLUB3090_IMAGE="$value" ;;
+      LLAMACPP_PRISM_IMAGE) export LLAMACPP_PRISM_IMAGE="$value" ;;
+      LLAMACPP_PRISM_MTP_IMAGE) export LLAMACPP_PRISM_MTP_IMAGE="$value" ;;
       # #246 arch-aware env (pilot slugs; hardware-profile balanced default)
       KV_CACHE_DTYPE)
         # #246 arch-aware default — but a value the USER set WINS, matching the .env
@@ -1250,6 +1280,30 @@ export_variant_engine_pin() {
         else
           export GPU_MEMORY_UTILIZATION="$value"
           echo "[launch] memory-fraction floor: GPU_MEMORY_UTILIZATION=${value} (unified-memory card can't safely give the default — #246 Phase 2)"
+        fi ;;
+      MEM_FRACTION)
+        # SGLang's spelling of the memory-fraction floor (#1365). Same one-way
+        # DOWNWARD semantics as GPU_MEMORY_UTILIZATION above; the injector picks
+        # the name from the engine family, so sglang no longer receives vLLM's.
+        if [[ -n "${MEM_FRACTION:-}" ]]; then
+          echo "[launch] MEM_FRACTION: keeping your value ${MEM_FRACTION} (hardware profile suggested ${value})" >&2
+        else
+          export MEM_FRACTION="$value"
+          echo "[launch] memory-envelope floor: MEM_FRACTION=${value} (#246 Phase 2, sglang)"
+        fi ;;
+      MOE_RESERVE_MB)
+        # Expert-cache reserve floor, injected UPWARD only on cards larger than
+        # the 24 GB rig the compose default was tuned on. 28 composes read it.
+        # ⚠️ EVIDENCE SCOPE: measured on 24 GB Ampere only. On 32/96 GB cards the
+        # scaling is a SAFETY HEURISTIC, not a tuned optimum -- it preserves the
+        # reserve/VRAM ratio the reference rig validated. Erring high costs a few
+        # hundred pool slots; erring low measured ~11% slower on 24 GB. Sweep on
+        # WALL-CLOCK (cache hit rate improves as throughput regresses) and pin it.
+        if [[ -n "${MOE_RESERVE_MB:-}" ]]; then
+          echo "[launch] MOE_RESERVE_MB: keeping your value ${MOE_RESERVE_MB} (hardware profile suggested ${value})" >&2
+        else
+          export MOE_RESERVE_MB="$value"
+          echo "[launch] expert-cache reserve: MOE_RESERVE_MB=${value} (heuristic above 24 GB — sweep on wall-clock and pin)"
         fi ;;
       VLLM_USE_DEEP_GEMM)
         # #246 arch-aware default — but a value the USER set WINS, matching the .env

@@ -658,7 +658,8 @@ try:
     from scripts.lib.profiles.launch_compat import ProfileError, resolve_variant_pin
 
     exports = resolve_variant_pin(load_profiles(), slug)
-    if "VLLM_NIGHTLY_SHA" not in exports:
+    # empty pin == no single injectable image var (#1365) -> compose default below
+    if exports and "VLLM_NIGHTLY_SHA" not in exports:
         engine_pin = next(iter(exports.values()))
 except Exception:
     pass
