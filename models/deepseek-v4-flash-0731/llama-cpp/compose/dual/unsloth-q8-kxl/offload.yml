@@ -20,7 +20,7 @@
 #              • Quality is UNTESTED on this tier — no 8-pack has been run.
 #              • Needs ~140 GB of HOST RAM (experts live in CPU memory). This is a
 #                hard gate, not a recommendation: the box will thrash or OOM below it.
-#              • Load takes ~8-10 min (--no-mmap). The point is that a 284B model
+#              • Load takes ~8-10 min (--load-mode none). The point is that a 284B model
 #                runs at ~27 t/s code decode on 2×24 GB — not raw speed records.
 #              • 262K is NOT offered. With the drafter attached it boots READY at
 #                97.4% VRAM and survives a trivial decode, then dies on a ~15.7K-token
@@ -233,7 +233,19 @@ services:
       - '-b'
       - '4096'
       - '--cache-prompt'
-      - '--no-mmap'
+      # ⚠️ `--load-mode none`, NOT `--no-mmap` (#1370). Mainline REMOVED --no-mmap,
+      # and the pin this slug runs (llama-cpp-local, b10920, bumped 2026-09-12)
+      # rejects it outright — `error: invalid argument: --no-mmap` — so this slug
+      # could not boot at all between that bump and 2026-09-21. `none` is the
+      # faithful replacement: upstream documents it as "no special loading mode",
+      # i.e. no mmap, which is what the host-RAM gate above assumes.
+      # ⚠️ The club3090 / prism forks still ACCEPT --no-mmap, with a DEPRECATED
+      # warning — they are on a borrowed timeline, not a different design. All of
+      # them accept --load-mode none today (verified against every locally pinned
+      # llama.cpp image, 2026-09-21), so the rest of the family can migrate when
+      # someone decides to; that is 31 more composes and is NOT done here.
+      - '--load-mode'
+      - 'none'
       - '-md'
       - '/models/deepseek-v4-flash-0731-gguf/dspark/dspark-DeepSeek-V4-Flash-0731-Q8_0.gguf'
       - '--spec-type'
