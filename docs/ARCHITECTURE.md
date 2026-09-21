@@ -49,6 +49,7 @@ The mental model: **engines are general; models are specific; hardware is fixed.
 docs/                         engine + hardware docs (general, model-agnostic)
   engines/                      vLLM / llama.cpp / SGLang — comparison + deep dives
   HARDWARE.md                   Ampere SM 8.6+, 24 GB, no NVLink
+  ENGINE_FLAGS.md               every engine flag our composes pass — upstream source, usage count, hardware gating
   GLOSSARY.md                   plain-language definitions
   img/                          chart sources + PNG exports (performance, vram-budget)
 
@@ -121,6 +122,7 @@ If a patch is general (across engines or models), it bubbles up to `docs/engines
 
 **A power user wants to push limits:**
 1. `docs/engines/<engine>.md` — engine tuning levers.
+   [`docs/ENGINE_FLAGS.md`](ENGINE_FLAGS.md) — the flag inventory: what upstream says each flag does, which composes pass it, and whether the value tracks the detected card or is a hand-tuned 24 GB default.
 2. `models/<m>/INTERNALS.md` — model-specific knobs.
 3. `models/<m>/<engine>/README.md` — recipe-specific tips.
 
