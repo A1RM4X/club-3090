@@ -48,10 +48,19 @@ if [[ -f "${ROOT_DIR}/scripts/lib/registry-lookup.sh" ]]; then
   _DEFAULT_ENDPOINT_PORT="$(registry_lookup_default_port qwen3.6-27b 2>/dev/null || true)"
 fi
 URL="${URL:-http://localhost:${_DEFAULT_ENDPOINT_PORT:-8020}}"
-# Resolve the served model from /v1/models when MODEL is unset (#372). The qwen
-# literal below is only a last resort if detection no-ops (endpoint unreachable).
+# Resolve the served model from /v1/models when MODEL is unset (#372).
 declare -F preflight_autodetect_model >/dev/null && preflight_autodetect_model
-MODEL="${MODEL:-qwen3.6-27b}"
+# #1330: NOT an unconditional `MODEL="${MODEL:-…}"` any more. That fell back to
+# a qwen literal whenever autodetect no-op'd — including against a server that
+# was merely still LOADING — so every request 404'd and the run looked like the
+# config under test was broken. preflight_resolve_model_or_fail refuses the
+# literal exactly when we know better (endpoint unreachable, or we picked the
+# container ourselves and it reports no model) and keeps it otherwise.
+if declare -F preflight_resolve_model_or_fail >/dev/null; then
+  preflight_resolve_model_or_fail "qwen3.6-27b" || exit 1
+else
+  MODEL="${MODEL:-qwen3.6-27b}"
+fi
 if [[ -z "${CONTAINER:-}" && -f "${ROOT_DIR}/scripts/lib/registry-lookup.sh" ]]; then
   # The old literal default 'vllm-qwen36-27b' matches NO registry container, so
   # container-coupled checks silently no-op'd on an undetected endpoint. Default
