@@ -2,6 +2,9 @@ schema_version: 1
 id: vllm-gemma4-unified
 display_name: vLLM Gemma-4 unified (arch-preview)
 type: vllm
+# #1365: the compose env var this engine's image is injected as.
+image_env: VLLM_IMAGE
+
 stability: experimental
 install:
   method: docker_image

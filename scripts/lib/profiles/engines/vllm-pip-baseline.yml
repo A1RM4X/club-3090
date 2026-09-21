@@ -2,6 +2,10 @@ schema_version: 1
 id: vllm-pip-baseline
 display_name: vLLM pip baseline (dense lower-bound)
 type: vllm
+# #1365: the compose env var this engine's image is injected as.
+# install.method is pip -- not an image pin at all.
+image_env: null
+
 stability: stable
 install:
   method: pip

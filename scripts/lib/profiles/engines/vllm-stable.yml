@@ -2,6 +2,9 @@ schema_version: 1
 id: vllm-stable
 display_name: vLLM stable v0.29.0 (overlay-free)
 type: vllm
+# #1365: the compose env var this engine's image is injected as.
+image_env: VLLM_IMAGE
+
 stability: stable
 install:
   method: docker_image

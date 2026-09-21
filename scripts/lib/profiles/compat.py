@@ -271,6 +271,13 @@ class EngineProfile:
     feature_provenance: dict[str, Any] = field(default_factory=dict)
     genesis_pin: Optional[str] = None
     notes: Optional[str] = None
+    # #1365: the compose env var this engine's image is injected as. None means
+    # the engine has no single image env -- either it is not an image pin at all
+    # (pip engines, local builds), or one profile serves two binaries under
+    # different vars (llama-cpp-local: LLAMACPP_IMAGE vs IK_LLAMA_IMAGE). The
+    # resolver returns {} for those rather than raising, so a slug is still
+    # resolvable for hardware injection even when its image cannot be pinned.
+    image_env: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -682,6 +689,7 @@ def _engine(data: dict[str, Any], path: Path) -> EngineProfile:
         required_genesis=bool(data.get("required_genesis", False)),
         genesis_pin=data.get("genesis_pin"),
         notes=data.get("notes"),
+        image_env=data.get("image_env"),
     )
 
 

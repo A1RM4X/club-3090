@@ -24,13 +24,20 @@ def launcher_allowlist(path):
     """Parse the case arms of export_variant_engine_pin() -- never duplicate them."""
     txt = io.open(path, encoding="utf-8").read().split("\n")
     i = next(k for k, l in enumerate(txt) if "export_variant_engine_pin()" in l)
-    keys, depth = set(), 0
-    for l in txt[i:i + 90]:
+    # ⚠️ Read to `esac`, NEVER a fixed line window. A 90-line slice silently
+    # dropped DECODE_GRANULARITY and VLLM_USE_DEEP_GEMM the moment new arms were
+    # added above them, and the guard then reported two ALLOWLISTED keys as
+    # missing. A parser whose coverage shrinks as the thing it parses grows is
+    # worse than no parser: it fails in the direction that looks like a real bug.
+    keys = set()
+    for l in txt[i:]:
         m = re.match(r"\s+([A-Z][A-Z0-9_]*)\)", l)
         if m:
             keys.add(m.group(1))
-        if re.match(r"\s+esac", l) and keys:
+        if re.match(r"\s+esac\b", l) and keys:
             break
+    else:
+        raise AssertionError("never found `esac` -- allowlist parse is incomplete")
     return keys
 
 
@@ -55,7 +62,16 @@ def compose_vars(compose_path, _cache={}):
             t = io.open(compose_path, encoding="utf-8").read()
         except OSError:
             t = ""
-        _cache[compose_path] = set(re.findall(r"\$\{([A-Z][A-Z0-9_]*)[:\-}]", t))
+        # Two legitimate forms, and missing the second produces FALSE POSITIVES:
+        #   ${KEY:-default}   templated with a default
+        #   - KEY             BARE passthrough in `environment:` -- the documented
+        #                     correct form here, because `- KEY=${KEY:-}` sets the
+        #                     var PRESENT-but-EMPTY and atoi("") == 0.
+        # Checking only the first flagged 88 (slug,card) pairs as "does not read
+        # VLLM_USE_DEEP_GEMM" when every one of them declares it bare.
+        templated = set(re.findall(r"\$\{([A-Z][A-Z0-9_]*)[:\-}]", t))
+        bare = set(re.findall(r"^\s*-\s+([A-Z][A-Z0-9_]*)\s*$", t, re.M))
+        _cache[compose_path] = templated | bare
     return _cache[compose_path]
 
 
@@ -147,12 +163,11 @@ def main():
     # Tracked exceptions: a key may stay unallowlisted ONLY with an issue that
     # clears it. This keeps the landmine as a failing-shaped assertion rather
     # than prose, without leaving a red test in the suite.
-    TRACKED = {
-        # _moe_cache_env has NEVER been booted on a >24 GB card (hardware/rtx-a6000.yml).
-        # Allowlisting it without that boot would put an unvalidated reserve live the
-        # moment #1365 flips the gate. Decision belongs to #1365, not to this guard.
-        "MOE_RESERVE_MB": "#1365",
-    }
+    # #1365 resolved the one tracked exception: MOE_RESERVE_MB is read by 28
+    # composes and is injected UPWARD-only with an explicit-pin escape, so it is
+    # allowlisted in both launchers with its evidence scope stated at boot rather
+    # than removed from the path. No exceptions remain.
+    TRACKED = {}
     untracked = {k: v for k, v in future.items() if k not in TRACKED}
     for k in sorted(set(future) & set(TRACKED)):
         print(f"     (tracked by {TRACKED[k]} — not failing the build)")

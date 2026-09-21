@@ -105,12 +105,23 @@ assert_contains "$out" "Pass 2 fits()"
 out="$(python3 "$HELPER" resolve-engine-pin --engine-id vllm-nightly-mtp --format shell)"
 assert_contains "$out" "VLLM_NIGHTLY_SHA=${MTP_SHA}"
 
-if out="$(python3 "$HELPER" resolve-engine-pin --engine-id vllm-pip-baseline --format shell 2>&1)"; then
-  echo "ASSERTION FAILED: pip-only vllm-pip-baseline unexpectedly resolved as a docker nightly" >&2
-  echo "$out" >&2
-  exit 1
-fi
-assert_contains "$out" "install.spec is not a docker image"
+# #1365: a pip engine is NOT an image pin, and that is a normal state, not an
+# error. It used to RAISE, which made the whole slug unresolvable -- the reason
+# both launchers gated hardware injection behind a vllm/beellama prefix test and
+# 73 of 138 slugs got none. It now resolves to an EMPTY pin.
+out="$(python3 "$HELPER" resolve-engine-pin --engine-id vllm-pip-baseline --format shell 2>&1)" || {
+  echo "ASSERTION FAILED: pip engine must resolve to an EMPTY pin, not raise" >&2; echo "$out" >&2; exit 1; }
+[[ -z "$(printf '%s' "$out" | tr -d '[:space:]')" ]] || {
+  echo "ASSERTION FAILED: pip engine emitted an image pin: $out" >&2; exit 1; }
+# same for one engine id whose composes use TWO image vars (llama-cpp-local:
+# LLAMACPP_IMAGE vs IK_LLAMA_IMAGE) -- no single var, so no injection, never a guess.
+out="$(python3 "$HELPER" resolve-engine-pin --engine-id llama-cpp-local --format shell 2>&1)" || {
+  echo "ASSERTION FAILED: llama-cpp-local must resolve to an EMPTY pin, not raise" >&2; echo "$out" >&2; exit 1; }
+[[ -z "$(printf '%s' "$out" | tr -d '[:space:]')" ]] || {
+  echo "ASSERTION FAILED: llama-cpp-local emitted a pin despite two vars: $out" >&2; exit 1; }
+# a single-image non-vLLM engine DOES pin, from its profile image_env
+out="$(python3 "$HELPER" resolve-engine-pin --engine-id sglang-stable --format shell 2>&1)"
+assert_contains "$out" "SGLANG_IMAGE="
 
 out="$(python3 "$HELPER" resolve-variant-pin --variant vllm/dual --format shell)"
 assert_contains "$out" "VLLM_IMAGE=vllm/vllm-openai:v0.29.0"
@@ -196,7 +207,25 @@ assert_contains "$out" "GPU_MEMORY_UTILIZATION=0.85"
 # explicit user pin wins
 out="$(GPU_MEMORY_UTILIZATION=0.7 python3 "$HELPER" resolve-variant-pin --variant vllm/dual --format shell --gpu-spec "$GPU_SPARK")"
 assert_not_contains "$out" "GPU_MEMORY_UTILIZATION=0.85"
-echo "  ok: #246 mem-fraction floor (Spark down · discrete no-raise · het-min · user-pin — 4 cases)"
+# #1365: the floor is now reachable on SGLang too, and it must arrive under
+# SGLang's OWN key. `--mem-fraction-static` is NOT `--gpu-memory-utilization`
+# (static weights+KV share vs total-VRAM budget, cudagraph capture comes from
+# the remainder), so emitting vLLM's name here would land on a var no sgl
+# compose reads -- silently inert. The VALUE is the card's safe ceiling, a
+# hardware property (Spark's LPDDR5X is shared with the Grace CPU/OS), not a
+# vLLM-tuned number, and it only ever moves DOWNWARD from the slug's own
+# registered default -- conservative under either engine's semantics.
+# ⚠️ Still UNVALIDATED on SGLang: no sgl soak at 0.85 on a unified-memory card.
+out="$(python3 "$HELPER" resolve-variant-pin --variant sgl/qwen38-27b-dual-fast --format shell --gpu-spec "$GPU_SPARK")"
+assert_contains "$out" "MEM_FRACTION=0.85"
+assert_not_contains "$out" "GPU_MEMORY_UTILIZATION"
+out="$(python3 "$HELPER" resolve-variant-pin --variant sgl/qwen38-27b-dual-fast --format shell --gpu-spec "$GPU_5090X2")"
+assert_not_contains "$out" "MEM_FRACTION"
+# llama.cpp has no fraction knob at all -> neither name, on any card
+out="$(python3 "$HELPER" resolve-variant-pin --variant llamacpp-club3090/glm53-flash-dual-iq4xs-moecache --format shell --gpu-spec "$GPU_SPARK")"
+assert_not_contains "$out" "MEM_FRACTION"
+assert_not_contains "$out" "GPU_MEMORY_UTILIZATION"
+echo "  ok: #246 mem-fraction floor (Spark down · discrete no-raise · het-min · user-pin · sgl-own-key · llama.cpp-none — 7 cases)"
 
 # --- fp8/NVFP4-weights DeepGEMM disable on consumer cards (disc #571/#613) ---
 # DeepGEMM has no recipe on consumer Blackwell (sm_120/121, hard-fails) and is
@@ -258,9 +287,14 @@ out="$(python3 "$HELPER" resolve-variant-pin --variant vllm/diffusiongemma-dual 
 assert_contains "$out" "DECODE_GRANULARITY=canvas"
 # Every autoregressive slug's export set must be unchanged — the field defaults
 # to "token" and the emitter stays silent for it, so no other slug moves a byte.
-# (vLLM slugs only — resolve-variant-pin refuses a non-docker-image engine pin,
-# which is llamacpp's pre-existing behaviour and unrelated to this field.)
-for v in vllm/dual vllm/minimal vllm/gemma-int8-mtp; do
+# (#1365 corrected the note that used to sit here: it claimed resolve-variant-pin
+# "refuses a non-docker-image engine pin, which is llamacpp's pre-existing
+# behaviour". `llama-cpp-local` IS install.method: docker_image -- the raise was
+# for "no env-key mapping" wearing the wrong error text. It no longer raises, so
+# the sample below is vLLM slugs simply because DECODE_GRANULARITY is declared by
+# a vLLM-served model; a llama.cpp slug is asserted silent right after.)
+for v in vllm/dual vllm/minimal vllm/gemma-int8-mtp \
+         llamacpp/default sgl/qwen38-27b-dual-fast exllamav3/qwen38-flash-next-dual-exl3-305-cpumoe; do
   out="$(python3 "$HELPER" resolve-variant-pin --variant "$v" --format shell --gpu-spec "$GPU_3090")"
   assert_not_contains "$out" "DECODE_GRANULARITY"
 done
@@ -287,4 +321,60 @@ assert_contains "$out" "raised:"
 assert_not_contains "$out" "NO-RAISE"
 echo "  ✓ #809: decode_granularity reaches both launchers, only for the model that declares it"
 
+# --- #1365: the export path is invoked TWICE on a launch.sh run ---------------
+# launch.sh:1473 exports, then execs switch.sh, which exports again into the
+# inherited env. Now that the vllm/beellama prefix gate is gone this happens for
+# EVERY slug, so it has to be provably idempotent: pass 2 must not re-announce,
+# must not clobber, and must not report pass 1's own export as a user override.
+#
+# ⚠️ POSITIVE CONTROL FIRST. "pass 2 printed nothing" is worthless unless pass 1
+# printed something -- a harness that silently fails to call the function at all
+# would satisfy the negative half. So each launcher asserts BOTH halves.
+dbl_harness() { # dbl_harness <launcher> <slug> <gpu-spec> [PRESET=k=v]
+  local body; body="$(sed -n '/^export_variant_engine_pin() {/,/^}/p' "$1")"
+  SPEC="$3" LAUNCH_PROFILE="$HELPER" PRESET="${4:-}" SLUG="$2" COMPOSE_BIN=: bash -c '
+    set -uo pipefail
+    switch_gpu_profile_spec()   { printf "%s" "${SPEC}"; }   # switch.sh
+    selected_gpu_profile_spec() { printf "%s" "${SPEC}"; }   # launch.sh
+    '"$body"'
+    [[ -n "$PRESET" ]] && export "$PRESET"
+    echo "@@PASS1"; export_variant_engine_pin "$SLUG"
+    echo "@@PASS2"; export_variant_engine_pin "$SLUG"
+    echo "@@FINAL MOE_RESERVE_MB=${MOE_RESERVE_MB:-<unset>}"
+  ' 2>&1
+}
+# a moe-cache slug on a 5090 is the widest case the flip newly reaches: it was
+# behind the prefix gate until #1365 and it injects a non-image key.
+DBL_SLUG="llamacpp-club3090/glm53-flash-dual-iq4xs-moecache"
+DBL_SPEC="0|NVIDIA GeForce RTX 5090|32607|12.0;1|NVIDIA GeForce RTX 5090|32607|12.0"
+# ⚠️ Kept as an ARRAY, not `for _L in scripts/switch.sh scripts/launch.sh`:
+# that spelling matches test-tests-never-launch's EXEC regex (the `sh` of
+# switch.sh + a space + scripts/launch.sh reads as `sh …launch.sh`). It is a
+# false positive — nothing is executed here — but that guard is deliberately
+# dumb and broad, and a precise version of it once went blind to the exact
+# line it exists to catch. Satisfy it rather than argue with it.
+DBL_LAUNCHERS=("scripts/switch.sh" "scripts/launch.sh")
+for _L in "${DBL_LAUNCHERS[@]}"; do
+  _out="$(dbl_harness "$_L" "$DBL_SLUG" "$DBL_SPEC")"
+  _p1="$(printf '%s' "$_out" | sed -n '/@@PASS1/,/@@PASS2/p')"
+  # ⚠️ the @@FINAL line NAMES the key, so it must be excluded from the pass-2
+  # window or the "did pass 2 re-announce?" grep matches its own witness line.
+  _p2="$(printf '%s' "$_out" | sed -n '/@@PASS2/,/@@FINAL/{/@@FINAL/!p;}')"
+  grep -q "MOE_RESERVE_MB=2048" <<<"$_p1" \
+    || { echo "ASSERTION FAILED ($_L): pass 1 did not inject MOE_RESERVE_MB (positive control)" >&2
+         printf '%s\n' "$_out" >&2; exit 1; }
+  grep -q "MOE_RESERVE_MB" <<<"$_p2" \
+    && { echo "ASSERTION FAILED ($_L): pass 2 re-announced MOE_RESERVE_MB — double invocation is not idempotent" >&2
+         printf '%s\n' "$_out" >&2; exit 1; }
+  grep -q "keeping your value" <<<"$_out" \
+    && { echo "ASSERTION FAILED ($_L): the launcher reported its OWN export as a user override" >&2
+         printf '%s\n' "$_out" >&2; exit 1; }
+  grep -q "@@FINAL MOE_RESERVE_MB=2048" <<<"$_out" \
+    || { echo "ASSERTION FAILED ($_L): pass 2 clobbered the value" >&2; printf '%s\n' "$_out" >&2; exit 1; }
+  # a genuine user override survives both passes untouched
+  _ov="$(dbl_harness "$_L" "$DBL_SLUG" "$DBL_SPEC" "MOE_RESERVE_MB=999")"
+  grep -q "@@FINAL MOE_RESERVE_MB=999" <<<"$_ov" \
+    || { echo "ASSERTION FAILED ($_L): user MOE_RESERVE_MB=999 did not survive" >&2; printf '%s\n' "$_ov" >&2; exit 1; }
+done
+echo "  ✓ #1365: double invocation is idempotent in both launchers (inject-once · no re-announce · no false 'user override' · user value survives)"
 echo "test-launch-compat: ok"

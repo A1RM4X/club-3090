@@ -2,6 +2,9 @@ schema_version: 1
 id: vllm-nightly-dflash
 display_name: vLLM nightly plus DFlash
 type: vllm
+# #1365: the compose env var this engine's image is injected as.
+image_env: VLLM_IMAGE
+
 stability: deprecated
 install:
   method: docker_image

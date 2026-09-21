@@ -2,6 +2,9 @@ schema_version: 1
 id: llama-cpp-prism
 display_name: llama.cpp PrismML ternary fork (PQ2_0 / PTQ1_0 hybrid-attention kernels)
 type: llama.cpp
+# #1365: the compose env var this engine's image is injected as.
+image_env: LLAMACPP_PRISM_IMAGE
+
 stability: experimental
 install:
   method: docker_image
