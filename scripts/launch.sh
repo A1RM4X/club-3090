@@ -1237,17 +1237,13 @@ export_variant_engine_pin() {
       LLAMACPP_PRISM_IMAGE) export LLAMACPP_PRISM_IMAGE="$value" ;;
       LLAMACPP_PRISM_MTP_IMAGE) export LLAMACPP_PRISM_MTP_IMAGE="$value" ;;
       # #246 arch-aware env (pilot slugs; hardware-profile balanced default)
-      KV_CACHE_DTYPE)
-        # #246 arch-aware default — but a value the USER set WINS, matching the .env
-        # precedence rule earlier in this script. An unconditional export silently
-        # clobbered an explicit `KV_CACHE_DTYPE=… scripts/launch.sh …` with no override path
-        # (reported on Discord for MAX_NUM_SEQS, 2026-09-11).
-        if [[ -n "${KV_CACHE_DTYPE:-}" ]]; then
-          echo "[launch] KV_CACHE_DTYPE: keeping your value ${KV_CACHE_DTYPE} (hardware profile suggested ${value})" >&2
-        else
-          export KV_CACHE_DTYPE="$value"
-          echo "[launch] arch-aware KV dtype: ${value} (hardware-profile default for detected GPUs — #246)"
-        fi ;;
+      # KV_CACHE_DTYPE) — arm REMOVED 2026-09-21 (#1371) along with the #246
+      # Phase 1 injector that emitted it. Nothing resolves it any more, so an arm
+      # here would be dead code implying the resolver still can. A user-set
+      # KV_CACHE_DTYPE is untouched either way: the composes read it as
+      # ${KV_CACHE_DTYPE:-…} and docker interpolates it from the environment,
+      # which never went through this case statement. scripts/arch-ab.sh still
+      # pins it explicitly per arm, and that path is unaffected.
       MAX_NUM_SEQS)
         # #246 arch-aware default — but a value the USER set WINS, matching the .env
         # precedence rule earlier in this script. An unconditional export silently

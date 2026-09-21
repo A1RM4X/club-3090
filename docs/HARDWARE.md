@@ -73,15 +73,15 @@ The shipped composes carry **Ampere-safe defaults** (fp8_e5m2 KV etc.). Since [#
 | Detected class | What the launchers do |
 |---|---|
 | **ampere** (sm_8.6/8.7) | Nothing — compose defaults apply, byte-for-byte pre-#246 behavior |
-| **ada** (sm_8.9) / **hopper** (sm_9.x) / **blackwell** (sm_10+) | Export `KV_CACHE_DTYPE=fp8_e4m3` for the **pilot slugs** — a **better-precision** FP8 KV format. NB: it's storage-only (≡e5m2 in speed) on consumer cards; native FP8 *attention* is Hopper/datacenter-only. See [DTYPE_MATRIX](DTYPE_MATRIX.md#having-the-tensor-cores--using-them-the-two-axes-that-decide-real-behavior) |
+| **ada** (sm_8.9) / **hopper** (sm_9.x) / **blackwell** (sm_10+) | Nothing — see below. This row used to read "Export `KV_CACHE_DTYPE=fp8_e4m3` for the pilot slugs"; that injection was **retired in [#1371](https://github.com/noonghunna/club-3090/issues/1371)** and had in fact been inert on every card for months before that. e4m3 is storage-only (≡e5m2 in speed) on consumer cards anyway; native FP8 *attention* is Hopper/datacenter-only. See [DTYPE_MATRIX](DTYPE_MATRIX.md#having-the-tensor-cores--using-them-the-two-axes-that-decide-real-behavior) |
 | unknown / heterogeneous mix / no nvidia-smi | Nothing — compose defaults apply |
 
 Mechanics and boundaries:
 
-- **Pilot slugs only**: `vllm/dual`, `vllm/minimal` — the two Qwen fp8-KV reference configs. Expansion to the rest of the catalog is gated on the cross-rig A/B in #246 (≥15% on either canonical prompt on a volunteer 4090/5090; within CV → the injection framework gets closed out instead).
-- **The injected value comes from the hardware profiles** (`scripts/lib/profiles/hardware/<card>.yml` → `kv_format_default.balanced`) — one source of truth shared with the pull gates and c3. 3090-class profiles declare `fp8_e5m2` there, which equals the compose default: the Ampere no-op is data, not a code branch.
-- **Your env wins**: an explicit `KV_CACHE_DTYPE=…` before `launch.sh`/`switch.sh` suppresses the injection entirely.
-- **Quant-specific KV slugs are never touched** — int8-PTH (compressed-tensors weights *reject* fp8 KV), TurboQuant, and bf16 configs keep their registry KV format.
+- ⚠️ **There is no KV-dtype injection any more.** #246 Phase 1 upgraded the pilot slugs (`vllm/dual`, `vllm/minimal`) from `fp8_e5m2` to `fp8_e4m3` on cards whose profile preferred e4m3. The composes then migrated to `fp8_e4m3` outright, which left **zero slugs declaring the source format** — so the injector returned nothing on every card, for months, while this page said otherwise. Retired in [#1371](https://github.com/noonghunna/club-3090/issues/1371).
+- **What decides fp8_e4m3 KV is the attention backend, not the card.** fp8-weights / nvfp4 / bf16 / qwen3-next checkpoints route to FlashInfer, which does native fp8 storage on sm_86; gemma-style W4A16 routes to Triton, whose fp8e4nv path needs SM89+ and fails at KV-init on Ampere. That rule lives in `compat.py`'s C5 gate, and it is why the Ampere hardware profiles deliberately **omit** `fp8_e4m3` from `supported_kv_formats` — it keeps gemma correctly rejected. See [DTYPE_MATRIX](DTYPE_MATRIX.md).
+- **Your env still wins, and always did**: `KV_CACHE_DTYPE=…` is read by the composes as `${KV_CACHE_DTYPE:-…}` and interpolated by docker. It never travelled through the launcher, so nothing about that path changed.
+- **Quant-specific KV slugs keep their registry format** — int8-PTH (compressed-tensors weights *reject* fp8 KV), TurboQuant and bf16 configs.
 - **Direct `docker compose -f … up` bypasses all of this** and keeps the Ampere-safe compose defaults on any card.
 - The preflight banner names the detected class: `[preflight] arch: ada (sm_8.9) — arch-aware KV defaults active for pilot slugs (#246)`.
 - `VLLM_ATTENTION_BACKEND` is plumbed through the same channel but **ships no value** — vLLM's backend auto-detect is the default until someone measures a better per-arch choice.

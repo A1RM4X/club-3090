@@ -130,37 +130,50 @@ assert_contains "$out" "VLLM_IMAGE=vllm/vllm-openai:v0.29.0"
 out="$(python3 "$HELPER" resolve-variant-pin --variant vllm/gemma-int8-mtp --format shell)"
 assert_contains "$out" "VLLM_IMAGE=vllm/vllm-openai:v0.22.0"
 
-# --- #246 arch-aware KV injection matrix (resolve-variant-pin --gpu-spec) ----
+# --- #246 Phase 1 KV injection: RETIRED (#1371) -------------------------------
+# This block used to be eight `assert_not_contains KV_CACHE_DTYPE` cases against a
+# live injector. Every one of them passed for the wrong reason: the injector had
+# been inert on EVERY card since the composes migrated to fp8_e4m3, so the suite
+# was asserting a no-op it believed was a decision. That is the shape this repo
+# calls a false clean, and it is why the mechanism survived nine months unnoticed.
+#
+# The injector is gone. What must be guarded now is that it stays gone and that
+# removing it did not disturb the user's own knob.
 GPU_4090='0|NVIDIA GeForce RTX 4090|24564|8.9'
 GPU_5090X2='0|NVIDIA GeForce RTX 5090|32607|12.0;1|NVIDIA GeForce RTX 5090|32607|12.0'
 
-# ampere -> NOTHING injected (compose defaults; the no-op is data equality)
-out="$(python3 "$HELPER" resolve-variant-pin --variant vllm/dual --format shell --gpu-spec "$GPU_3090")"
-assert_not_contains "$out" "KV_CACHE_DTYPE"
-# vllm/dual + vllm/minimal are now fp8_e4m3-native on ALL arches (2026-07-14 KV switch): the
-# compose default already gives native fp8 on Ada/Blackwell, so there is nothing to swap -> no
-# injection. (#246's Qwen e5m2->e4m3 arch-swap is now vestigial for these slugs — see followup.)
-out="$(python3 "$HELPER" resolve-variant-pin --variant vllm/dual --format shell --gpu-spec "$GPU_4090")"
-assert_not_contains "$out" "KV_CACHE_DTYPE"
-out="$(python3 "$HELPER" resolve-variant-pin --variant vllm/minimal --format shell --gpu-spec "$GPU_5090X2")"
-assert_not_contains "$out" "KV_CACHE_DTYPE"
-# non-pilot slug (same kv_format) -> no injection until the #246 A/B expands the pilot
-out="$(python3 "$HELPER" resolve-variant-pin --variant vllm/qwen-27b-dual-fast --format shell --gpu-spec "$GPU_4090")"
-assert_not_contains "$out" "KV_CACHE_DTYPE"
-# quant-specific KV slug -> never overridden (compressed-tensors reject fp8 KV)
-out="$(python3 "$HELPER" resolve-variant-pin --variant vllm/gemma-int8-mtp --format shell --gpu-spec "$GPU_4090")"
-assert_not_contains "$out" "KV_CACHE_DTYPE"
-# explicit user env pin wins
+# 1. NOTHING resolves KV_CACHE_DTYPE, on any card, for any slug. A positive
+#    control rides along: the same call must still return the image pin, so an
+#    empty result cannot make this pass.
+for _spec in "$GPU_3090" "$GPU_4090" "$GPU_5090X2" "0|NVIDIA GB10|131072|12.1" "0|Weird GPU|8192|7.0"; do
+  for _v in vllm/dual vllm/minimal vllm/qwen-27b-dual-fast vllm/gemma-int8-mtp; do
+    out="$(python3 "$HELPER" resolve-variant-pin --variant "$_v" --format shell --gpu-spec "$_spec")"
+    assert_not_contains "$out" "KV_CACHE_DTYPE"
+    assert_contains "$out" "VLLM_IMAGE="
+  done
+done
+
+# 2. The symbols are gone from the resolver, not merely unreachable. A dormant
+#    map is what let this rot: it read as a feature in every review.
+if python3 -c "
+import sys; sys.path.insert(0, '.')
+import scripts.lib.profiles.launch_compat as m
+sys.exit(0 if any(hasattr(m, n) for n in ('ARCH_KV_PILOT_VARIANTS', '_ARCH_KV_ALLOWED', '_arch_aware_env')) else 1)
+"; then
+  echo "ASSERTION FAILED: the #246 Phase 1 KV injector is back. If that is deliberate," >&2
+  echo "  it needs a slug that actually declares the source kv_format (zero do today)" >&2
+  echo "  and it must not fight compat.py's _fp8w_ampere_kv routing rule — see #1371." >&2
+  exit 1
+fi
+
+# 3. A user's own KV_CACHE_DTYPE is untouched. It never travelled through the
+#    resolver or the launcher case arm — the composes read ${KV_CACHE_DTYPE:-…}
+#    and docker interpolates it — so removing both must change nothing here.
 out="$(KV_CACHE_DTYPE=fp8_e5m2 python3 "$HELPER" resolve-variant-pin --variant vllm/dual --format shell --gpu-spec "$GPU_4090")"
 assert_not_contains "$out" "KV_CACHE_DTYPE"
-# heterogeneous rig -> no single right answer -> no injection
-out="$(python3 "$HELPER" resolve-variant-pin --variant vllm/dual --format shell --gpu-spec "${GPU_3090};1|NVIDIA GeForce RTX 4090|24564|8.9")"
-assert_not_contains "$out" "KV_CACHE_DTYPE"
-# unmapped card -> degrade to compose defaults, never an error
-out="$(python3 "$HELPER" resolve-variant-pin --variant vllm/dual --format shell --gpu-spec "0|Weird GPU|8192|7.0")"
-assert_contains "$out" "VLLM_IMAGE=vllm/vllm-openai:v0.29.0"
-assert_not_contains "$out" "KV_CACHE_DTYPE"
-echo "  ok: #246 arch-aware KV injection matrix (8 cases)"
+assert_contains "$out" "VLLM_IMAGE="
+
+echo "  ok: #1371 Phase 1 KV injector stays retired (20 slug x card cases · symbols absent · user knob intact)"
 
 # --- detector: Blackwell family must not collapse to rtx-5090 (#576 wrinkle) --
 # The sm>=12 bucket used to map every Blackwell to rtx-5090, so a 96 GB PRO 6000
