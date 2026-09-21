@@ -13,6 +13,8 @@ def check(label, cond):
         print("FAIL: " + label, file=sys.stderr); ok = False
 
 # POSITIVE CONTROL -- the bug. Before the engine map this emitted MAX_NUM_SEQS.
+# Keyed by EngineProfile.type, so a SECOND vllm id must behave identically
+# without any Python edit -- that is the point of typing over id.
 out = lc._envelope_env(profiles, "fixture/slug", SPEC, {"engine": "sglang-stable"})
 check("sglang emits its OWN spelling", out.get("MAX_RUNNING_REQUESTS") == "4")
 check("sglang emits NO vLLM key", "MAX_NUM_SEQS" not in out)
@@ -21,6 +23,14 @@ check("sglang emits NO vLLM key", "MAX_NUM_SEQS" not in out)
 out = lc._envelope_env(profiles, "fixture/slug", SPEC, {"engine": "vllm-stable"})
 check("vllm still emits MAX_NUM_SEQS", out.get("MAX_NUM_SEQS") == "4")
 check("vllm emits NO sglang key", "MAX_RUNNING_REQUESTS" not in out)
+
+# a DIFFERENT vllm engine id must resolve identically (type-keyed, not id-keyed)
+out = lc._envelope_env(profiles, "fixture/slug", SPEC, {"engine": "vllm-lmcache"})
+check("a second vllm id resolves the same (type-keyed)", out.get("MAX_NUM_SEQS") == "4")
+
+# llama.cpp has no concurrency cap in its composes -> no injection
+out = lc._envelope_env(profiles, "fixture/slug", SPEC, {"engine": "llama-cpp-local"})
+check("llama.cpp family injects nothing", out == {})
 
 # An UNMAPPED engine injects nothing rather than a guessed key.
 check("unmapped engine injects nothing",
