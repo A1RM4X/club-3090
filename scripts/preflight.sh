@@ -29,6 +29,10 @@ export PYTHONUTF8="${PYTHONUTF8:-1}"
 [[ -n "${_PREFLIGHT_LOADED:-}" ]] && return 0
 # shellcheck source=lib/club-containers.sh
 source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/lib/club-containers.sh"
+# #1247: the canonical engine-family resolver. preflight_compose_deps used to
+# carry its own image regex and was blind to our own fork's image name.
+# shellcheck source=scripts/lib/engine-kind.sh
+source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/lib/engine-kind.sh"
 _PREFLIGHT_LOADED=1
 _PREFLIGHT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -1243,9 +1247,23 @@ preflight_compose_deps() {
   # llama.cpp-family server: it mounts ${MODEL_DIR}:/models and passes
   # `-m /models/<path>` (+ `--spec-draft-model /models/<path>` for DFlash/MTP),
   # so it belongs on the GGUF presence path, NOT the vLLM HF-cache path.
-  if grep -qhE 'image:.*(ggml-org/llama\.cpp|ikawrakow/ik-llama|beellama)' "${compose_files[@]}"; then
-    is_llamacpp=1
-  fi
+  # ⚠️ This used to be a PRIVATE image regex:
+  #     image:.*(ggml-org/llama\.cpp|ikawrakow/ik-llama|beellama)
+  # which did not know our OWN fork's image name, ghcr.io/noonghunna/llamacpp-club3090.
+  # All 28 llamacpp-club3090/* slugs therefore skipped this whole block and fell to
+  # the vLLM HF-cache path, which found nothing to complain about and returned 0 —
+  # so the check that exists to catch a missing drafter never ran for them. A user
+  # with no DFlash2 drafter on disk got a CRASH-LOOP instead of one clear line
+  # (#1247). A check that passes because it measured nothing.
+  # Now delegated to the canonical resolver (#1282) — it classifies every image we
+  # ship, including the forks, and adding an engine means adding arms THERE only.
+  local _img _kind
+  while IFS= read -r _img; do
+    [[ -n "$_img" ]] || continue
+    _kind="$(engine_kind_from_image "$_img")"
+    if [[ "$_kind" == "llamacpp" ]]; then is_llamacpp=1; break; fi
+  done < <(command grep -hE '^[[:space:]]*image:' "${compose_files[@]}" \
+             | sed -E 's/^[[:space:]]*image:[[:space:]]*//; s/^["'"'"']//; s/["'"'"']$//' || true)
 
   if [[ $is_llamacpp -eq 1 ]]; then
     local gguf_paths=()
