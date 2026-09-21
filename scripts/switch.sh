@@ -1270,6 +1270,12 @@ up_variant() {
     # the guards must see the RESOLVED config, not the compose defaults.
     resolve_offload_residency "${full_dir}/${file}"
     resolve_offload_threads   "${full_dir}/${file}"
+    # exl3 CPU-MoE split, sized from DETECTED VRAM (#1366). Ordered with the two
+    # above and BEFORE the guards, so preflight_cpu_offload_ram prices the split we
+    # actually ship rather than the compose default -- and lowering it only ever
+    # LOWERS host RAM (the CPU worker holds the tail), so the two never fight.
+    # No-op on every compose without the CPU-MoE-* headers.
+    resolve_cpu_moe_split     "${full_dir}/${file}"
     # CPU-offload guards: marker-scoped, no-ops on non-offload composes (#deepseek-flash)
     preflight_cpu_offload_ram "${full_dir}/${file}" || exit 1
     preflight_offload_split_mode "${full_dir}/${file}" || exit 1

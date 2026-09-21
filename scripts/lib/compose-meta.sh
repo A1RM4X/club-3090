@@ -509,6 +509,138 @@ _offload_rule_layer_count() {
   printf '%s' "${#lays[@]}"
 }
 
+# --- exl3 CPU-MoE split, sized as a VRAM FIT (#1366 / #1361 step 7) ----------
+# Same shape and the same override contract as resolve_offload_residency above:
+# a fit, not a fraction. A target CPU-resident fraction is the OUTPUT of a fit,
+# never an input -- it still cannot say whether the result fits, and the optimum
+# is always "as few experts off-GPU as fit at the shipped CTX / KV". Shipping a
+# fraction just relocates the hardcoded number, which is what #1360 hit: a
+# 2x32 GB rig ran the 2x24 GB expert count and left ~16 GB of VRAM unused.
+#
+#   resident(split) = floor + (E - split) * L * b        [b = MiB per expert per layer]
+#   split           = ceil( (E*L*b - SUM_i max(0, free_i - reserve_i)) / (L*b) ) + safety
+#
+# ⚠️ `reserve` here is NOT the `--autosplit-reserve` flag (512). exl3's autosplit
+# does not obey that number -- it leaves FAR more idle (~6 GB at 204800/Q4/split
+# 160 per the compose's own caveat), and free-VRAM arithmetic overstates what is
+# reclaimable: 205 experts failed with `Insufficient VRAM in split` despite
+# ~6.4 GiB apparently free (learnings/exllamav3-engine.md). This reserve is a
+# per-card CALIBRATED constant absorbing everything that is not a CPU-offloadable
+# expert: non-expert weights, KV at the shipped ctx, activations, and the
+# headroom autosplit refuses to use. It also absorbs the ENGINE-PIN PACKING TERM,
+# which is real and measured -- exl3 1.5.0 fits at split 144 where 1.5.1 needs
+# 160 at the SAME total VRAM (44,214 vs 44,112 MiB), so the fit is not a pure
+# function of bytes and the constant must be re-calibrated on a pin bump.
+#
+# ⚠️ A BAD FIT IS INVISIBLE. "Insufficient VRAM in split" crash-loops while
+# TabbyAPI's port binds during load, so the endpoint answers the whole time.
+# `RestartCount` is the only honest signal -- this injector is trustworthy only
+# alongside the restart guard (#1354).
+#
+# Lowering the split never fights the host-RAM preflight: the CPU worker holds
+# only the tail, so fewer CPU-resident experts is strictly LESS host RAM.
+resolve_cpu_moe_split() {
+  local compose_file="$1"
+  [[ -f "$compose_file" ]] || return 0
+  command -v nvidia-smi >/dev/null 2>&1 || return 0
+
+  # No engine-specific constants in bash: every number comes from the compose.
+  local experts; experts="$(compose_meta_get "$compose_file" cpu-moe-experts-per-layer || true)"
+  [[ "$experts" =~ ^[0-9]+$ ]] || return 0          # not a cpu-moe-split compose
+  local layers; layers="$(compose_meta_get "$compose_file" cpu-moe-layers || true)"
+  [[ "$layers" =~ ^[0-9]+$ ]] || return 0
+  # KiB per expert PER LAYER -- integer, and read from the safetensors tensor
+  # table rather than computed from the quant name. Trellis codebook quants carry
+  # scale/codebook overhead the nominal bpw understates (3.05bpw measures 1857
+  # KiB where bpw x params predicts 1830).
+  local ekib; ekib="$(compose_meta_get "$compose_file" cpu-moe-expert-kib || true)"
+  [[ "$ekib" =~ ^[0-9]+$ ]] || return 0
+  local reserve; reserve="$(compose_meta_get "$compose_file" cpu-moe-gpu-reserve-mib || true)"
+  [[ "$reserve" =~ ^[0-9]+$ ]] || return 0
+  local safety; safety="$(compose_meta_get "$compose_file" cpu-moe-split-safety-experts || true)"
+  [[ "$safety" =~ ^[0-9]+$ ]] || safety=8
+  local var; var="$(compose_meta_get "$compose_file" cpu-moe-split-env || true)"
+  [[ "$var" =~ ^[A-Z][A-Z0-9_]*$ ]] || var="MOE_SPLIT"
+  # The rig the reserve constant was fitted on. ONE point per tier today, so any
+  # other rig is an EXTRAPOLATION -- and the risky direction is DOWNWARD (a bigger
+  # card gets a smaller split, and a split that is too small crash-loops with
+  # `Insufficient VRAM in split` while the port stays open). Say so instead of
+  # presenting an extrapolated number as if it were measured.
+  local cal_free; cal_free="$(compose_meta_get "$compose_file" cpu-moe-calibrated-free-mib || true)"
+  [[ "$cal_free" =~ ^[0-9]+$ ]] || cal_free=0
+  local cal_cards; cal_cards="$(compose_meta_get "$compose_file" cpu-moe-calibrated-cards || true)"
+  [[ "$cal_cards" =~ ^[0-9]+$ ]] || cal_cards=0
+
+  # Test seam: the guard reproduces the calibration points without a GPU.
+  local -a frees=()
+  if [[ -n "${CPU_MOE_FREE_MIB:-}" ]]; then
+    local f; for f in ${CPU_MOE_FREE_MIB}; do [[ "$f" =~ ^[0-9]+$ ]] && frees+=("$f"); done
+  else
+    while read -r m; do [[ "$m" =~ ^[0-9]+$ ]] && frees+=("$m"); done \
+      < <(nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits 2>/dev/null)
+  fi
+  (( ${#frees[@]} >= 1 )) || return 0
+
+  # An explicit pin ALWAYS wins and is never clobbered -- same contract as
+  # THREADS and OT_G<i>. Say so, and still print the fit we would have chosen,
+  # because "my pin vs what the rig can hold" is the whole diagnostic.
+  local pinned="${!var:-}"
+
+  local bt=$(( layers * ekib ))                      # KiB per expert, ALL layers
+  local avail_kib=0 i per
+  for (( i=0; i<${#frees[@]}; i++ )); do
+    per=$(( frees[i] > reserve ? frees[i] - reserve : 0 ))
+    avail_kib=$(( avail_kib + per * 1024 ))
+  done
+  local need_kib=$(( experts * bt ))
+  local split=0
+  if (( need_kib > avail_kib )); then
+    split=$(( ( (need_kib - avail_kib) + bt - 1 ) / bt ))   # ceil
+  fi
+  split=$(( split + safety ))
+  (( split < 0 )) && split=0
+  (( split > experts )) && split=$experts
+
+  local pct=$(( split * 100 / experts ))
+  local gib=$(( (avail_kib / 1024) / 1024 ))
+  if [[ -n "$pinned" ]]; then
+    echo "[cpu-moe] ${var}=${pinned} (YOUR pin, kept). The VRAM fit for this rig would be ${split}" >&2
+    echo "          (${pct}% of ${experts} experts CPU-resident; ~${gib} GiB usable across ${#frees[@]} card(s))." >&2
+  else
+    export "${var}=${split}"
+    echo "[cpu-moe] ${var}=${split} — VRAM fit: ${split}/${experts} experts CPU-resident (${pct}%), ~${gib} GiB" >&2
+    echo "          usable across ${#frees[@]} card(s) after a ${reserve} MiB/card reserve, +${safety} safety experts." >&2
+  fi
+  # How far is this rig from the one the constant was fitted on?
+  if (( cal_free > 0 )); then
+    local dev=$(( (frees[0] * 100 / cal_free) - 100 ))
+    (( dev < 0 )) && dev=$(( -dev ))
+    if (( dev > 10 || (cal_cards > 0 && ${#frees[@]} != cal_cards) )); then
+      echo "[cpu-moe] ⚠️  EXTRAPOLATED: the reserve constant was calibrated on ${cal_cards}x${cal_free} MiB free," >&2
+      echo "          this rig is ${#frees[@]}x${frees[0]}. The fit scales linearly in expert bytes, but the" >&2
+      echo "          reserve absorbs KV + activations + autosplit headroom + engine packing, none of" >&2
+      echo "          which are strictly per-card. If the server crash-loops with \`Insufficient VRAM" >&2
+      echo "          in split\` (the port STAYS OPEN — watch RestartCount, not /health), raise" >&2
+      echo "          ${var} until it holds and please report the value on #1366." >&2
+    fi
+  fi
+  # The engine profile's own selection rule, at the moment it matters. Nothing
+  # told you that you were at the threshold before this line existed.
+  local shown=$(( ${pinned:-$split} ))
+  local shown_pct=$(( shown * 100 / experts ))
+  if (( shown_pct > 50 )); then
+    echo "[cpu-moe] ⚠️  ${shown_pct}% of experts are CPU-resident. exllamav3.yml's selection rule:" >&2
+    echo "          over ~50% the model belongs on an engine with a REAL EXPERT CACHE — \`-mcs\` splits" >&2
+    echo "          by expert INDEX (tail-N to CPU) with a slow rebalancing sweep, so it cannot win" >&2
+    echo "          where most experts live off-card. GLM-5.3-Flash was rejected on exactly this" >&2
+    echo "          basis at 80% (10.9 TPS, cards 5-8% utilised). Consider a smaller quant, more" >&2
+    echo "          VRAM, or an llamacpp-club3090 moe-cache slug." >&2
+  elif (( shown_pct == 50 )); then
+    echo "[cpu-moe] ⚠️  exactly 50% CPU-resident — ON exllamav3.yml's threshold, not past it." >&2
+  fi
+  return 0
+}
+
 resolve_offload_residency() {
   local compose_file="$1"
   [[ -f "$compose_file" ]] || return 0

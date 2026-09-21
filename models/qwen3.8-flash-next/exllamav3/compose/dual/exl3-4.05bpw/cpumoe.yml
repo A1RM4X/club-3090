@@ -23,10 +23,42 @@
 #   Thinking:  ✅ ON — `reasoning: true` with explicit <think> tokens.
 #   Vision:    ✅ yes — built INTO the quant (no mmproj artifact, unlike every
 #              GGUF path here). `vision_offload` keeps the tower in system RAM.
-#   Max ctx:   32768 shipped. ⚠️ This is WHAT WAS TESTED, NOT A CEILING — it is
-#              simply where max_seq_len was left. The model declares 262144.
+#   Max ctx:   204800 shipped (`${CTX:-204800}`). The model declares 262144.
+#              ⚠️ This header read "32768 shipped" until 2026-09-21 while the
+#              compose had already shipped 204800 — the same staleness both
+#              MOE_SPLIT comments carried (fixed 2026-09-21). Corrected here
+#              because #1366 anchors the CPU-MoE-GPU-Reserve-MiB constant to
+#              ctx 204800 + cache-mode Q4; a header claiming 32768 would make
+#              the calibration look wrong rather than the header. READ THE
+#              VALUE, not the prose — two comments in this file have now
+#              lagged a default that moved.
 #   Genesis:   N/A — not a vLLM engine
 #   Status:    🐣 Incubating
+# CPU-MoE-Experts-Per-Layer: 512
+# CPU-MoE-Layers: 48
+# CPU-MoE-Expert-KiB: 2469
+# CPU-MoE-GPU-Reserve-MiB: 8846
+# CPU-MoE-Split-Safety-Experts: 8
+# CPU-MoE-Calibrated-Free-MiB: 24123
+# CPU-MoE-Calibrated-Cards: 2
+# CPU-MoE-Split-Env: MOE_SPLIT
+#   ⤷ Inputs to `resolve_cpu_moe_split` (#1366): MOE_SPLIT is a VRAM FIT, not a
+#     hardcoded expert count. A fixed count is what #1360 hit — a 2x32 GB rig ran
+#     the 2x24 GB number and left ~16 GB of VRAM unused. An explicit MOE_SPLIT
+#     still always wins; the launcher prints the fit it would have chosen.
+#   • Expert-KiB is per expert PER LAYER, READ FROM THE SAFETENSORS TENSOR TABLE,
+#     not computed from the quant name: this tier's expert tensors measure
+#     59,260 MiB total over 48 layers x 512 experts. Trellis codebook
+#     quants carry scale/codebook overhead the nominal bpw understates.
+#   • GPU-Reserve-MiB is per card and is ⚠️ NOT the `--autosplit-reserve` flag
+#     (512) — autosplit does not obey that number and leaves far more idle. It is
+#     a CALIBRATED constant covering non-expert weights, KV at the shipped ctx,
+#     activations, autosplit headroom, AND the engine-pin packing term (1.5.0
+#     fits at 144 where 1.5.1 needs 160 at the same total VRAM).
+#     ⚠️ RE-CALIBRATE IT ON AN ENGINE-PIN BUMP or on a CTX/KV_TYPE change — it is
+#     anchored to ctx 204800 + cache-mode Q4 on exl3 1.5.0.
+#   • Calibration anchor reproduced by `scripts/tests/test-cpu-moe-split-fit.sh`:
+#     256 @ 2x24 GB free 24,123 MiB/card, exl3 1.5.0, ctx 204800, Q4
 # CPU-Offload-Host-RAM-GB: 118
 #   ⤷ 101 GB of weights, of which ~44% of experts are CPU-resident and computed
 #     there, plus the 31 GB n-gram table held in RAM (`ngram_ram: true`).
@@ -229,9 +261,10 @@ services:
       - 'qwen3.8-flash-next-exl3-4.05bpw'
       - '--backend'
       - 'exllamav3'
-      # ⚠️ 32768 is what was TESTED, not a fitted ceiling. The model declares
-      # 262144. Raising it has NOT been tried on this engine — expect the
-      # CPU-resident fraction, not KV, to be what bites first.
+      # ⚠️ This note said "32768 is what was TESTED" until 2026-09-21, long after
+      # the compose started shipping ${CTX:-204800}; the ⭐⭐ note just below is
+      # the current one. The 262144 the model declares has still NOT been tried
+      # on this engine — expect the CPU-resident fraction, not KV, to bite first.
       # ⭐⭐ 204800 — the same context our moe-cache slug for this model ships,
       # reached by moving MORE experts to the CPU (split 256). VALIDATED with
       # 14K / 50K / 100K prompts: zero OOM, and VRAM is FLAT across them
