@@ -332,7 +332,7 @@ echo "  ✓ #809: decode_granularity reaches both launchers, only for the model 
 # would satisfy the negative half. So each launcher asserts BOTH halves.
 dbl_harness() { # dbl_harness <launcher> <slug> <gpu-spec> [PRESET=k=v]
   local body; body="$(sed -n '/^export_variant_engine_pin() {/,/^}/p' "$1")"
-  SPEC="$3" LAUNCH_PROFILE="$HELPER" PRESET="${4:-}" SLUG="$2" bash -c '
+  SPEC="$3" LAUNCH_PROFILE="$HELPER" PRESET="${4:-}" SLUG="$2" COMPOSE_BIN=: bash -c '
     set -uo pipefail
     switch_gpu_profile_spec()   { printf "%s" "${SPEC}"; }   # switch.sh
     selected_gpu_profile_spec() { printf "%s" "${SPEC}"; }   # launch.sh
@@ -347,7 +347,14 @@ dbl_harness() { # dbl_harness <launcher> <slug> <gpu-spec> [PRESET=k=v]
 # behind the prefix gate until #1365 and it injects a non-image key.
 DBL_SLUG="llamacpp-club3090/glm53-flash-dual-iq4xs-moecache"
 DBL_SPEC="0|NVIDIA GeForce RTX 5090|32607|12.0;1|NVIDIA GeForce RTX 5090|32607|12.0"
-for _L in scripts/switch.sh scripts/launch.sh; do
+# ⚠️ Kept as an ARRAY, not `for _L in scripts/switch.sh scripts/launch.sh`:
+# that spelling matches test-tests-never-launch's EXEC regex (the `sh` of
+# switch.sh + a space + scripts/launch.sh reads as `sh …launch.sh`). It is a
+# false positive — nothing is executed here — but that guard is deliberately
+# dumb and broad, and a precise version of it once went blind to the exact
+# line it exists to catch. Satisfy it rather than argue with it.
+DBL_LAUNCHERS=("scripts/switch.sh" "scripts/launch.sh")
+for _L in "${DBL_LAUNCHERS[@]}"; do
   _out="$(dbl_harness "$_L" "$DBL_SLUG" "$DBL_SPEC")"
   _p1="$(printf '%s' "$_out" | sed -n '/@@PASS1/,/@@PASS2/p')"
   # ⚠️ the @@FINAL line NAMES the key, so it must be excluded from the pass-2
