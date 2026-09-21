@@ -70,10 +70,16 @@ print(f"  ✓ schema ({len(rows)} slug rows; empty is valid)")
 PY
 
 # --- 2. injection contract (fixture: temp envelopes with a 5090 row) ----------
-TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
+TMP="$(mktemp -d)"
 REAL="scripts/lib/profiles/envelopes.yml"
 BACKUP="$TMP/backup.yml"; cp "$REAL" "$BACKUP"
 REAL_SUM="$(sha256sum "$REAL" | cut -d' ' -f1)"
+# ⚠️ RESTORE ON *EXIT*, not only on the happy path. This test overwrites the real
+# envelopes.yml with fixtures; `fail` exits immediately, so a restore placed at
+# the end of a section never runs on failure and leaves the FIXTURE committed in
+# the working tree. The next run then fails on a contaminated file and the cause
+# looks like the code under test. Observed while adding section 3.
+trap 'cp -f "$BACKUP" "$REAL" 2>/dev/null || true; rm -rf "$TMP"' EXIT
 
 cat > "$REAL" <<'EOF'
 schema_version: 1
@@ -130,6 +136,33 @@ envelopes:
 EOF
 grep -q "MAX_NUM_SEQS" <(pin vllm/dual "$S5090") && fail "value == compose_default must NOT inject (no gain)"
 echo "  ✓ injection contract (inject · no-row · het-clamp-to-smallest · computed-parity · user-env · no-gain)"
+# --- 3. #1361: the concurrency knob is SPELLED differently per engine ---------
+# vLLM reads MAX_NUM_SEQS; SGLang reads MAX_RUNNING_REQUESTS. Emitting vLLM's
+# name for an SGLang compose is a SILENT no-op: the compose reads
+# ${MAX_RUNNING_REQUESTS:-N} and never sees MAX_NUM_SEQS, so the row looks
+# applied and nothing changes.
+#
+# ⚠️ UNIT-LEVEL ON PURPOSE. resolve-variant-pin cannot reach an sglang slug yet:
+# both launchers gate on `[[ $variant == vllm/* || $variant == beellama/* ]]`
+# and _ENGINE_IMAGE_ENV has no sglang entry, so resolve_engine_pin raises first.
+# Those are layers 1-2 of #1361; this guards layer 3 (the knob NAME) so it is
+# already correct when they land, rather than shipping a wrong-dialect key.
+cat > "$REAL" <<'ENVEOF'
+schema_version: 1
+envelopes:
+  fixture/slug:
+    rtx-5090:
+      max_num_seqs: 4
+      compose_default: 1
+      validated: { concurrency_soak: "fixture" }
+ENVEOF
+
+python3 scripts/tests/fixtures/envelope-knob-probe.py || fail "per-engine concurrency knob spelling"
+
+cp "$BACKUP" "$REAL"
+[ "$(sha256sum "$REAL" | cut -d' ' -f1)" = "$REAL_SUM" ] || fail "envelopes.yml not restored"
+echo "  ✓ per-engine knob spelling (sglang · vllm unchanged · unmapped · per-key user pin)"
+
 
 cp "$BACKUP" "$REAL"
 [[ "$(sha256sum "$REAL" | cut -d' ' -f1)" == "$REAL_SUM" ]] || fail "real envelopes.yml not restored"

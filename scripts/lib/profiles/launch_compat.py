@@ -227,12 +227,47 @@ def _load_envelopes() -> dict:
         return {}
 
 
-def _envelope_env(profiles, variant: str, gpu_spec: str) -> dict[str, str]:
-    """Phase 2 concurrency injection. Empty dict = no injection (compose
-    ${MAX_NUM_SEQS:-default} stands)."""
+# #1361: the concurrency knob has a different SPELLING per engine. The quantity
+# is the same -- "how many sequences may run at once" -- but injecting vLLM's
+# name into an SGLang compose is a silent no-op: the compose reads
+# ${MAX_RUNNING_REQUESTS:-N} and never sees MAX_NUM_SEQS, so the row would look
+# applied and do nothing.
+#
+# Keyed by EngineProfile.TYPE, not by engine id. The dialect is a property of the
+# engine family, so `type` already carries it: 11 vllm ids collapse to one entry
+# and a new vllm-* profile needs no Python edit. An engine family absent from
+# this map gets NO injection rather than a guessed name -- a wrong key is worse
+# than the compose default, because the default is at least a measured value.
+# llama.cpp and exllamav3 are absent deliberately: their composes expose no
+# concurrency cap at all (UBATCH_SIZE / KV_TYPE / THREADS / MOE_SPLIT instead).
+_ENGINE_TYPE_CONCURRENCY_ENV = {
+    "vllm": "MAX_NUM_SEQS",
+    "sglang": "MAX_RUNNING_REQUESTS",
+}
+
+
+def _concurrency_env_key(profiles, entry: dict | None) -> str | None:
+    """Env var this entry's engine family reads for its concurrency cap, or None
+    when the family has no such knob (-> no injection)."""
+    if not isinstance(entry, dict):
+        return None
+    try:
+        engine = profiles.engines[entry.get("engine")]
+    except (KeyError, AttributeError, TypeError):
+        return None
+    return _ENGINE_TYPE_CONCURRENCY_ENV.get(getattr(engine, "type", None))
+
+
+def _envelope_env(profiles, variant: str, gpu_spec: str,
+                  entry: dict | None = None) -> dict[str, str]:
+    """Phase 2 concurrency injection. Empty dict = no injection (the compose's
+    own ${<KNOB>:-default} stands)."""
     if not gpu_spec:
         return {}
-    if os.environ.get("MAX_NUM_SEQS"):
+    env_key = _concurrency_env_key(profiles, entry)
+    if not env_key:
+        return {}  # unmapped engine -> compose default, never a guessed key
+    if os.environ.get(env_key):
         return {}  # explicit user pin always wins
     row = _load_envelopes().get(variant)
     if not row:
@@ -258,7 +293,7 @@ def _envelope_env(profiles, variant: str, gpu_spec: str) -> dict[str, str]:
     # only inject a validated value that actually raises the ceiling
     if not isinstance(seqs, int) or (isinstance(default, int) and seqs <= default):
         return {}
-    return {"MAX_NUM_SEQS": str(seqs)}
+    return {env_key: str(seqs)}
 
 
 def _mem_util_env(profiles, variant: str, gpu_spec: str) -> dict[str, str]:
@@ -365,7 +400,7 @@ def resolve_variant_pin(profiles, variant: str, gpu_spec: str = "") -> dict[str,
     # Only emitted when a gpu_spec is passed (launchers do; the registry-emit
     # baselines join calls without one and sees pins only).
     exports.update(_arch_aware_env(profiles, variant, entry, gpu_spec, exports))
-    exports.update(_envelope_env(profiles, variant, gpu_spec))   # Phase 2 concurrency
+    exports.update(_envelope_env(profiles, variant, gpu_spec, entry))  # Phase 2 concurrency
     exports.update(_mem_util_env(profiles, variant, gpu_spec))   # Phase 2 mem-fraction floor
     exports.update(_deepgemm_env(profiles, variant, entry, gpu_spec))  # fp8w consumer-Blackwell fix
     exports.update(_decode_granularity_env(profiles, entry))     # #809 dLLM decode class
