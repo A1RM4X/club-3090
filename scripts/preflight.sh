@@ -1557,7 +1557,11 @@ preflight_autodetect_endpoint() {
     local note=""
     [[ -z "$explicit_container" ]] && note="container=${CONTAINER}"
     [[ -z "$explicit_url" ]] && note="${note:+$note }url=${URL}"
-    echo "[autodetect] using running ${note}  (skip: PREFLIGHT_NO_AUTODETECT=1)" >&2
+    echo "[autodetect] using running ${note}  (override with CONTAINER=/URL=, or PREFLIGHT_NO_AUTODETECT=1 to disable)" >&2
+    # #1330: remember that WE chose this endpoint. preflight_resolve_model_or_fail
+    # refuses the last-resort literal when we know which container is up but cannot
+    # read its model -- a guess is only reasonable when we know nothing.
+    PREFLIGHT_ENDPOINT_AUTODETECTED=1
   fi
   return 0
 }
@@ -1582,23 +1586,108 @@ preflight_autodetect_endpoint() {
 # reachability check then surfaces the real outage). Callers keep their own
 # last-resort literal after this, so behaviour is unchanged when detection no-ops.
 preflight_autodetect_model() {
-  [[ -n "${MODEL:-}" ]] && return 0
+  # #1330: every exit path now SAYS something. The old version printed only on
+  # success, so the one component that failed was the silent one -- a slow boot
+  # read as "8 checks failed" against a config that was fine.
+  PREFLIGHT_MODEL_UNRESOLVED=""
+  if [[ -n "${MODEL:-}" ]]; then
+    return 0        # explicit value always wins; silent because it is the normal case
+  fi
   local url="${1:-${URL:-}}"
-  [[ -n "$url" ]] || return 0
-  command -v curl >/dev/null 2>&1 || return 0
-  command -v python3 >/dev/null 2>&1 || return 0
-  local detected
-  detected="$(curl -sf -m 5 "${url%/}/v1/models" 2>/dev/null \
-    | python3 -c "import json,sys
+  if [[ -z "$url" ]]; then
+    echo "[autodetect] no URL to query — MODEL not autodetected" >&2
+    PREFLIGHT_MODEL_UNRESOLVED="no-url"; return 0
+  fi
+  if ! command -v curl >/dev/null 2>&1 || ! command -v python3 >/dev/null 2>&1; then
+    echo "[autodetect] curl/python3 unavailable — MODEL not autodetected" >&2
+    PREFLIGHT_MODEL_UNRESOLVED="no-tools"; return 0
+  fi
+
+  # The overwhelmingly common failure is a server still loading, so give it a
+  # bounded wait instead of resolving the wrong thing. Only costs time when the
+  # endpoint is down, which is exactly when nobody minds.
+  local wait_s="${PREFLIGHT_MODEL_WAIT_S:-10}"
+  local deadline=$(( SECONDS + wait_s )) detected="" body="" announced=0
+  while :; do
+    body="$(curl -sf -m 5 "${url%/}/v1/models" 2>/dev/null || true)"
+    if [[ -n "$body" ]]; then
+      detected="$(printf '%s' "$body" | python3 -c "import json,sys
 try:
     d = json.load(sys.stdin).get('data', [])
     print(d[0]['id'] if d else '')
 except Exception:
     print('')" 2>/dev/null || true)"
+      break
+    fi
+    (( SECONDS >= deadline )) && break
+    if (( ! announced )); then
+      echo "[autodetect] ${url%/}/v1/models not answering yet — waiting up to ${wait_s}s (PREFLIGHT_MODEL_WAIT_S=0 to skip)" >&2
+      announced=1
+    fi
+    sleep 1
+  done
+
   if [[ -n "$detected" ]]; then
     MODEL="$detected"
     echo "[autodetect] served model='${MODEL}' (from ${url%/}/v1/models; set MODEL= to override)" >&2
+    return 0
   fi
+  if [[ -z "$body" ]]; then
+    echo "[autodetect] ⚠ ${url%/}/v1/models UNREACHABLE — could not resolve MODEL" >&2
+    PREFLIGHT_MODEL_UNRESOLVED="unreachable"
+  else
+    echo "[autodetect] ⚠ ${url%/}/v1/models answered but reported NO model — could not resolve MODEL" >&2
+    PREFLIGHT_MODEL_UNRESOLVED="no-models"
+  fi
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# #1330: the last-resort literal, with the one case where it must NOT be used.
+#
+# Callers used to write `MODEL="${MODEL:-qwen3.6-27b}"` unconditionally right
+# after autodetect. Against a still-booting server that serves something else,
+# every request then 404s, and the output is indistinguishable from the thing
+# under test being broken. That cost a real detour: verify-full reported rc=8,
+# 8/8 failed, on a compose that passed 10/10 once the engine had loaded.
+#
+# The rule: a literal is a reasonable GUESS when we know nothing, and is never
+# right when we know better.
+#   endpoint UNREACHABLE  -> refuse. Nothing can work; say THAT instead of
+#                            inventing a model name to fail against.
+#   answered, no model, and we AUTODETECTED the container -> refuse. We know
+#                            which container is up; an unrelated literal is a
+#                            worse answer than an honest stop.
+#   answered, no model, user-supplied URL -> warn loudly, use the literal. Keeps
+#                            the BYO / llama.cpp case working (llama.cpp ignores
+#                            the request's model field entirely, #371).
+preflight_resolve_model_or_fail() {
+  local fallback="${1:?preflight_resolve_model_or_fail needs a fallback literal}"
+  [[ -n "${MODEL:-}" ]] && return 0
+  local why="${PREFLIGHT_MODEL_UNRESOLVED:-}"
+  if [[ "$why" == "unreachable" || ( "$why" == "no-models" && -n "${PREFLIGHT_ENDPOINT_AUTODETECTED:-}" ) ]]; then
+    echo "" >&2
+    echo "ERROR: could not resolve which model to request, and guessing would be worse." >&2
+    echo "  endpoint : ${URL:-<unset>}${CONTAINER:+  (container ${CONTAINER})}" >&2
+    if [[ "$why" == "unreachable" ]]; then
+      echo "  reason   : /v1/models is not answering — the server is still loading, or is not up." >&2
+      echo "  ⚠ This is NOT a failure of whatever you are testing. Falling back to" >&2
+      echo "    '${fallback}' here would 404 every request and look exactly like one (#1330)." >&2
+      echo "  fix      : wait for the engine to finish loading, then re-run. Watch it with" >&2
+      echo "               docker logs -f ${CONTAINER:-<container>}" >&2
+      echo "             A boot-time crash-loop shows up as a climbing RestartCount:" >&2
+      echo "               docker inspect ${CONTAINER:-<container>} --format '{{.RestartCount}}'" >&2
+    else
+      echo "  reason   : /v1/models answered but listed no model." >&2
+    fi
+    echo "  override : MODEL=<served-name> $(basename "${BASH_SOURCE[-1]:-this script}") …" >&2
+    echo "" >&2
+    return 1
+  fi
+  if [[ -n "$why" ]]; then
+    echo "[autodetect] falling back to MODEL='${fallback}' (${why}) — pin MODEL= if that is wrong" >&2
+  fi
+  MODEL="$fallback"
   return 0
 }
 
