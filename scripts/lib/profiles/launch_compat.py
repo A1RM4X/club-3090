@@ -190,53 +190,28 @@ def _entry_objects(entry: dict, profiles):
 # special-cased in `resolve_engine_pin` (they pin by SHA, not image tag).
 
 
-# --- #246 Phase 1: arch-aware KV dtype injection (pilot) ---------------------
-# The launchers export KV_CACHE_DTYPE for these slugs when the detected cards'
-# hardware profiles declare a different `kv_format_default.balanced` than the
-# variant's registry kv_format. Expand this set only after the cross-rig A/B
-# (issue #246 acceptance: >=15% on a volunteer 4090/5090, else close-with-data).
-ARCH_KV_PILOT_VARIANTS = frozenset({"vllm/dual", "vllm/minimal"})
-
-# The ONLY substitutions Phase 1 may make. Keyed by the variant's registry
-# kv_format; values are the hardware-profile targets allowed to replace it.
-# fp8_e5m2 -> fp8_e4m3 is the native-FP8-compute swap for sm_89+ cards.
-# Nothing else is injectable: 3090-class profiles declare balanced=fp8_e5m2
-# (the Ampere no-op is data equality), and their long_context default (TQ3)
-# is a Genesis-era format that must never reach stock composes.
-_ARCH_KV_ALLOWED = {"fp8_e5m2": frozenset({"fp8_e4m3"})}
-
-
-def _arch_aware_env(profiles, variant: str, entry: dict, gpu_spec: str,
-                    pin_exports: dict) -> dict[str, str]:
-    """Arch-aware env for a variant (#246 Phase 1). Empty dict = no injection
-    (compose ${VAR:-default} fallbacks apply, i.e. pre-#246 behavior)."""
-    if not gpu_spec or variant not in ARCH_KV_PILOT_VARIANTS:
-        return {}
-    allowed = _ARCH_KV_ALLOWED.get(entry.get("kv_format") or "")
-    if not allowed:
-        return {}  # quant-specific KV (int8-PTH, turbo, bf16, ...) — never override
-    # #1365: this used to read `{"VLLM_IMAGE","VLLM_NIGHTLY_SHA"} & set(pin_exports)`
-    # -- an IMPLICIT vLLM gate that inferred the engine family from which image var
-    # the pin channel happened to emit. It was silently coupled to an unrelated
-    # concern: the moment resolve_engine_pin stopped raising for non-vLLM engines,
-    # the set intersection would have gone on "working" while meaning something
-    # different. Ask the engine profile what family this is, and say so.
-    if _engine_type(profiles, entry) != "vllm":
-        return {}  # vLLM-family variants only; KV_CACHE_DTYPE is a vLLM knob
-    if os.environ.get("KV_CACHE_DTYPE"):
-        return {}  # an explicit user pin always wins
-    try:
-        hardware = _parse_gpu_specs(gpu_spec, profiles)
-    except LaunchCompatError:
-        return {}  # unmapped card -> compose defaults (today's behavior)
-    balanced = {hw.kv_format_default.get("balanced") for hw in hardware}
-    if len(balanced) != 1:
-        return {}  # heterogeneous rig -> no single right answer; don't guess
-    target = balanced.pop()
-    if (not target or target == entry["kv_format"] or target not in allowed
-            or not all(target in hw.supported_kv_formats for hw in hardware)):
-        return {}
-    return {"KV_CACHE_DTYPE": target}
+# --- #246 Phase 1 KV-dtype injection: RETIRED 2026-09-21 (#1371) --------------
+# `_arch_aware_env` + `ARCH_KV_PILOT_VARIANTS` + `_ARCH_KV_ALLOWED` lived here.
+# They upgraded a pilot slug's KV dtype fp8_e5m2 -> fp8_e4m3 on a card whose
+# balanced default was e4m3. Removed because the job is DONE, not because it
+# broke: ZERO of 138 registry slugs still declare `kv_format: fp8_e5m2`, so the
+# allow-map's only source key was orphaned and the function returned {} on every
+# card. The migration it automated was completed statically, in the composes.
+#
+# ⚠️ DO NOT REVIVE IT AS A CARD-KEYED MAP. What decides fp8_e4m3 KV on Ampere is
+# not the card class at all -- it is which ATTENTION BACKEND the checkpoint
+# routes to. fp8-weights / nvfp4 / bf16 / qwen3-next go to FlashInfer (native fp8
+# storage on sm_86, live-validated); gemma-style W4A16 goes to Triton, whose
+# fp8e4nv path needs SM89+ and fails at KV-init on the same stack. That rule is
+# already encoded, correctly, as `_fp8w_ampere_kv` in compat.py's C5 gate -- and
+# it is why the Ampere hardware profiles DELIBERATELY omit fp8_e4m3 from
+# `supported_kv_formats` (it keeps gemma rejected). A card-keyed injector is the
+# wrong shape for a backend-routing question and would have to fight that gate.
+#
+# The general lesson, which cost nine months of silence here: a map keyed on a
+# value ANOTHER FILE owns (the registry's `kv_format`) goes inert the moment that
+# file changes, and inert is indistinguishable from working. See
+# docs/DTYPE_MATRIX.md and learnings/ for the measured story.
 
 
 # --- #246 Phase 2: memory-envelope injection (concurrency-only first pass) ---
@@ -255,8 +230,6 @@ def _load_envelopes() -> dict:
         return doc.get("envelopes") or {}
     except (OSError, ImportError):
         return {}
-
-
 # #1361: the concurrency knob has a different SPELLING per engine. The quantity
 # is the same -- "how many sequences may run at once" -- but injecting vLLM's
 # name into an SGLang compose is a silent no-op: the compose reads
@@ -465,7 +438,6 @@ def resolve_variant_pin(profiles, variant: str, gpu_spec: str = "") -> dict[str,
     # #246: arch-aware env rides the same export channel as the image pin.
     # Only emitted when a gpu_spec is passed (launchers do; the registry-emit
     # baselines join calls without one and sees pins only).
-    exports.update(_arch_aware_env(profiles, variant, entry, gpu_spec, exports))
     exports.update(_envelope_env(profiles, variant, gpu_spec, entry))  # Phase 2 concurrency
     exports.update(_mem_util_env(profiles, variant, gpu_spec, entry))  # Phase 2 mem-fraction floor
     exports.update(_deepgemm_env(profiles, variant, entry, gpu_spec))  # fp8w consumer-Blackwell fix
