@@ -253,8 +253,13 @@ services:
       - '--autosplit-reserve'
       - '${RESERVE:-512}'
       - '${RESERVE:-512}'
-      # ⭐ TIER choice, not a tuning knob — see Caveats. 128 of 512 = 25% of
-      # experts CPU-resident, which is what this bit rate buys.
+      # ⭐ TIER choice, not a tuning knob — see Caveats. 144 of 512 = 28% of
+      # experts CPU-resident — the low share is why this tier is the fast one.
+      # ⚠️ This read "128 of 512 = 25%" until 2026-09-21 while the shipped default
+      # was already 144 (raised from 128 to reach 204800 ctx). Same staleness the
+      # 4.05 sibling had; both comments lagged a default that moved. Read the VALUE.
+      # ⚠️ The measured anchors in engines/exllamav3.yml ("25% -> 57.37 TPS") were
+      # taken at the OLD split/ctx pairing, so they describe 128, not the shipped 144.
       - '--cpu-moe-split-experts'
       - '${MOE_SPLIT:-144}'
       # 31 GB n-gram/PLE table into system RAM. Upstream default is to stream it
