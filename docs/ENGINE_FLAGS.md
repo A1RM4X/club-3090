@@ -2,7 +2,7 @@
 
 **What this is.** One table per engine family listing every engine flag our shipped composes actually pass, what the engine's *own* documentation says it does, how many registered slugs pass it (and through which `${ENV:-default}`), and — the column that did not exist anywhere before — whether the flag's validity or value depends on the detected card, and by which mechanism. Look things up here instead of re-deriving them from 138 composes.
 
-**Generated 2026-09-21** against commit `3126bc31` (`master` after #1368), `scripts/lib/profiles/compose_registry.py` = **138 curated slugs** (55 vLLM · 11 SGLang · 2 exllamav3 · 70 llama.cpp-family). Counts exclude `compose/_archive/`, the unregistered files under `models/*/sglang/` and `models/qwen3-omni-30b-a3b/vllm-omni/`, and the gitignored `profiles-local` layer. The in-flight, uncommitted #1365 work that was present in the working tree at generation time was **not** used as a source — this page describes what is committed.
+**Generated 2026-09-21** against commit `3126bc31` (`master` after #1368) — **§7 refreshed the same day against `4dc310a6`**, after #1369 and #1373 landed the injection work this page was written alongside; §§1–6 still describe `3126bc31`, `scripts/lib/profiles/compose_registry.py` = **138 curated slugs** (55 vLLM · 11 SGLang · 2 exllamav3 · 70 llama.cpp-family). Counts exclude `compose/_archive/`, the unregistered files under `models/*/sglang/` and `models/qwen3-omni-30b-a3b/vllm-omni/`, and the gitignored `profiles-local` layer. The in-flight, uncommitted #1365 work that was present in the working tree at generation time was **not** used as a source; it has since merged, and §7 is the only section it touched.
 
 **Upstream flag sets drift.** Every row carries a source tag (legend below). Where no authoritative source could be found the row says `UNVERIFIED` rather than guessing. A flag *we* pass that upstream does *not* document is reported as such — that is a finding, not an error to hide. Re-generate when an engine pin moves (`docs/UPSTREAM.md` tracks the pins).
 
@@ -287,28 +287,56 @@ Script-body artefacts excluded: `--model-draft`, `--spec-draft-n-min`, `--spec-d
 
 ## 7. Cross-engine summary — the intersection this page exists for
 
-Flags that are hardware-dependent in reality and hard-coded (or hard-tuned) in our composes at `3126bc31`:
+> **§7 refreshed 2026-09-21 against `4dc310a6`** (`master` after #1373); §§1–6 are still as generated at `3126bc31`. #1369 and #1373 landed between the two and changed exactly the rows below — nothing in §§1–6 moved, because none of it is about injection.
+
+Flags that are hardware-dependent in reality and hard-coded (or hard-tuned) in our composes:
 
 | Engine | Flag | Why it depends on the card | What adapts it today |
 |---|---|---|---|
-| vLLM | `--max-num-seqs` on 10 `LIT` slugs | KV pool ∝ VRAM | nothing (env var absent) |
+| vLLM | `--max-num-seqs` on 10 `LIT` slugs | KV pool ∝ VRAM | nothing (env var absent from those 10) |
 | vLLM | `--max-model-len` | KV pool ∝ VRAM | nothing (deferred by design) |
 | vLLM | `--max-num-batched-tokens`, `--long-prefill-token-threshold` | prefill activation peak vs free VRAM (`CLIFFS.md`) | nothing |
 | vLLM | `--kv-cache-memory-bytes` (3) | absolute bytes, overrides the fraction | nothing |
 | vLLM | `--attention-backend FLASH_ATTN` (7) | FA3 exists on sm_90 | nothing |
-| vLLM | `KV_CACHE_DTYPE` pilot | fp8_e4m3 compute on sm_89+ | wired, inert (allow-map keyed on `fp8_e5m2`) |
-| SGLang | `--tp-size`, `--disable-custom-all-reduce` (11 each) | card count; NVLink/P2P | nothing — no `${TP}`, no `detect_nvlink.sh` |
-| SGLang | `--mem-fraction-static`, `--max-running-requests`, `--context-length`, `--chunked-prefill-size` | VRAM | nothing reachable (injector gated out; wrong key for mem-fraction) |
-| exllamav3 | `--cpu-moe-split-experts` | it *is* a VRAM fit (#1360) | nothing (#1366 proposes the fit) |
+| vLLM | `KV_CACHE_DTYPE` pilot | fp8_e4m3 compute on sm_89+ | **wired, inert on every card** — the allow-map is keyed on `fp8_e5m2` and both pilots now register `fp8_e4m3`. Not drift: the migration it automated was completed *statically in the composes*. Retire or repoint → **#1371** |
+| SGLang | `--tp-size`, `--disable-custom-all-reduce` (11 each) | card count; NVLink/P2P | nothing — no `${TP}`, no `detect_nvlink.sh`. An NVLink rig runs SGLang with the kernel off |
+| SGLang | `--mem-fraction-static` | VRAM, but **not the same quantity as vLLM's utilisation** (static weights+KV share vs total-VRAM budget) | ✅ **`MEM_FRACTION`, reachable since #1369** and keyed per engine type, so vLLM's spelling can never land here. Fires on 6 slugs on unified-memory cards. ⚠️ the value is the card's own `mem_util_safe` ceiling, downward-only — **unvalidated on SGLang** (no sgl soak at a clamped fraction) |
+| SGLang | `--max-running-requests` | VRAM | key mapping exists (`MAX_RUNNING_REQUESTS`, #1362) and the launcher accepts it, but **inert: no `envelopes.yml` row for any sgl slug**. Do not add one from a vLLM measurement — envelopes require a `validated` or `computed` basis |
+| SGLang | `--context-length`, `--chunked-prefill-size` | VRAM | nothing |
+| exllamav3 | `--cpu-moe-split-experts` | it *is* a VRAM fit (#1360) | ✅ **`resolve_cpu_moe_split` (#1373)** — a fit, not a fraction, from the safetensors tensor table + a calibrated per-card reserve. ⚠️ one calibration point per tier, so other rigs are labelled extrapolations at boot |
 | exllamav3 | `--autosplit-reserve` ×2 entries | per-GPU list | nothing — 2-card literal |
 | llama.cpp | `-c`, `-ub`, `-b` on offload slugs | KV + compute buffer share VRAM with the expert cache | nothing |
 | llama.cpp | `-ts` even splits (15 `LIT`) | mismatched VRAM | advisory only |
 | llama.cpp | `-devd CUDA1` (18) | needs a second card | nothing |
-| club3090 | `GGML_CUDA_MOE_CACHE_RESERVE_MB` | allocator working room ∝ card | `_moe_cache_env` exists, unreachable |
+| club3090 | `GGML_CUDA_MOE_CACHE_RESERVE_MB` | allocator working room ∝ card | ✅ **`MOE_RESERVE_MB`, reachable since #1369** — 22 moe-cache slugs above 24 GB. ⚠️ upward-only **safety heuristic, not a tuned optimum**: measured on 24 GB Ampere only, and it preserves the reference rig's reserve/VRAM ratio. The boot line says so |
 | all | `THREADS` = `nproc/2` | CPU count (documented optimum is absolute 24-32) | `resolve_offload_threads` (a floor) |
 
-And what **does** adapt, for contrast: `--disable-custom-all-reduce` (vLLM, boot-detect), `-ot` residency slots on 10 slugs (free-VRAM fit), `MAX_NUM_SEQS` on 5 vLLM slugs × 4 card classes, `GPU_MEMORY_UTILIZATION` on DGX Spark, `VLLM_USE_DEEP_GEMM` on sm 8.9/12.x, the ik-llama cu12 image swap, `--fit`/`--gpu-split-auto`/`--moe-cache auto` inside the engines, and every SM-floor refusal.
+### Injection reach, measured on `4dc310a6`
 
-Open issues touching these rows: #1361 (injection reach), #1363 (matrix guard), #1364 (detector VRAM collapse — fixed in #1368, the commit this page is anchored to), #1365 (image pin vs injection — in flight), #1366 (exl3 `MOE_SPLIT` as a fit).
+`resolve_variant_pin` is now **total: 138 of 138 slugs resolve, 0 raise** (it was 65 reachable / 73 raising at `3126bc31`, because the launchers gated the whole call behind a `vllm/*｜beellama/*` prefix test). Slugs receiving at least one **non-image** env, by rig:
 
-**Pin-drift findings surfaced while sourcing rows** (not hardware, but the same "we pass it, does the pinned engine still take it?" question): `--no-mmap` rejected by the mainline b10920 pin on 3 `llamacpp/deepseek-flash-*` slugs (§6 headline, boot-blocking); `--prefix-match-unit` exists only from v0.29.0 (§3, safe today); `--kv-cache-dtype int8_per_token_head` is overlay-supplied, not stock (§3); `VLLM_ATTENTION_BACKEND` is not read by v0.29.0 (§3d); `--spec-dflash-cross-ctx` is gone from beellama HEAD but present at the pinned commit (§6b); the registry's `max_num_seqs`/`mem_util` disagree with what 10 SGLang composes ship (§4). None of these has a tracker row yet.
+| Rig | Slugs | Keys |
+|---|--:|---|
+| 2×3090 | 2 | `GPU_MEMORY_UTILIZATION`, `DECODE_GRANULARITY` |
+| 2×5090 | 46 | `MOE_RESERVE_MB` 22 · `VLLM_USE_DEEP_GEMM` 22 · `MAX_NUM_SEQS` 2 · `DECODE_GRANULARITY` 1 |
+| 2×A6000 | 27 | `MOE_RESERVE_MB` 22 · `MAX_NUM_SEQS` 3 · `GPU_MEMORY_UTILIZATION` 1 · `DECODE_GRANULARITY` 1 |
+| 2×H100 | 23 | `MOE_RESERVE_MB` 22 · `DECODE_GRANULARITY` 1 |
+| DGX Spark | 82 | `GPU_MEMORY_UTILIZATION` 49 · `MOE_RESERVE_MB` 22 · `VLLM_USE_DEEP_GEMM` 22 · `MEM_FRACTION` 6 · `MAX_NUM_SEQS` 1 · `DECODE_GRANULARITY` 1 |
+
+⭐ **The reference rig is the one that gets almost nothing**, which is the honest reading of these numbers: the knobs were tuned *on* 2×24 GB Ampere, so there is nothing to correct there. Everything above is the correction other hardware was silently not getting. Verified additive across 966 (slug, rig) pairs before/after the flip — nothing removed, no pre-existing value changed, and the effective *image* byte-identical for all 138 slugs.
+
+### What **does** adapt, for contrast
+
+`--disable-custom-all-reduce` (vLLM, boot-detect) · `-ot` residency slots on 10 slugs (free-VRAM fit) · `--cpu-moe-split-experts` (exl3 VRAM fit) · `MOE_RESERVE_MB` on 22 moe-cache slugs above 24 GB · `MAX_NUM_SEQS` / `MAX_RUNNING_REQUESTS` per engine dialect · `GPU_MEMORY_UTILIZATION` / `MEM_FRACTION` downward on unified-memory cards · `VLLM_USE_DEEP_GEMM` on sm 8.9/12.x · the ik-llama cu12 image swap · `--fit` / `--gpu-split-auto` / `--moe-cache auto` inside the engines · every SM-floor refusal.
+
+### Tracker state
+
+| Issue | State |
+|---|---|
+| #1361 injection reach (umbrella) · #1363 matrix guard · #1364 detector VRAM · #1365 image pin vs injection · #1366 exl3 `MOE_SPLIT` fit | ✅ all closed — merged as #1367, #1368, #1369, #1373 |
+| **#1370** `--no-mmap` boot-blocks 3 `llamacpp/deepseek-flash-*` slugs | 🔴 open |
+| **#1371** `KV_CACHE_DTYPE` pilot inert on every card | 🟡 open |
+
+**Pin-drift findings surfaced while sourcing rows** (not hardware, but the same "we pass it, does the pinned engine still take it?" question): `--no-mmap` rejected by the mainline b10920 pin on 3 `llamacpp/deepseek-flash-*` slugs (§6 headline, boot-blocking — now **#1370**, reproduced against the pinned digest with `--load-mode` as a positive control); `--prefix-match-unit` exists only from v0.29.0 (§3, safe today); `--kv-cache-dtype int8_per_token_head` is overlay-supplied, not stock (§3); `VLLM_ATTENTION_BACKEND` is not read by v0.29.0 (§3d); `--spec-dflash-cross-ctx` is gone from beellama HEAD but present at the pinned commit (§6b); the registry's `max_num_seqs`/`mem_util` disagree with what 10 SGLang composes ship (§4). Only the first has a tracker row.
+
+⚠️ **This section will rot the same way the rows above did.** It describes *injection*, which changes whenever a resolver or a launcher gate does — unlike §§1–6, which change only when an engine pin moves. Re-derive the reach table with `resolve_variant_pin` across the registry rather than trusting the numbers here.
