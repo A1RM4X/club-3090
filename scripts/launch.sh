@@ -1229,6 +1229,17 @@ export_variant_engine_pin() {
           export MAX_NUM_SEQS="$value"
           echo "[launch] memory-envelope concurrency: MAX_NUM_SEQS=${value} (measured for this card class — #246 Phase 2)"
         fi ;;
+      MAX_RUNNING_REQUESTS)
+        # SGLang's spelling of the same quantity (#1361). The envelope injector
+        # emits the engine family's own knob name; without this arm the `*)` below
+        # turns the first sglang envelope row into `exit 2`, i.e. an unlaunchable
+        # slug rather than a no-op. Caught by the #1363 matrix guard's static check.
+        if [[ -n "${MAX_RUNNING_REQUESTS:-}" ]]; then
+          echo "[launch] MAX_RUNNING_REQUESTS: keeping your value ${MAX_RUNNING_REQUESTS} (hardware profile suggested ${value})" >&2
+        else
+          export MAX_RUNNING_REQUESTS="$value"
+          echo "[launch] memory-envelope concurrency: MAX_RUNNING_REQUESTS=${value} (#246 Phase 2, sglang)"
+        fi ;;
       GPU_MEMORY_UTILIZATION)
         # #246 arch-aware default — but a value the USER set WINS, matching the .env
         # precedence rule earlier in this script. An unconditional export silently
