@@ -264,9 +264,17 @@ services:
       - '--autosplit-reserve'
       - '${RESERVE:-512}'
       - '${RESERVE:-512}'
-      # ⭐ TIER choice, not a tuning knob — see Caveats. 225 of 512 = 44% of
-      # experts CPU-resident — nearly double the 3.05 sibling's CPU share, which
+      # ⭐ TIER choice, not a tuning knob — see Caveats. 256 of 512 = 50% of
+      # experts CPU-resident — about double the 3.05 sibling's CPU share, which
       # is the whole reason this tier is ~18% slower.
+      # ⚠️ This read "225 of 512 = 44%" until 2026-09-21 while the shipped default
+      # was already 256. Stale by a tier revision, and it misled a diagnosis on
+      # #1360 — the comment said 44%, the VALUE says 50%. Read the value.
+      # ⚠️⚠️ 50% is AT this engine's own rejection threshold: engines/exllamav3.yml
+      # says "over ~50% the model belongs on an engine with a real expert cache".
+      # And it is an absolute expert COUNT calibrated on 2×24 GB, so a larger card
+      # inherits it unchanged and strands the extra VRAM instead of using it
+      # (#1360 on 2×32 GB; #1361 tracks making this hardware-derived).
       - '--cpu-moe-split-experts'
       - '${MOE_SPLIT:-256}'
       # 31 GB n-gram/PLE table into system RAM. Upstream default is to stream it
