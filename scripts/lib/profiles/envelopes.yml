@@ -86,6 +86,11 @@ envelopes:
       max_num_seqs: 5          # 2 -> 5 concurrent full-262K sessions on 2x48 GB
       compose_default: 2
       computed:
+        # #1364: this row became REACHABLE when the detector learned rtx-a6000.
+        # Its basis says plainly it is NOT kv-calc, while the schema defines
+        # `computed` as the kv-calc ceiling -- so the label was wrong even while
+        # the row was dead. Named honestly rather than silently activated.
+        method: measured-pool-scaling
         basis: "scaled from the MEASURED 3090 pool, not kv-calc: 48 GB x 0.90 = 43.2 GiB/card claimed, minus 9.1 GiB/card weights (18.23 GiB INT4 at TP=2) minus ~2.5 GiB/card residual = ~31.6 GiB/card pool = ~63 GiB total = ~2.07M tok = 7.9 full-262K sessions; seeded at 75%."
         target_ctx: 262144
         date: 2026-08-16
@@ -96,6 +101,11 @@ envelopes:
       max_num_seqs: 13         # 2 -> 13 concurrent full-262K sessions on 4x48 GB
       compose_default: 2
       computed:
+        # #1364: this row became REACHABLE when the detector learned rtx-a6000.
+        # Its basis says plainly it is NOT kv-calc, while the schema defines
+        # `computed` as the kv-calc ceiling -- so the label was wrong even while
+        # the row was dead. Named honestly rather than silently activated.
+        method: measured-pool-scaling
         basis: "same method as the dual row: ~4.6 GiB/card weights at TP=4 leaves ~36.1 GiB/card pool = ~144 GiB total = ~4.73M tok = 18.1 full-262K sessions; seeded at 75%."
         target_ctx: 262144
         date: 2026-08-16
@@ -106,6 +116,11 @@ envelopes:
       max_num_seqs: 14         # 2 -> 14 on 8x48 GB -- NOT double the multi4 row
       compose_default: 2
       computed:
+        # #1364: this row became REACHABLE when the detector learned rtx-a6000.
+        # Its basis says plainly it is NOT kv-calc, while the schema defines
+        # `computed` as the kv-calc ceiling -- so the label was wrong even while
+        # the row was dead. Named honestly rather than silently activated.
+        method: measured-pool-scaling
         basis: "~2.3 GiB/card weights at TP=8 leaves ~38.4 GiB/card, but num_kv_heads=4 < 8 so KV heads REPLICATE across rank pairs: the effective pool is ~4x per-card, NOT 8x. ~154 GiB total = ~5.03M tok = 19.2 full-262K sessions; seeded at 75%."
         target_ctx: 262144
         date: 2026-08-16

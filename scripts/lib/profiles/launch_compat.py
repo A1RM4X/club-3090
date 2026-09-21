@@ -72,6 +72,12 @@ def _hardware_id_from_gpu(name: str, mem_mib: int, sm: float) -> str:
         ("5090", "rtx-5090"),
         ("rtx a5000", "rtx-a5000"),
         ("a5000", "rtx-a5000"),
+        # #1364: the rtx-a6000 profile (48 GB, sm_8.6) existed with three
+        # envelopes.yml rows but NO alias, and the sm_8.6 fallback below returned
+        # rtx-3090 for anything >=24 GB -- so the detector could never produce the
+        # id and those rows could never fire.
+        ("rtx a6000", "rtx-a6000"),
+        ("a6000", "rtx-a6000"),
         ("rtx 3060", "rtx-3060-12gb"),
         ("3060", "rtx-3060-12gb"),
         ("a100", "a100-40gb"),
@@ -96,12 +102,27 @@ def _hardware_id_from_gpu(name: str, mem_mib: int, sm: float) -> str:
         return "h100-80gb"
     if sm >= 8.9 and vram_gb >= 24:
         return "rtx-4090"
+    # #1364: sm_8.6 splits by VRAM, largest-first. This branch used to return
+    # rtx-3090 for ANY >=24 GB Ampere, i.e. a 48 GB card resolved to the 24 GB
+    # profile -- a VRAM-keyed envelope table sitting on a detector that discarded
+    # VRAM above the floor, which is exactly the "same arch, more VRAM" case
+    # #1360 hit.
+    if 8.55 <= sm <= 8.65 and vram_gb >= 44:
+        return "rtx-a6000"
     if 8.55 <= sm <= 8.65 and vram_gb >= 24:
         return "rtx-3090"
     if 7.9 <= sm <= 8.1 and vram_gb >= 40:
         return "a100-40gb"
     if 8.55 <= sm <= 8.65 and 11 <= vram_gb <= 13:
         return "rtx-3060-12gb"
+    # ⚠️ DELIBERATE UNDER-PROMISE, not an oversight. Cards with no exact profile
+    # fall to the largest SMALLER profile in their SM family:
+    #     RTX 6000 Ada / L40S (48 GB, sm_8.9) -> rtx-4090 (24 GB)
+    #     A100-80GB           (80 GB, sm_8.0) -> a100-40gb
+    # That is conservative in the safe direction -- an envelope row sized for the
+    # smaller card fits the bigger one; the reverse would not. It costs headroom,
+    # never stability. Add a profile (and rows) to claim it; do NOT widen a
+    # fallback to a LARGER profile than the card actually has.
     raise LaunchCompatError(
         f"could not map GPU `{name}` ({vram_gb} GB, sm_{sm:g}) to a hardware profile"
     )
