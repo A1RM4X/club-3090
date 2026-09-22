@@ -531,6 +531,57 @@ ENABLE_THINKING=1 bash scripts/bench.sh
 
 If `/props` or the running container suggests reasoning is enabled but the wrapper is not forcing thinking on globally, `quality-test.sh` / `bench.sh` print a warning; pack defaults still apply, and `--enable-thinking` forces every pack on. `--thinking-max-tokens` now passes through independently and only affects packs whose thinking gate resolves on. The default is 16K; hard LiveCodeBench items may still exhaust that budget, so compare with `benchlocal-cli run --reasoning --no-thinking` when diagnosing budget runaway.
 
+#### Bounding runaway reasoning — `--thinking-budget N` (opt-in, [#1383](https://github.com/noonghunna/club-3090/issues/1383))
+
+A thinking model can reason until the per-case wall clock: on a MiMo-V2.6-9B thinking-on 8-pack, 2 of the
+first 7 scenarios hit the 900 s cap and scored `timeout fail` — a harness artifact that lands in the score as
+a capability miss. `--thinking-budget N` bounds the *reasoning* at N tokens in whatever spelling the serving
+engine uses, and **verifies the budget can take effect before running**. It is opt-in and never a default:
+every published BENCHMARKS row was measured unbounded, and a default would silently break comparability with
+all of them.
+
+| engine | server prerequisite (boot) | what the wrapper sends | how it verifies |
+|---|---|---|---|
+| llama.cpp | `--reasoning-budget N` — the shipped composes read `REASONING_BUDGET=N` | nothing (server-wide) | `docker inspect` of the serving container, resolving the flag's **value** through the container env. The composes always emit `--reasoning-budget "${REASONING_BUDGET:--1}"`, so a *present* flag with the env unset boots **unbounded (-1)** — presence proves nothing, the value must be exactly N. |
+| vLLM v0.29.0 | `--reasoning-parser <name>` | `thinking_token_budget: N` (via benchlocal's `--extra-body`) | the container command carries a parser — without one vLLM rejects the field per request, so every scenario would 400 |
+| SGLang v0.5.20 | `--enable-custom-logit-processor` | `custom_logit_processor` (the model-specific `ThinkingBudgetLogitProcessor` subclass, chosen from the server's reasoning parser: qwen3 / qwen3-thinking / glm45 / deepseek-r1) + `custom_params.thinking_budget` | `/server_info` readback first, container command second |
+
+Refusals are loud and carry the fix — a budget that is accepted and ignored is worse than none, because
+success is then indistinguishable from failure. Positive evidence that the budget would *not* take effect is
+never bypassed. When there is **no** evidence at all (no container, no readback) the wrapper refuses too;
+`THINKING_BUDGET_UNVERIFIED=1` runs anyway and labels the run unverified.
+
+Two things the flag does that a bare engine flag does not:
+
+1. **The matched client cap.** A reasoning cap alone *relocates* the overrun: with `--reasoning-budget 8192`
+   and no total cap, one request still reached 13,238 tokens — reasoning stopped at 8192 and the model
+   rambled on in content. The wrapper derives `--thinking-max-tokens` = N + `THINKING_BUDGET_HEADROOM`
+   (default 4096) unless you set one *above* N; a cap at or below N is refused (no answer headroom). Note
+   that `--thinking-max-tokens` overrides `--max-tokens` on thinking-enabled packs, so `--max-tokens` alone
+   never caps them.
+2. **Per pack class.** `hermesagent-20` and `aider-polyglot-30` make their model calls from an agent *inside*
+   the sandbox. A server-wide budget (llama.cpp) governs those calls for free; a per-request budget (vLLM /
+   SGLang) never crosses the sandbox protocol, so those packs would run unbounded while every other pack was
+   bounded. On vLLM / SGLang a selection that includes them is refused — drop them (`--no-sandboxed`, or
+   `--pack <id>` per pack) or serve on llama.cpp.
+
+```bash
+# llama.cpp: the budget is a BOOT flag — set it, reboot, then run
+REASONING_BUDGET=8192 bash scripts/switch.sh --force <slug>
+bash scripts/quality-test.sh --full --enable-thinking --sampling-from-server --thinking-budget 8192
+#   → verifies the container resolves --reasoning-budget 8192, caps at 12288 total,
+#     hermesagent-20 governed by the boot flag
+
+# vLLM: per-request — needs --reasoning-parser at boot; the in-sandbox agentic packs must be out
+bash scripts/quality-test.sh --full --no-sandboxed --enable-thinking --thinking-budget 8192
+```
+
+Reading a bounded run: a capped scenario still fails — as `token_limit` rather than `timeout` — so the budget
+bounds cost and makes wall-time estimable; it does not rescue a score. The latency distribution under a budget
+is bimodal (either well under the cap or pinned exactly at it), which is itself a diagnostic that the
+unbounded run destroys. Reporting `token_limit` / `timeout` apart from `verifier_fail` is
+noonghunna/benchlocal-cli#148.
+
 **Why it matters:** a reasoning / exploratory fine-tune (e.g. Qwopus3.6, whose author recommends temp 0.75–1) is *under-represented* at temp 0 or with thinking disabled — greedy, thinking-off decoding collapses the path-exploration the fine-tune was trained for. But high temp and reasoning also *hurt* deterministic packs (DataExtract / StructOutput want exact, repeatable output), so read **per-pack deltas**, not just the total — and keep canonical temp-0 thinking-off as the bar for any apples-to-apples ranking.
 
 ## Compose `Quality:` schema field

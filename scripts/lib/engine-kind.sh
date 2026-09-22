@@ -27,6 +27,7 @@
 #   engine_kind_from_container   <container name>             e.g. sglang-qwen38
 #   engine_kind_from_image       <docker image ref>           e.g. lmsysorg/sglang:v0.5.19
 #   engine_kind_from_fingerprint <system_fingerprint>         e.g. b10920-4df29be4f
+#   engine_kind_from_owned_by    </v1/models owned_by>        e.g. llamacpp
 #   engine_kind_from_slug        <catalog slug>               e.g. sgl/qwen38-27b-dual-max
 #
 # python3 here must not be locale-coerced (#779): a UTF-8 slug or engine id
@@ -98,6 +99,23 @@ engine_kind_from_fingerprint() {
     sglang-*) echo "sglang" ;;
     b[0-9]*)  echo "llamacpp" ;;
     *)        echo "unknown" ;;
+  esac
+  return 0
+}
+
+# OpenAI `/v1/models` → `data[0].owned_by`. A METADATA fingerprint: unlike
+# `system_fingerprint` it costs no completion, so it is usable while the GPU
+# is busy or before any request is sent. llama.cpp answers "llamacpp", SGLang
+# "sglang", vLLM "vllm", tabbyAPI "tabbyAPI". A proxy (LiteLLM) or cloud
+# endpoint answers something else, and callers must treat that "unknown" as
+# "cannot tell", not as any particular engine (#1383).
+engine_kind_from_owned_by() {
+  case "${1,,}" in
+    vllm*)                               echo "vllm" ;;
+    sglang*)                             echo "sglang" ;;
+    tabby*|exllama*)                     echo "exllamav3" ;;
+    llamacpp*|llama.cpp*|llama-cpp*)     echo "llamacpp" ;;
+    *)                                   echo "unknown" ;;
   esac
   return 0
 }

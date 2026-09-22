@@ -144,6 +144,34 @@ OPTIONS (extra)
                    (finish_reason=length) before emitting its final answer; the
                    thinking arm still uses --thinking-max-tokens if that is set.
                    Also settable via MAX_TOKENS env.
+  --thinking-budget N
+                   OPT-IN (never a default — every published BENCHMARKS row
+                   was measured unbounded). Bound the model's REASONING to N
+                   tokens in whatever spelling the serving engine uses, and
+                   VERIFY it can take effect before running — refusing with
+                   the fix when it cannot (#1383):
+                     llama.cpp  boot flag --reasoning-budget N — the running
+                                server must already carry EXACTLY N (the
+                                shipped composes read REASONING_BUDGET=N);
+                                a present-but-unset flag boots -1 = unbounded
+                     vLLM       per-request thinking_token_budget; needs the
+                                server booted with --reasoning-parser
+                     SGLang     per-request custom_logit_processor +
+                                custom_params.thinking_budget; needs the
+                                server booted with --enable-custom-logit-processor
+                   Also derives the matching client cap: --thinking-max-tokens
+                   = N + THINKING_BUDGET_HEADROOM (default 4096) unless you set
+                   one above N. A reasoning cap alone RELOCATES the overrun
+                   into content (measured: 8192 budget, no total cap → one
+                   request still reached 13,238 tokens).
+                   Checked PER PACK CLASS: on vLLM/SGLang the selection may
+                   not include hermesagent-20 / aider-polyglot-30 — their
+                   agent runs inside the sandbox and makes its own model
+                   calls, which a per-request budget never reaches. On
+                   llama.cpp the boot flag governs them for free.
+                   Also settable via THINKING_BUDGET env. Verification is
+                   docker-inspect / server-readback based; when NO evidence is
+                   available it refuses unless THINKING_BUDGET_UNVERIFIED=1.
   --retry-runaways
                    Forward to benchlocal-cli --retry-runaways: ALSO retry
                    timeout / token_limit runaway failures. **Default OFF** —
@@ -203,6 +231,20 @@ ENV VARS
                    (--max-tokens) for BOTH arms — overrides the per-pack ~1024
                    default. Raise for verbose models that self-truncate the
                    deterministic packs. --max-tokens is equivalent.
+  THINKING_BUDGET  Equivalent to --thinking-budget N (opt-in reasoning budget,
+                   verified per engine and per pack class).
+  THINKING_BUDGET_HEADROOM
+                   Answer tokens added to the budget when deriving
+                   --thinking-max-tokens (default 4096).
+  THINKING_BUDGET_UNVERIFIED
+                   Set to 1 to run --thinking-budget when NO evidence about the
+                   server is available (no container, no readback). Positive
+                   evidence that the budget would not take effect is never
+                   bypassed. The run is labelled unverified.
+  THINKING_BUDGET_SGLANG_PROCESSOR
+                   SGLang only: the ThinkingBudgetLogitProcessor subclass to
+                   send when the server's reasoning parser is not one the
+                   wrapper maps (qwen3 / qwen3-thinking / glm45 / deepseek-r1).
 
 EXAMPLES
   bash scripts/quality-test.sh                          # --medium against running compose
@@ -215,6 +257,10 @@ EXAMPLES
   bash scripts/quality-test.sh --full --no-thinking -- --retry-runaways --strict-thinking
                                        # 8-pack, pass benchlocal-cli flags the wrapper
                                        # doesn't name (everything after `--`)
+  REASONING_BUDGET=8192 bash scripts/switch.sh --force <llama.cpp slug>   # boot with the budget
+  bash scripts/quality-test.sh --full --enable-thinking --thinking-budget 8192
+                                       # bounded thinking-on 8-pack: verifies the
+                                       # server carries 8192, caps at 12288 total
 
 INSTALL benchlocal-cli (one-time)
   pip install git+https://github.com/noonghunna/benchlocal-cli.git
@@ -302,6 +348,9 @@ NO_THINKING="${NO_THINKING:-0}"
 REASONING_EFFORT="${REASONING_EFFORT:-}"
 THINKING_MAX_TOKENS="${THINKING_MAX_TOKENS:-}"
 MAX_TOKENS="${MAX_TOKENS:-}"
+# #1383: opt-in reasoning budget, resolved per engine and VERIFIED before the
+# run. Empty = no budget = the unbounded baseline every published row used.
+THINKING_BUDGET="${THINKING_BUDGET:-}"
 # #252: passthroughs to benchlocal-cli for the quality-baseline corpus —
 # --repeat (n>=3 aggregate), --previous-result (diff vs a baseline), and a
 # --save-json override (write the run to an explicit path, e.g. a baseline file).
@@ -443,6 +492,16 @@ while [[ $# -gt 0 ]]; do
       fi
       shift 2
       ;;
+    --thinking-budget)
+      THINKING_BUDGET="${2:-}"
+      # ≥ 1: 0 is "no reasoning", which is --no-thinking's job, and llama.cpp's
+      # -1 is "unbounded", which is the default this flag exists to leave.
+      if [[ -z "$THINKING_BUDGET" ]] || ! [[ "$THINKING_BUDGET" =~ ^[1-9][0-9]*$ ]]; then
+        echo "✗ --thinking-budget requires a positive integer (reasoning tokens)" >&2
+        exit 2
+      fi
+      shift 2
+      ;;
     --repeat)
       REPEAT="${2:-}"
       if [[ -z "$REPEAT" ]] || ! [[ "$REPEAT" =~ ^[0-9]+$ ]]; then
@@ -574,6 +633,7 @@ if [[ -n "$RESUME" ]]; then
   if [[ "$ENABLE_THINKING" == "1" ]]; then _resume_conflicts+=(--enable-thinking); fi
   if [[ "$NO_THINKING" == "1" ]]; then _resume_conflicts+=(--no-thinking); fi
   if [[ -n "$THINKING_MAX_TOKENS" ]]; then _resume_conflicts+=(--thinking-max-tokens); fi
+  if [[ -n "$THINKING_BUDGET" ]]; then _resume_conflicts+=(--thinking-budget); fi
   if [[ -n "$MAX_TOKENS" ]]; then _resume_conflicts+=(--max-tokens); fi
   if [[ "$SAMPLING_FROM_SERVER" == "1" ]]; then _resume_conflicts+=(--sampling-from-server); fi
   if [[ ${#_resume_conflicts[@]} -gt 0 ]]; then
@@ -776,6 +836,145 @@ if [[ ${#SCENARIOS[@]} -gt 0 || -n "$SCENARIOS_FILE" ]]; then
   fi
   if command grep -qE '^(bugfind-15|cli-40|hermesagent-20)/' <<<"$_sel_lines"; then
     SELECTION_HAS_SANDBOX=1
+  fi
+fi
+
+# ---- #1383: --thinking-budget — resolve the engine's spelling, then VERIFY ----
+# OPT-IN, never a default: every published BENCHMARKS row was measured
+# unbounded, and a default would silently break comparability with all of them.
+#
+# Verification IS the feature. llama.cpp's budget is a boot flag the harness
+# cannot set per request — and the shipped composes always emit
+# `--reasoning-budget "${REASONING_BUDGET:--1}"`, so the flag being PRESENT
+# proves nothing; only its resolved VALUE does. vLLM v0.29.0 and SGLang v0.5.20
+# reject the per-request field outright when their prerequisite is missing, so
+# an unverified run would 400 on every scenario. Either way the run is not
+# what it claims to be, so the wrapper reads the evidence first and refuses
+# with the fix when it does not hold. Mechanism, evidence rules and the
+# per-engine request shapes: scripts/lib/thinking-budget.sh.
+THINKING_BUDGET_EXTRA_BODY=""
+THINKING_MAX_TOKENS_DERIVED=0
+if [[ -n "$THINKING_BUDGET" ]]; then
+  # shellcheck source=lib/thinking-budget.sh
+  source "${ROOT_DIR}/scripts/lib/thinking-budget.sh"
+  _tb_kind="$(thinking_budget_engine_kind)"
+  if [[ "$_tb_kind" == "unknown" ]]; then
+    echo "✗ --thinking-budget ${THINKING_BUDGET}: cannot tell which engine family is serving ${URL} (container='${CONTAINER:-unset}')" >&2
+    echo "  The budget's spelling AND its verification are per engine, so an unknown engine is a refusal, not a guess." >&2
+    thinking_budget_fix_hint unknown "$THINKING_BUDGET" >&2
+    exit 2
+  fi
+  _tb_rc=0
+  thinking_budget_verify "$_tb_kind" "$THINKING_BUDGET" || _tb_rc=$?
+  case "$_tb_rc" in
+    0) ;;
+    1)
+      echo "✗ --thinking-budget ${THINKING_BUDGET}: the budget would NOT take effect on this ${_tb_kind} server — refusing to run something that would only LOOK bounded" >&2
+      echo "  Evidence: ${THINKING_BUDGET_EVIDENCE}" >&2
+      thinking_budget_fix_hint "$_tb_kind" "$THINKING_BUDGET" >&2
+      exit 2
+      ;;
+    *)
+      if [[ "${THINKING_BUDGET_UNVERIFIED:-0}" == "1" ]]; then
+        echo "[quality-test] ⚠  THINKING BUDGET UNVERIFIED (THINKING_BUDGET_UNVERIFIED=1): ${THINKING_BUDGET_EVIDENCE}" >&2
+        echo "               Proceeding on your word that this ${_tb_kind} server carries its prerequisite. If it does not," >&2
+        echo "               the run is unbounded or every scenario fails, and nothing downstream will say which." >&2
+        THINKING_BUDGET_EVIDENCE="UNVERIFIED — asserted by the operator via THINKING_BUDGET_UNVERIFIED=1"
+      else
+        echo "✗ --thinking-budget ${THINKING_BUDGET}: cannot verify the budget can take effect on this ${_tb_kind} server" >&2
+        echo "  ${THINKING_BUDGET_EVIDENCE}" >&2
+        echo "  A budget that is accepted and ignored is worse than none — success would be indistinguishable from failure." >&2
+        echo "  Point the harness at the serving container (CONTAINER=<name>); or, if you KNOW the server carries the" >&2
+        echo "  prerequisite, say so explicitly with THINKING_BUDGET_UNVERIFIED=1 (the run is then labelled unverified)." >&2
+        thinking_budget_fix_hint "$_tb_kind" "$THINKING_BUDGET" >&2
+        exit 2
+      fi
+      ;;
+  esac
+
+  # Pack class 2 — the sandboxed AGENTIC packs. Their model calls are made by
+  # an agent INSIDE the sandbox container, not by benchlocal's runner. A
+  # server-wide budget (llama.cpp) governs those calls for free; a per-request
+  # budget (vLLM/SGLang) never reaches them — the sandbox protocol forwards
+  # sampling and the token cap, not extra_body — so they would run UNBOUNDED
+  # while every other pack was bounded. That is exactly the silent partial this
+  # flag exists to prevent, so it is a refusal, not a footnote.
+  _tb_agentic=()
+  if [[ "$SANDBOXED_ONLY" == "1" ]]; then
+    _tb_agentic+=(hermesagent-20)
+  elif [[ -n "$PACK" ]]; then
+    for _p in $THINKING_BUDGET_AGENTIC_PACKS; do
+      if [[ "$PACK" == "$_p" ]]; then _tb_agentic+=("$_p"); fi
+    done
+  elif [[ -n "${_sel_lines:-}" ]]; then
+    for _p in $THINKING_BUDGET_AGENTIC_PACKS; do
+      if command grep -qE "^${_p}/" <<<"$_sel_lines"; then _tb_agentic+=("$_p"); fi
+    done
+  elif [[ "$MODE" == "--full" && "$NO_SANDBOX" != "1" ]]; then
+    _tb_agentic+=(hermesagent-20)
+  fi
+  if [[ ${#_tb_agentic[@]} -gt 0 && "$_tb_kind" != "llamacpp" ]]; then
+    echo "✗ --thinking-budget on ${_tb_kind}: the selection includes ${_tb_agentic[*]}, whose model calls are made by an agent INSIDE the sandbox" >&2
+    echo "  A per-request ${_tb_kind} budget does not cross the sandbox protocol, so those packs would run UNBOUNDED while" >&2
+    echo "  every other pack was bounded — a silently partial run. Options: drop them (--no-sandboxed, or --pack <id> per" >&2
+    echo "  pack), or serve on llama.cpp, where --reasoning-budget is a server property that governs every caller." >&2
+    exit 2
+  fi
+
+  # Matched client-side cap. A reasoning cap alone RELOCATES the overrun:
+  # measured with --reasoning-budget 8192 and no total cap, one request still
+  # reached 13,238 tokens — reasoning stopped at 8192 and the model rambled on
+  # in content instead. --thinking-max-tokens overrides --max-tokens on
+  # thinking-enabled packs, so it is the cap that has to move.
+  _tb_headroom="${THINKING_BUDGET_HEADROOM:-4096}"
+  if ! [[ "$_tb_headroom" =~ ^[1-9][0-9]*$ ]]; then
+    echo "✗ THINKING_BUDGET_HEADROOM must be a positive integer (answer tokens after the reasoning budget), got '${_tb_headroom}'" >&2
+    exit 2
+  fi
+  if [[ -z "$THINKING_MAX_TOKENS" ]]; then
+    THINKING_MAX_TOKENS=$(( THINKING_BUDGET + _tb_headroom ))
+    THINKING_MAX_TOKENS_DERIVED=1
+  elif [[ "$THINKING_MAX_TOKENS" -le "$THINKING_BUDGET" ]]; then
+    echo "✗ --thinking-max-tokens ${THINKING_MAX_TOKENS} is not above --thinking-budget ${THINKING_BUDGET}: the answer would have no" >&2
+    echo "  headroom after the reasoning budget, so every budget-exhausted scenario is a token_limit with no answer." >&2
+    echo "  Drop --thinking-max-tokens to derive it (budget + THINKING_BUDGET_HEADROOM, default 4096), or set it above the budget." >&2
+    exit 2
+  fi
+
+  _tb_proc=""
+  if [[ "$_tb_kind" == "sglang" ]]; then
+    _tb_proc="${THINKING_BUDGET_SGLANG_PROCESSOR:-$(thinking_budget_sglang_processor "$THINKING_BUDGET_REASONING_PARSER")}"
+    if [[ -z "$_tb_proc" ]]; then
+      echo "✗ --thinking-budget on SGLang: no ThinkingBudgetLogitProcessor is known for reasoning_parser='${THINKING_BUDGET_REASONING_PARSER}'" >&2
+      echo "  Mapped: qwen3 / qwen3-thinking / glm45 / deepseek-r1. If this model's think-token ids match one of SGLang's" >&2
+      echo "  subclasses, name it: THINKING_BUDGET_SGLANG_PROCESSOR=<subclass>." >&2
+      exit 2
+    fi
+  fi
+  if [[ "$_tb_kind" != "llamacpp" ]]; then
+    THINKING_BUDGET_EXTRA_BODY="$(thinking_budget_extra_body "$_tb_kind" "$THINKING_BUDGET" "$_tb_proc")"
+  fi
+
+  case "$_tb_kind" in
+    llamacpp) _tb_mech="llama.cpp --reasoning-budget (boot flag, server-wide)" ;;
+    vllm)     _tb_mech="vLLM per-request thinking_token_budget" ;;
+    sglang)   _tb_mech="SGLang per-request custom_logit_processor=${_tb_proc} + custom_params.thinking_budget" ;;
+    *)        _tb_mech="$_tb_kind" ;;
+  esac
+  echo "[quality-test] thinking budget: ${THINKING_BUDGET} reasoning tokens via ${_tb_mech}"
+  echo "[quality-test]   verified: ${THINKING_BUDGET_EVIDENCE}"
+  if [[ "$THINKING_MAX_TOKENS_DERIVED" == "1" ]]; then
+    echo "[quality-test]   client cap: --thinking-max-tokens ${THINKING_MAX_TOKENS} (= ${THINKING_BUDGET} budget + ${_tb_headroom} answer headroom; a reasoning cap alone relocates the overrun into content)"
+  else
+    echo "[quality-test]   client cap: --thinking-max-tokens ${THINKING_MAX_TOKENS} (yours: ${THINKING_BUDGET} budget + $(( THINKING_MAX_TOKENS - THINKING_BUDGET )) answer headroom)"
+  fi
+  if [[ ${#_tb_agentic[@]} -gt 0 ]]; then
+    echo "[quality-test]   sandboxed agentic packs (${_tb_agentic[*]}): governed — the budget is a property of the server, so the in-sandbox agent's own calls are bounded too"
+  else
+    echo "[quality-test]   sandboxed agentic packs: none in this selection"
+  fi
+  if [[ "$NO_THINKING" == "1" ]]; then
+    echo "[quality-test]   note: thinking is forced OFF on this leg — the budget is verified but inert until a thinking-on leg"
   fi
 fi
 
@@ -1083,6 +1282,55 @@ fi
 if [[ -n "$REPORT_OUT" ]]; then
   CLI_ARGS+=(--report-out "$REPORT_OUT")
   echo "[quality-test] report-out: $REPORT_OUT"
+fi
+# #1383: the per-request budget (vLLM/SGLang) rides in benchlocal's --extra-body.
+# A pass-through --extra-body would REPLACE it — argparse last-wins, and the
+# pass-through goes last — silently dropping the budget the run was verified
+# for. So the two are merged into ONE object, refusing on a key both set.
+if [[ -n "$THINKING_BUDGET_EXTRA_BODY" ]]; then
+  _pt_extra=""; _pt_rest=()
+  _pi=0; _pn=${#PASSTHROUGH[@]}
+  while [[ $_pi -lt $_pn ]]; do
+    _pa="${PASSTHROUGH[$_pi]}"
+    if [[ "$_pa" == "--extra-body" ]]; then
+      _pt_extra="${PASSTHROUGH[$((_pi+1))]:-}"; _pi=$((_pi+2)); continue
+    fi
+    if [[ "$_pa" == --extra-body=* ]]; then
+      _pt_extra="${_pa#--extra-body=}"; _pi=$((_pi+1)); continue
+    fi
+    _pt_rest+=("$_pa"); _pi=$((_pi+1))
+  done
+  if [[ -n "$_pt_extra" ]]; then
+    _pt_merged=""; _pt_rc=0
+    _pt_merged="$(python3 - "$THINKING_BUDGET_EXTRA_BODY" "$_pt_extra" <<'PY'
+import json, sys
+try:
+    ours, theirs = json.loads(sys.argv[1]), json.loads(sys.argv[2])
+except Exception as exc:
+    print("pass-through --extra-body is not valid JSON: %s" % exc)
+    sys.exit(3)
+if not isinstance(theirs, dict):
+    print("pass-through --extra-body must be a JSON object")
+    sys.exit(3)
+clash = sorted(set(ours) & set(theirs))
+if clash:
+    print("pass-through --extra-body also sets %s — two sources of truth for the budget" % ", ".join(clash))
+    sys.exit(3)
+merged = dict(theirs)
+merged.update(ours)
+print(json.dumps(merged))
+PY
+)" || _pt_rc=$?
+    if [[ "$_pt_rc" != "0" ]]; then
+      echo "✗ --thinking-budget: ${_pt_merged}" >&2
+      exit 2
+    fi
+    THINKING_BUDGET_EXTRA_BODY="$_pt_merged"
+    PASSTHROUGH=(${_pt_rest[@]+"${_pt_rest[@]}"})
+    echo "[quality-test] extra-body: merged your pass-through --extra-body with the thinking-budget fields"
+  fi
+  CLI_ARGS+=(--extra-body "$THINKING_BUDGET_EXTRA_BODY")
+  echo "[quality-test] extra-body: ${THINKING_BUDGET_EXTRA_BODY}"
 fi
 # `--` pass-through goes LAST so pass-through flags can override wrapper ones
 # (argparse-style CLIs let the last occurrence win).
