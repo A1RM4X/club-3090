@@ -68,12 +68,34 @@ expect "cache path stable within one process" "$p1" "$p2"
 registry_lookup_cleanup
 
 # --- 2. CONTAINER defaults resolve to REGISTRY containers --------------------
-# Evaluated from each script's own text: everything from the MODEL default
-# assignment through the final CONTAINER fallback line, with CONTAINER unset.
+# Evaluated from each script's own text: everything from the model-resolution
+# block through the final CONTAINER fallback line, with CONTAINER unset.
+#
+# ⚠️ THE START ANCHOR IS LOAD-BEARING AND HAS DRIFTED ONCE ALREADY.
+# It used to be `^MODEL="${MODEL:-`. #1330 (1004324f) moved that assignment
+# INSIDE an if/else in all four scripts, so it became indented and the
+# column-anchored regex stopped matching. awk then never set `on`, emitted ZERO
+# lines, the eval ran nothing, and CONTAINER came back '<UNSET>' — which reads
+# exactly like "the default resolution is broken" even though the scripts
+# resolved correctly the whole time. Four red assertions, zero real defects.
+# Anchor on `declare -F preflight_autodetect_model` instead: it sits at column 0
+# in all four scripts, above the if/else, so the slice stays balanced shell.
+# If you refactor these scripts, re-check this anchor — and note the
+# empty-extraction guard below, which turns the next drift into a NAMED failure
+# instead of a misleading '<UNSET>'.
 resolve_default_container() {  # <script>
-  awk '/^MODEL="\$\{MODEL:-/{on=1} on{print} /^CONTAINER="\$\{CONTAINER:-/{if(on){exit}}' "$1"
+  awk '/^declare -F preflight_autodetect_model/{on=1} on{print} /^CONTAINER="\$\{CONTAINER:-/{if(on){exit}}' "$1"
 }
 for script in scripts/bench.sh scripts/verify.sh scripts/verify-full.sh scripts/verify-stress.sh; do
+  # Negative control for the anchor itself: an empty slice can only mean the
+  # start anchor no longer matches, and must say so rather than fail downstream
+  # as a bogus '<UNSET>' resolution.
+  _slice="$(resolve_default_container "$script")"
+  if [[ -z "${_slice//[[:space:]]/}" ]]; then
+    expect "$script: model-resolution block found (start anchor still matches)" \
+      "non-empty" "EMPTY — the awk start anchor is stale, see the note above"
+    continue
+  fi
   resolved="$(ROOT_DIR="$ROOT" bash -c '
     unset CONTAINER MODEL
     eval "$1"
