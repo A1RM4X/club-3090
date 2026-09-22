@@ -321,11 +321,16 @@ vllm_with = {k for k in with_profiles if k.startswith("vllm/")}
 check(len(vllm_with) >= 20,
       f"qwen3.8-27b vLLM entries expose sampler_profiles (got {len(vllm_with)})")
 check(llama_with == {"llamacpp/qwen38-27b-single-iq4xs",
-                     "llamacpp/qwen38-27b-dual-q8kxl"},
-      f"both llama.cpp qwen3.8 slugs gained sampler_profiles (got {sorted(llama_with)})")
-check(all(k.split("/", 1)[1].startswith(("qwen38-27b-", "qwen38-flash-next-"))
+                     "llamacpp/qwen38-27b-dual-q8kxl",
+                     # 2026-09-22: MiMo-V2.6-9B publishes per-mode rows too (instruct
+                     # row from the Qwen3.5-9B card, thinking row from MiMo's own
+                     # generation_config.json), so it belongs in the coupled set
+                     # rather than holding a third private copy in its entrypoint.
+                     "llamacpp/mimo9b-single-vision"},
+      f"the llama.cpp per-mode-sampler slugs carry sampler_profiles (got {sorted(llama_with)})")
+check(all(k.split("/", 1)[1].startswith(("qwen38-27b-", "qwen38-flash-next-", "mimo9b-"))
           for k in with_profiles),
-      "only qwen3.8-27b / qwen3.8-flash-next slugs carry sampler_profiles today")
+      "only qwen3.8-27b / qwen3.8-flash-next / mimo9b slugs carry sampler_profiles today")
 
 for slug, entry in sorted(with_profiles.items()):
     profiles = entry["sampler_profiles"]

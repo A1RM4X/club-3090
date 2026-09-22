@@ -1,0 +1,286 @@
+# ===========================================================================
+# Profile (at-a-glance):
+#   Model:     MiMo-V2.6-Distill-Qwen-9B (XiaomiMiMo) — a Qwen3.5-9B distill.
+#              GGUF `general.architecture = qwen35`; 32 layers, 8 of them full
+#              attention (interval 4), the other 24 linear — the Qwen3.5 hybrid.
+#              ⚠️ NOT the same family as Qwen3.8-Flash-Next (`qwen4exp`): this one
+#              has NO PLE / n-gram table, so there is no 31 GB host-RAM tax.
+#   Quant:     bartowski Q8_0 (8.89 GiB) + mmproj-f16 (0.86 GiB).
+#              ⛔ DO NOT USE ggml-org/MiMo-V2.6-Distill-Qwen-9B-GGUF — see Caveats.
+#   Engine:    llama.cpp mainline, OUR SHIPPED PIN (b10920). No bump required.
+#   Topology:  SINGLE 3090. GPU1 stays free — TP is unnecessary for a 9B and would
+#              pay a PCIe all-reduce per layer on this NVLink-less rig.
+#   Spec-dec:  ⛔ OFF by default, on two separate grounds.
+#              (a) MODEL-BASED spec-dec is impossible: the upstream checkpoint has
+#                  NO MTP head (760 tensors, layers 0..31, zero nextn/mtp tensors,
+#                  no nextn key in config.json) and no drafter exists for this 9B.
+#              (b) N-GRAM spec-dec needs neither, and IS available on this pin
+#                  (ngram-simple / ngram-map-k / ngram-map-k4v / ngram-mod /
+#                  ngram-cache) — but it MEASURED UNFAVOURABLE here, see Caveats.
+#              `SPEC_TYPE=<type>` opts back in for workloads that suit it.
+#   KV:        q8_0 — MEASURED from the engine log at LLAMA_ARG_LOG_VERBOSITY=4,
+#              2026-09-22, same compose, KV_TYPE the only variable:
+#                       KV cache            per token   compute buf   total VRAM
+#                q8_0   4,352 MiB           16 KiB      3,520 MiB     17,426 MiB
+#                f16    8,192 MiB           32 KiB      2,752 MiB     20,498 MiB
+#              ⚠️ The KV saving is 3,840 MiB but the NET is only 3,072 MiB: q8_0
+#              flips attn_rot_k/attn_rot_v 0 -> 1 and pays +768 MiB of compute
+#              buffer for the rotation path. Don't quote the KV delta as the VRAM
+#              delta — they differ by 25%, and the reconciliation is what proves
+#              the log is being read correctly (20,498 - 17,426 = 3,072 exactly).
+#              ⭐ Only 8 layers grow KV here at 262,144 cells — NOT block_count.
+#              f16 still FITS at -ub 4096 (20,498 / 24,576) so `KV_TYPE=f16` is a
+#              live option, it just spends the headroom that buys -ub 4096.
+#              q8_0 is also our serving-grade floor, and it is what the ubatch
+#              sweep below was measured at. We ship it because the 3,072 MiB it
+#              frees is what pays for -ub 4096's measured prefill gain.
+#   Thinking:  ✅ ON by default. Per-request toggle only: chat_template_kwargs
+#              {"enable_thinking": true|false}. ⚠️ There is NO reasoning-effort
+#              dial — see the Caveats entry before wiring one.
+#   Vision:    ✅ yes, via mmproj-f16. 27.4% of the SFT mixture was visual.
+#   Max ctx:   262144 — the model's full declared context, VALIDATED on one card.
+#   Genesis:   N/A — not a vLLM engine
+#   Status:    🧪 Experimental
+#   Best for:  a single-card long-context vision assistant that leaves the second
+#              GPU entirely free for another workload.
+#
+# VALIDATED 2026-09-21 on 2x3090 (one card used), engine b10920:
+#   verify-full  8/8 applicable pass (vision 4/4 on ground truth)
+#   VRAM         17,426 / 24,576 MiB at ctx 262144 on the SHIPPED default
+#                (q8_0 KV + -ub 4096). The 2026-09-21 verify-full above ran at
+#                f16 KV / -ub 512 and measured 18,236 MiB; re-validated on the
+#                shipped default 2026-09-22, see the line below.
+#   thinking     on by default; enable_thinking=false gives a clean direct answer
+#   sampling     both rows exercised live, both correct on a time-arithmetic task
+#
+# RE-VALIDATED 2026-09-22 on the SHIPPED default (q8_0 KV + -ub 4096), booted
+# through this compose (not a hand docker run — the sampler row is chosen in the
+# entrypoint, so only the real delivery path exercises it). argv read back from
+# /proc/<pid>/cmdline NUL-separated to prove the flags that ship are the flags
+# that ran:
+#   verify-full  7 pass · 2 N/A (Genesis=vLLM-only, MTP=vLLM-log-format)
+#                · 1 KNOWN-FALSE FAIL, see below
+#   VRAM         17,426 MiB idle / 17,488 MiB after verify
+#   vision       4/4 on ground truth
+#   ⚠️ [7/10] "reasoning field empty" is a HARNESS artifact, NOT a regression and
+#   NOT caused by q8_0. The check asserts a non-empty reasoning field using a
+#   trivial prompt ("what is 2+2"), which an ADAPTIVE-thinking model may answer
+#   without reasoning. Probed live on this exact boot:
+#       "What is 2+2?"            enable_thinking=true  -> reasoning 80 chars
+#                                 ("simple arithmetic. Just answer.")
+#       multi-step time problem   enable_thinking=true  -> reasoning 445 chars,
+#                                 answer 17:48 (correct)
+#       same problem              enable_thinking=false -> reasoning 0 chars
+#   The toggle works in BOTH directions; at temp 0.6 the trivial prompt is a coin
+#   flip, which is why the 2026-09-21 run scored it 8/8 and this one did not.
+#   ⭐ This is a repo-wide bug affecting every adaptive-thinking model, not a MiMo
+#   quirk — do not "fix" it by special-casing this compose.
+#
+#   Caveats:
+#     • ⛔⛔ THE ggml-org GGUF IS UNLOADABLE — ON ANY BUILD. It declares
+#       `qwen35.block_count = 33` + `nextn_predict_layers = 1` while shipping
+#       tensors for blocks 0..31 only, so every loader dies with
+#       `check_tensor_dims: tensor 'blk.32.attn_norm.weight' not found`.
+#       Reproduced on b10920 AND on build 11065 (145 builds newer) — this is NOT
+#       pin staleness. The upstream checkpoint has no MTP head at all, so the
+#       converter FABRICATED one. bartowski's conversion of the SAME 427 tensors
+#       declares 32 blocks, no nextn, and loads. Hypothesis (unconfirmed): the
+#       qwen35 conversion path assumes a nextn head because the flagship qwen35
+#       model (Qwen3.8-27B) has one — our Qwen3.8 GGUF correctly declares 65
+#       blocks and ships 65.
+#     • ⚠️⚠️ THERE IS NO REASONING-EFFORT DIAL ON THIS MODEL. The GGUF's own chat
+#       template contains ZERO occurrences of `reasoning_effort`; neither the MiMo
+#       card nor the Qwen3.5-9B base card mentions it. DO NOT copy the 27B
+#       sibling's `LLAMA_ARG_CHAT_TEMPLATE_KWARGS={"reasoning_effort":...}`: an
+#       unrecognised chat_template_kwargs key is SILENTLY IGNORED, so the knob
+#       would read as configured and do nothing while the model reasons freely.
+#       ⚠️ Our verify-*/quality-test paths pass REASONING_EFFORT for Qwen-family
+#       models. On this model that is INERT — do not read a green run as evidence
+#       that an effort tier was applied. To bound thinking, use --reasoning-budget
+#       below, which has a VISIBLE exhaustion message.
+#     • ⭐ SAMPLING IS TWO ROWS, and the default comes from the MODEL, not the base
+#       card. MiMo ships generation_config.json = temp 0.6 / top_p 0.95 / top_k 20;
+#       that is this compose's THINKING row (maintainer decision 2026-09-21: a
+#       distill's own config outranks its base's guidance). The Qwen3.5-9B card
+#       documents a four-way matrix and is the ONLY source for the instruct row:
+#         thinking, general        1.0 / 0.95 / 20 / min_p 0.0 / presence 1.5
+#         thinking, precise coding 0.6 / 0.95 / 20 / min_p 0.0 / presence 0.0  <- MiMo's own
+#         instruct, general        0.7 / 0.80 / 20 / min_p 0.0 / presence 1.5  <- INSTRUCT row
+#         instruct, reasoning      1.0 / 0.95 / 20 / min_p 0.0 / presence 1.5
+#       Set TEMP/TOP_P/PRESENCE_PENALTY to pick another row.
+#     • ⭐ -ub 4096 IS MEASURED, NOT INHERITED (2026-09-21). Sweep at q8_0 KV,
+#       one boot per arm, bench.sh; prefill CV on this rig is 0.2-0.4% so these
+#       deltas ARE resolvable, unlike the decode column:
+#         ub    prefill10k        prefill90k        narr decode   VRAM
+#         512   2238.26           1777.59           50.80         15,238 MiB
+#         2048  2272.85  (+1.5%)  1811.02  (+1.9%)  50.77         16,176 MiB
+#         4096  2358.67  (+5.4%)  1831.33  (+3.0%)  50.73         17,426 MiB  <- default
+#         8192  2319.32  (+3.6%)  1799.54  (+1.2%)  50.60         17,426 MiB
+#       ⭐ 4096 is a PEAK, not "the largest I tried" — 8192 gives back roughly a
+#       third of the 10k gain and most of the 90k gain for no VRAM saving. That is
+#       why the default stops here; don't raise it further without re-measuring.
+#       ⭐ Decode is FLAT across the sweep — the prefill gain is bought with VRAM
+#       (+2.2 GB from 512 to 4096), not with decode. The 10k/90k gains diverge
+#       (5.4% vs 3.0%) because deep prefill is already closer to compute-bound;
+#       the same crossover our moe-cache work found at ub 4096.
+#       ⚠️ Raising -ub is NOT universally safe on this engine: GLM-5.3-Flash
+#       crashes with an illegal memory access at -ub 2048 (ggml-org#28282, still
+#       open). That is the `glm5next` graph, not `qwen35` — this model swept to
+#       4096 with zero errors — but re-check on any arch change.
+#     • ⭐ N-GRAM SPEC-DEC MEASURED AND REJECTED AS A DEFAULT (2026-09-21).
+#       `ngram-map-k` at q8_0 KV / ub 512, one boot per arm, bench.sh:
+#         no spec : prefill10k 2245.63  prefill90k 1785.70  narr 53.74  code 50.80
+#         ngram   : prefill10k 2238.26  prefill90k 1777.59  narr 50.80  code 50.34
+#       Prefill is FLAT (-0.3% / -0.5%, at or below the 0.3% floor). Decode is
+#       down, but ⚠️ narrative boot-to-boot noise here is ~9%, so -5.5% is NOT a
+#       resolvable result — the honest claim is "no evidence it helps, sign
+#       unfavourable".
+#       ⭐ The MECHANISM is the real finding, from bench.sh's own capture:
+#         fired=2  mean_acceptance=0.242  min=0.042  max=0.443  accepted=29/109
+#       It fires on almost NO requests (short bench prompts build no usable
+#       n-grams) and accepts ~24% when it does — 80 wasted draft tokens. Quoting
+#       the 0.443 peak alone would have read as a success; the FIRE RATE is what
+#       makes it a rejection.
+#       ⚠️ SCOPE: this rejects it for THESE shapes (short-prompt narrative/code
+#       generation). N-gram drafting earns its keep on repetitive long context —
+#       document QA that quotes the source, boilerplate-heavy code, agent loops
+#       re-reading one context. `ik-llama/ornith9b-single` ships it, on a
+#       DIFFERENT fork. Try `SPEC_TYPE=ngram-map-k` on such a workload.
+#     • ⚠️⚠️ `--spec-type` GRAMMAR DIFFERS BETWEEN FORKS. ik-llama takes
+#       `ngram-map-k:n_max=64,ngram_min_hits=1`; MAINLINE takes a bare
+#       comma-separated list of type NAMES and exposes the parameters as separate
+#       flags (--spec-ngram-mod-n-max, --spec-ngram-simple-size-n, ...). Copying
+#       ornith's VALUE here crash-looped to RestartCount=11 before this was found.
+#       The flag NAME transfers between forks; the VALUE does not.
+#     • ⚠️ Qwen3.5 does NOT support Qwen3's `/think` + `/nothink` soft switch
+#       (base card). chat_template_kwargs is the only supported toggle.
+#     • ⚠️ SGLang serves this model too and is the path the MiMo card documents,
+#       but it needs BOTH cards for full context: bf16 weights are 17.6 GiB, so one
+#       card reaches ~36K at bf16 KV / ~72K at fp8 / ~109K with cudagraphs off.
+#       The Q8_0 GGUF is what makes 262K single-card possible.
+#     • ⚠️ A W4A16 checkpoint, if one appears, would put full context on a single
+#       card for SGLang/vLLM too — worth re-testing those paths when it does.
+# ---------------------------------------------------------------------------
+# Detail: learnings/mimo-v2.6-9b.md (to be created) · base card:
+#         https://huggingface.co/Qwen/Qwen3.5-9B
+# ===========================================================================
+
+services:
+  llama-cpp-mimo-9b-single:
+    image: ${LLAMACPP_IMAGE:-ghcr.io/ggml-org/llama.cpp@sha256:6ac921528d613deb0fd142c654735e594a446a1c37a069eeab08d8fd974d4bec}
+    container_name: "${ESTATE_CONTAINER:-llama-cpp-mimo-9b-single}"
+    restart: ${CLUB3090_RESTART:-unless-stopped}
+    ports:
+      - "${BIND_HOST:-0.0.0.0}:${ESTATE_PORT:-${PORT:-8094}}:8080"
+    volumes:
+      - "${MODEL_DIR:-../../../../../../models-cache}:/models:ro"
+    environment:
+      # ⚠️⚠️ THE ROW VARS MUST BE DECLARED HERE OR THE FLIP SILENTLY DOES NOTHING.
+      # The entrypoint resolves the sampler row INSIDE the container, and docker
+      # forwards ONLY what is listed here. Omit them and INSTRUCT=1 boots clean,
+      # logs the THINKING row, and is ignored. (Inherited from the 27B sibling,
+      # where exactly that happened.)
+      # Bare form on purpose: `- VAR=${VAR:-}` sets the var EMPTY-but-present,
+      # and an empty REASONING_BUDGET would land as `--reasoning-budget ''`.
+      - INSTRUCT
+      - THINKING
+      - REASONING
+      - REASONING_BUDGET
+      - REASONING_BUDGET_MESSAGE
+      - TEMP
+      - TEMPERATURE
+      - TOP_P
+      - PRESENCE_PENALTY
+      # ⚠️ NO REASONING_EFFORT / LLAMA_ARG_CHAT_TEMPLATE_KWARGS HERE — deliberate.
+      # This template has no effort dial (see Caveats); the entrypoint sets
+      # enable_thinking per row instead.
+      - SPEC_TYPE
+      # Bare passthrough: docker forwards ONLY what is declared here, so an
+      # undeclared LLAMA_ARG_LOG_VERBOSITY would be silently dropped and the
+      # extra boot lines (KV self size, per-buffer breakdown) would never appear
+      # — reading as "this build does not log it" rather than "we never asked".
+      - LLAMA_ARG_LOG_VERBOSITY
+      - CUDA_VISIBLE_DEVICES=${ESTATE_GPUS:-${CUDA_VISIBLE_DEVICES:-0}}
+    entrypoint:
+      - /bin/bash
+      - -c
+      - |
+        # -- Sampler row: resolved ONCE, emitted ONCE --------------------------
+        # Never append a second copy of --temp/--top-p/--presence-penalty and rely
+        # on last-wins: llama.cpp deprecates that spelling, and "comma-separated"
+        # is MULTI-VALUE syntax — if repeats ever meant "append", INSTRUCT=1 would
+        # serve a silent BLEND of both rows with a clean boot and no error.
+        # INSTRUCT wins when both are set.
+        # Row precedence, matching the qwen3.8-27b sibling: INSTRUCT wins when BOTH
+        # INSTRUCT and THINKING are set. THINKING=1 is an EXPLICIT opt-in to the row
+        # that is already the default — it changes nothing on its own, and exists so the
+        # documented llama.cpp knob pair (THINKING=1 / INSTRUCT=1) works here too for
+        # anyone arriving from a sibling compose. It is WIRED, not decorative: an env
+        # var declared but never read is a knob the user can set and silently have
+        # ignored (test-compose-env-declared-unused).
+        if [ -n "$${INSTRUCT:-}" ]; then
+          _r="$${REASONING:-off}"; _t="$${TEMP:-$${TEMPERATURE:-0.7}}"
+          _p="$${TOP_P:-0.80}";    _pp="$${PRESENCE_PENALTY:-1.5}"
+          _src="INSTRUCT row"
+          [ -n "$${THINKING:-}" ] && _src="INSTRUCT row (INSTRUCT wins over THINKING)"
+          echo "[sampler] $$_src: reasoning=$$_r temp=$$_t top_p=$$_p presence=$$_pp (source: Qwen3.5-9B card)" >&2
+        else
+          _r="$${REASONING:-on}";  _t="$${TEMP:-$${TEMPERATURE:-0.6}}"
+          _p="$${TOP_P:-0.95}";    _pp="$${PRESENCE_PENALTY:-0.0}"
+          if [ -n "$${THINKING:-}" ]; then _src="THINKING row (explicit)"; else _src="THINKING row (default)"; fi
+          echo "[sampler] $$_src: reasoning=$$_r temp=$$_t top_p=$$_p presence=$$_pp (source: MiMo generation_config.json)" >&2
+        fi
+        ROW=(--reasoning "$$_r" --temp "$$_t" --top-p "$$_p" --presence-penalty "$$_pp")
+        # ⚠️ DO NOT set enable_thinking via --chat-template-kwargs here. The row's
+        # `--reasoning on|off` above already drives it, and llama.cpp warns that the
+        # kwargs spelling is DEPRECATED:
+        #   Setting 'enable_thinking' via --chat-template-kwargs is deprecated.
+        #   Use --reasoning on / --reasoning off instead.
+        # Doing both set it twice and cost a warning the sibling's row-resolution
+        # design exists to eliminate. Per-REQUEST override is unaffected: a client
+        # may still send chat_template_kwargs {"enable_thinking": …} per call.
+        # ⚠️ Budget MESSAGE is inert while budget is -1 (llama.cpp's own default,
+        # unrestricted). It exists so that IF a budget is set, exhaustion is
+        # VISIBLE: upstream's default is empty, which makes a truncated trace
+        # indistinguishable from a short answer — a misattribution that has bitten
+        # this stack (blaming the model for a budget).
+        ROW+=(--reasoning-budget "$${REASONING_BUDGET:--1}")
+        ROW+=(--reasoning-budget-message "$${REASONING_BUDGET_MESSAGE:-[reasoning budget exhausted]}")
+        exec /app/llama-server "$$@" "$${ROW[@]}"
+      - --
+    command: >-
+      --host 0.0.0.0
+      --port 8080
+      -m /models/${GGUF_FILE:-mimo-v2.6-distill-qwen-9b-gguf-bartowski/MiMo-V2.6-Distill-Qwen-9B-Q8_0.gguf}
+      --mmproj /models/${MMPROJ_FILE:-mimo-v2.6-distill-qwen-9b-gguf-bartowski/mmproj-MiMo-V2.6-Distill-Qwen-9B-f16.gguf}
+      --alias ${SERVED_NAME:-mimo-v2.6-9b}
+      -c ${CTX_SIZE:-262144}
+      -b ${BATCH_SIZE:-4096}
+      -ub ${UBATCH_SIZE:-4096}
+      -ngl 99
+      -fa on
+      --cache-type-k ${KV_TYPE:-q8_0}
+      --cache-type-v ${KV_TYPE:-q8_0}
+      -np ${NP:-1}
+      --jinja
+      --reasoning-format ${REASONING_FORMAT:-deepseek}
+      --top-k ${TOP_K:-20}
+      --min-p ${MIN_P:-0.0}
+      --repeat-penalty ${REPEAT_PENALTY:-1.0}
+      ${SPEC_TYPE:+--spec-type ${SPEC_TYPE}}
+    healthcheck:
+      # ⚠️ Probe the container's ROUTABLE address, never loopback: an in-container
+      # `curl localhost` stays up even when the bind address is wrong, and reads as
+      # "the service is reachable" while every external client is refused (#1295).
+      test: ["CMD-SHELL", "curl -sf http://$${HOSTNAME}:8080/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 300s
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
