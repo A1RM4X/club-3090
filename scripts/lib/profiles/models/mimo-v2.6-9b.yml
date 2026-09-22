@@ -42,7 +42,11 @@ weights:
       - MiMo-V2.6-Distill-Qwen-9B-Q8_0.gguf
     engine: llama-cpp
     kind: gguf
-    verify_glob: "*.gguf"
+    # ⚠️ NOT "*.gguf": this variant and bartowski-mmproj-f16 share one flat bucket
+    # dir, so a bucket-wide glob makes their download states indistinguishable —
+    # delete the Q8 weights and the mmproj alone would still report PRESENT
+    # (test-weights-glob-distinct). The glob must match only THIS artifact.
+    verify_glob: "*Q8_0.gguf"
   bartowski-mmproj-f16:
     path: mimo-v2.6-distill-qwen-9b-gguf-bartowski
     local_subdir: mimo-v2.6-distill-qwen-9b-gguf-bartowski
@@ -55,7 +59,7 @@ weights:
       - mmproj-MiMo-V2.6-Distill-Qwen-9B-f16.gguf
     engine: llama-cpp
     kind: mmproj
-    verify_glob: "*.gguf"
+    verify_glob: "mmproj*.gguf"      # see the note on bartowski-q8's glob
     setup_env: WITH_VISION=1
     manual_note: >-
       F16 multimodal projector for MiMo V2.6 9B. Boot-verified 2026-09-21/22 —

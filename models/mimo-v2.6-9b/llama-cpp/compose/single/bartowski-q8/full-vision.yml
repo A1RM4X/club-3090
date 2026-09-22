@@ -127,6 +127,22 @@
 #       crashes with an illegal memory access at -ub 2048 (ggml-org#28282, still
 #       open). That is the `glm5next` graph, not `qwen35` — this model swept to
 #       4096 with zero errors — but re-check on any arch change.
+#     • ⭐ NO SPEC KNOB ON THIS COMPOSE — BY DESIGN, not an oversight.
+#       This model has no MTP head and no draft GGUF, so the only path is
+#       drafter-free n-gram self-spec, which measured NO BENEFIT here (below).
+#       A `${SPEC_TYPE:+--spec-type ...}` passthrough would also break
+#       `test-spec-toggle-contract`: that gate classifies ANY compose with a LIVE
+#       `--spec-type` line as drafter-shipping, then requires the DEFAULT render
+#       to carry drafter flags — i.e. drafter ON with SPEC_N=0 / SPEC=off as the
+#       kill switch. An opt-IN knob is the inverse shape and the contract has no
+#       provision for it. The contract is right to be strict: turning the drafter
+#       off is the documented mitigation for vllm#50021, so a half-wired toggle
+#       is a safety bug, not an annoyance.
+#       ⇒ Follows the ornith-1.0-9b precedent — the serving compose ships no
+#       drafter and the spec variant lives in its OWN file (ornith ships
+#       `.../deepreinforce-q4km/ngram.yml` beside its serving compose). If n-gram
+#       is ever wanted here, add `bartowski-q8/ngram.yml` with SPEC_N defaulting
+#       to a real depth plus the standard SPEC_N=0 / SPEC=off kill switch.
 #     • ⭐ N-GRAM SPEC-DEC MEASURED AND REJECTED AS A DEFAULT (2026-09-21).
 #       `ngram-map-k` at q8_0 KV / ub 512, one boot per arm, bench.sh:
 #         no spec : prefill10k 2245.63  prefill90k 1785.70  narr 53.74  code 50.80
@@ -194,7 +210,6 @@ services:
       # ⚠️ NO REASONING_EFFORT / LLAMA_ARG_CHAT_TEMPLATE_KWARGS HERE — deliberate.
       # This template has no effort dial (see Caveats); the entrypoint sets
       # enable_thinking per row instead.
-      - SPEC_TYPE
       # Bare passthrough: docker forwards ONLY what is declared here, so an
       # undeclared LLAMA_ARG_LOG_VERBOSITY would be silently dropped and the
       # extra boot lines (KV self size, per-buffer breakdown) would never appear
@@ -267,7 +282,6 @@ services:
       --top-k ${TOP_K:-20}
       --min-p ${MIN_P:-0.0}
       --repeat-penalty ${REPEAT_PENALTY:-1.0}
-      ${SPEC_TYPE:+--spec-type ${SPEC_TYPE}}
     healthcheck:
       # ⚠️ Probe the container's ROUTABLE address, never loopback: an in-container
       # `curl localhost` stays up even when the bind address is wrong, and reads as
