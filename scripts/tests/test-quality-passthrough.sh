@@ -265,11 +265,14 @@ PASS_THROUGH_OK = {
     "--temperature", "--top-p", "--top-k", "--min-p", "--repeat-penalty",
     "--enable-sandboxed-packs",          # aider pack via raw benchlocal-cli
     "--exit-on-regression",              # quality-baseline.sh passes it through
+    "--extra-body",                      # benchlocal-cli; --thinking-budget composes it (#1383)
 }
 # flags belonging to OTHER commands the docs mention alongside quality-test.sh
 OTHER_TOOL_OK = {
     "--with-8pack-thinking",             # rebench-full.sh
     "--reasoning-parser", "--served-model-name", "--add-host",  # vLLM / docker boot
+    "--reasoning-budget",                # llama-server boot flag (#1383)
+    "--enable-custom-logit-processor",   # SGLang boot flag (#1383)
     "--in-place",                        # benchlocal-cli rescore
     "--dry-run",                         # quality-baseline.sh / report.sh
     "--clear-default", "--set-default", "--profile-like",       # switch.sh
