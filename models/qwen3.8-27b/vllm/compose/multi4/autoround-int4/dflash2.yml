@@ -24,19 +24,28 @@
 #    The plugin's own README states "The compose targets TP=2 and one sequence";
 #    patches.yml scopes it `load_bearing_when composes:[vllm/qwen38-27b-dual-ultramax]`
 #    and docs/UPSTREAM.md names that same single compose. This tier runs it at
-#    TP=4 with MAX_NUM_SEQS=2. Three sources say one compose; it ships in seven.
-#    ⛔ OPEN CRASH, reported by foureight84: `torch.ops.fa2_fp8kv.forward` raises
-#    "Sequence bounds exceed this port's supported envelope", killing EngineCore and
-#    every TP worker, reproducibly at the same point in a multi-turn agent workload
-#    (hermesagent-20, HA-16/17). NOT context exhaustion — 1 request, 3.5% KV used.
-#    ⚠️⚠️ IT FAILS SILENTLY: the container restarts, the harness retries, and the run
-#    reports a PLAUSIBLE BUT TAINTED score — three --full runs read 129/128/127 that
-#    way. quality-test.sh/bench.sh now fail on a RestartCount delta (#1354); do NOT
+#    TP=4 with MAX_NUM_SEQS=2. Three sources say one compose; it ships in six.
+#    ⛔ CRASH — CAUSE FOUND 2026-09-23 (#1358), and it is NOT TP. `torch.ops.fa2_fp8kv.forward`
+#    raises "Sequence bounds exceed this port's supported envelope" (killing EngineCore and
+#    every TP worker) when fp8 KV runs with 2+ sequences and one request's prefill chunk
+#    exceeds 2048. The plugin takes its bounded-prefill path only for a ONE-request step;
+#    a mixed step goes to the split-KV kernel, which caps max_q at 2048, and this tier's
+#    8192 budget / 4096 long-prefill threshold / MAX_NUM_SEQS=2 allowed 4096-token chunks.
+#    It needs fp8 KV: at this file's default bf16 the plugin hands off to stock
+#    FlashAttention and never reaches that kernel (the KV_CACHE_DTYPE=fp8_e4m3 override
+#    from disc #1076 is what exposed it). Reproduced on 2× 3090 at TP=2 (dual-ultrafast,
+#    MAX_NUM_SEQS=2): a long prefill overlapping a decode crashed 2/2; the same prompt alone
+#    was clean. The earlier TP=2 control used dual-ultramax, whose 2048-token budget can
+#    never exceed the cap — which is why this looked like a TP effect.
+#    ✅ FIXED at boot: patches/fa2-fp8kv-sm86/envelope.sh caps --long-prefill-token-threshold
+#    at 2048 whenever fp8 KV runs with more than one sequence (the same overlap ran clean
+#    3/3 on that rig; guarded by test-fa2-envelope). A no-op at bf16 or one sequence.
+#    Validated at TP=2; the TP=4 confirmation is the reporter's run.
+#    ⚠️⚠️ WHEN IT FIRED IT FAILED SILENTLY: the container restarts, the harness retries, and
+#    the run reports a PLAUSIBLE BUT TAINTED score — three --full runs read 129/128/127
+#    that way. quality-test.sh/bench.sh now fail on a RestartCount delta (#1354); do NOT
 #    publish a number from this tier without that guard green.
-#    Reference-rig A/B at TP=2 did NOT reproduce at max_num_seqs 1 OR 2, so
-#    max_num_seqs is RULED OUT and TP is the remaining untested variable.
-#    ⭐ TP=4 resolves to (256,1) local KV geometry, which IS in the plugin's tested
-#    set — so whatever TP is doing here, it is not head geometry.
+#    ⭐ TP=4 resolves to (256,1) local KV geometry, which IS in the plugin's tested set.
 # ⛔⛔ #1096 RETRACTED 2026-09-08 — THERE IS NO ACCUMULATED-CTX DECODE CLIFF. The collapse
 #    figures came from OUR harness, not the engine: bench-agentic set TTFT on the first
 #    `content` delta, so a thinking model's entire reasoning phase was charged to prefill and
@@ -210,6 +219,12 @@ services:
         FI_PINQ_LIB_ALL="${FI_PINQ_LIB_ALL:-0}" bash /etc/club3090/flashinfer-decode-pin/install.sh || exit 1
         bash /etc/club3090/fa2/install.sh || exit 1
         source /etc/club3090/fa2-runtime.env
+        # FA2 kernel envelope (#1358): with fp8 KV and more than one sequence, cap
+        # each request's prefill chunk at the kernel's max_q (2048); refuse a
+        # max-model-len past its max_k. A no-op for this file's shipped defaults.
+        source /etc/club3090/fa2/envelope.sh
+        fa2_envelope "$$@" || exit 1
+        set -- "$${FA2_ARGS[@]}"
         echo "[w4a8] VLLM_MARLIN_INPUT_DTYPE=$${VLLM_MARLIN_INPUT_DTYPE:-<unset -> W4A16>} (W4A8=$${W4A8:-1})"
         AR=""
         # Gate on _CUSTOM_AR_ENABLED, not _NVLINK_ENABLED: the transport being up
