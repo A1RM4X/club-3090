@@ -72,6 +72,10 @@ SAFETY
   * `check` is a read-only gate (safe to wire into compose pre-flight).
   * `revert` returns the files to pristine by inverting each edit (NEW->OLD),
     gated on the per-edit marker so it only touches what was actually applied.
+    The transient v1->v2 migration edit is excluded (its NEW text is the
+    pristine tail; inverting it would re-insert the buggy v1 loop). It exits
+    non-zero on any ABSENT/ambiguous anchor (drift), symmetric with apply;
+    reverting a pristine (never-patched) tree is a clean rc-0 no-op.
   * Version-gated: warns if the installed sglang version differs from the
     version the anchors were verified against, without hard-failing (anchors
     are content-based and will simply be reported as missing).
@@ -104,8 +108,11 @@ DEFAULT_MCM = "/sgl-workspace/sglang/python/sglang/srt/mem_cache/unified_cache/c
 KNOWN_GOOD_VERSION = "0.5.20"
 
 
-def _edit(tag, kind, old, new):
-    return {"tag": tag, "kind": kind, "old": old, "new": new}
+def _edit(tag, kind, old, new, revert_noop=False):
+    d = {"tag": tag, "kind": kind, "old": old, "new": new}
+    if revert_noop:
+        d["revert_noop"] = True
+    return d
 
 
 EDITS = {
@@ -137,7 +144,9 @@ EDITS = {
         # this is already-patched (pristine tail present) and is skipped; on a
         # v1 tree it reverts the over-reaching tail-B so the head-B can take its
         # place. Runs BEFORE the head-B so the rollback lives in exactly one
-        # spot.
+        # spot. revert_noop: its NEW text IS the pristine tail, so a --revert
+        # must never "revert" it (that would re-insert the buggy v1 tail loop);
+        # it is only an apply-direction migration.
         _edit(
             "B",
             "mix_with_running tail: revert v1 rollback (migration)",
@@ -157,6 +166,7 @@ EDITS = {
             "        self.is_prefill_only = False\n"
             "\n"
             "    def convert_decode_to_extend(self):\n",
+            revert_noop=True,
         ),
         # --- B2 (HEAD, the actual v2 fix): scoped to incoming prefill reqs. ---
         # At the head of mix_with_running, before merge_batch, self.reqs is ONLY
@@ -308,6 +318,13 @@ def run_edits(path, name, edits, direction):
                 per_edit.append((ed["tag"], "ABSENT"))
                 all_ok = False  # hold the write for this whole file
         else:  # revert
+            if ed.get("revert_noop"):
+                # Transient v1->v2 migration edit: its NEW text is the pristine
+                # tail, so "reverting" it would re-insert the buggy v1 loop.
+                # Revert returns to pristine by inverting the *applied* fix
+                # (A1/A2/B2/C/D); the migration edit is never inverted.
+                per_edit.append((ed["tag"], "migration (no-op on revert)"))
+                continue
             if is_patched(text, ed):
                 if text.count(ed["new"]) != 1:
                     per_edit.append((ed["tag"], "AMBIGUOUS"))
@@ -317,7 +334,11 @@ def run_edits(path, name, edits, direction):
                 changed = True
                 per_edit.append((ed["tag"], "reverted"))
             else:
-                per_edit.append((ed["tag"], "not-patched (left)" if is_pristine(text, ed) else "ABSENT"))
+                if is_pristine(text, ed):
+                    per_edit.append((ed["tag"], "not-patched (left)"))
+                else:
+                    per_edit.append((ed["tag"], "ABSENT"))
+                    all_ok = False  # drifted: hold the whole-file write (symmetric with apply)
     if changed and all_ok:
         atomic_write(path, text)
         return True, per_edit, all_ok
@@ -402,11 +423,18 @@ def cmd_check(root_overrides):
 
 
 def cmd_revert(root_overrides):
+    rc = 0
     for name, edits in EDITS.items():
         path = Path(root_overrides.get(name) or FILES[name])
         changed, per_edit, all_ok = run_edits(path, name, edits, "revert")
         print(f"[{name}] " + (", ".join(f"{t}={s}" for t, s in per_edit) if changed
                               else "(nothing to revert)"))
+        if not all_ok or any(s == "ABSENT" for _, s in per_edit):
+            rc = 1
+    if rc == 1:
+        print("\nERROR: revert incomplete — one or more anchors ABSENT/ambiguous; "
+              "the file(s) may have drifted. Inspect with --report.")
+    return rc
 
 
 def cmd_report(root_overrides):
@@ -460,8 +488,7 @@ def main(argv=None):
     if args.check:
         sys.exit(cmd_check(root_overrides))
     if args.revert:
-        cmd_revert(root_overrides)
-        return
+        sys.exit(cmd_revert(root_overrides))
     if args.report:
         cmd_report(root_overrides)
         return
