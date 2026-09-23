@@ -203,6 +203,12 @@ def argv_under(text, env):
         for sub in set(re.findall(r"/etc/club3090/([\w.-]+)/install\.sh", body)):
             (etc / sub).mkdir(parents=True, exist_ok=True)
             (etc / sub / "install.sh").write_text("#!/bin/bash\nexit 0\n")
+        # #1358: the fa2 envelope helper is sourced, not an installer — ship the
+        # REAL one, so the entrypoint runs it exactly as the container would.
+        if "/etc/club3090/fa2/envelope.sh" in body:
+            (etc / "fa2").mkdir(parents=True, exist_ok=True)
+            (etc / "fa2" / "envelope.sh").write_text(
+                (root / "models/qwen3.8-27b/vllm/patches/fa2-fp8kv-sm86/envelope.sh").read_text(encoding="utf-8"))
         # A vLLM drafter compose may fail loud when its EXTERNAL draft model
         # directory is absent, rather than letting the engine emit a bare
         # missing-config.json (club-3090#1304 — the vLLM twin of the llama.cpp
