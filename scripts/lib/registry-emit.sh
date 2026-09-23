@@ -36,6 +36,7 @@ except Exception:
     yaml = None
 if os.environ.get("CLUB3090_EMIT_NO_YAML") == "1":
     yaml = None
+_YAML_LOADER = (getattr(yaml, "CSafeLoader", None) or yaml.SafeLoader) if yaml else None
 
 # Non-UTF-8 locales (LC_ALL=C VMs, #599/#584) also break the WRITE side: a
 # piped stdout defaults to the locale codec → UnicodeEncodeError printing the
@@ -92,7 +93,10 @@ def container_name(compose_path: str) -> str:
         m = _CONTAINER_RX.search(text)
         return _unwrap_env_default(m.group(2).strip()) if m else ""
     try:
-        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        # libyaml's CSafeLoader when PyYAML was built with it (same safe
+        # schema, same objects): this parses EVERY registered compose, and the
+        # pure-Python SafeLoader made it ~1.5 s of the ~2.2 s --json emit (#1382).
+        data = yaml.load(path.read_text(encoding="utf-8"), Loader=_YAML_LOADER) or {}
     except Exception as exc:
         raise RuntimeError(f"could not parse compose yaml: {exc}") from exc
     services = data.get("services") or {}
