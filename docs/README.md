@@ -20,9 +20,10 @@ Start here if you want to run a model.
 | [`LOCAL_AI_PRIMER.md`](LOCAL_AI_PRIMER.md) | New to local AI? Plain-English guide to hardware, engines and quantization before you pick anything. |
 | [`GLOSSARY.md`](GLOSSARY.md) | TPS, KV cache, MTP, TP, prefill vs decode — every term the other pages assume. |
 | [`WSL_SETUP.md`](WSL_SETUP.md) | Windows — running the stack on WSL2 from scratch. |
-| [`SINGLE_CARD.md`](SINGLE_CARD.md) | 1× RTX 3090 — workload → curated config → quick start. |
-| [`DUAL_CARD.md`](DUAL_CARD.md) | 2× RTX 3090 (PCIe / NVLink auto-detected) — workload → config → quick start. |
-| [`MULTI_CARD.md`](MULTI_CARD.md) | 3+ GPUs — TP scaling math, derivation from `dual.yml`, valid TP values. |
+| [`SINGLE_CARD.md`](SINGLE_CARD.md) | 1× RTX 3090 — every single-card slug (compose + announcement links), what to pick, what to watch for. Long form: [`SINGLE_CARD.history.md`](SINGLE_CARD.history.md). |
+| [`DUAL_CARD.md`](DUAL_CARD.md) | 2× RTX 3090 (PCIe / NVLink auto-detected) — every dual-card slug, what to pick, what to watch for. Long form: [`DUAL_CARD.history.md`](DUAL_CARD.history.md). |
+| [`MULTI_CARD.md`](MULTI_CARD.md) | 3+ GPUs — the 4- and 8-card slugs, several copies vs one split, which card counts work. Long form (scaling tables, TP=N recipe): [`MULTI_CARD.history.md`](MULTI_CARD.history.md). |
+| [`RUN_EVALS.md`](RUN_EVALS.md) | **Run the evals yourself** — the 8-pack and the health checks for any slug, per-engine thinking switches, and how to post results. |
 | [`PODS.md`](PODS.md) | Multiple models on one host — `pod.sh` + the c3 pod view/wizard, GPU pinning, placement, the estate file. |
 | [`PULL.md`](PULL.md) | Any HF safetensors repo — evaluate against the KV math, honest about confidence. |
 | [`BRING_YOUR_OWN.md`](BRING_YOUR_OWN.md) | Serve + tune + validate **your own** model/compose (any engine, single or dual) without touching the catalog. |

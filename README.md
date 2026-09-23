@@ -4,6 +4,8 @@
 
 If you have one or two RTX 3090s and want to run modern LLMs at home, in a homelab, or as a dev backend — this repo collects the working configs, patches, and benchmarks.
 
+> 📣 **The newest slugs, numbers and caveats are posted in [Announcements](https://github.com/noonghunna/club-3090/discussions/categories/announcements) first.** The repo docs catch up afterwards, so when a page here and an announcement disagree, the announcement is newer. The card pages below link each slug to its announcement thread. Want to measure a slug on your own rig? → **[Run the evals yourself](docs/RUN_EVALS.md)**.
+
 > 🎯 **4090 or 5090 owner?** The composes run cross-rig — contributors have benched both with measured numbers: **[Can I use a 4090? →](docs/FAQ.md#can-i-use-a-4090-instead-of-a-3090)** · **[Can I use a 5090? →](docs/FAQ.md#can-i-use-a-5090)**. The tooling is calibrated for 3090s but the configs are class-aware; per-class gotchas (4090's tighter idle VRAM, 5090's 32 GB envelope) + cross-rig benchmark rows live in the FAQ.
 
 > 🎨 **Want image generation too?** The **[Image Studio bundle](docs/ai-studio/image.md)** runs Ideogram-4 image gen + a chat model + Open WebUI together on two GPUs — one command: `bash scripts/setup-image-studio.sh`.
@@ -37,7 +39,7 @@ bash scripts/launch.sh
 #    Or skip the wizard with an explicit config:
 #      bash scripts/launch.sh --variant vllm/minimal        # single-card qwen (32K ctx, no vision, ~32/33 TPS)
 #      bash scripts/launch.sh --variant vllm/dual           # dual-card 262K + vision
-#    Retired single-card slugs still launch with --force; see docs/SINGLE_CARD.md "Escape hatches".
+#    Retired single-card slugs still launch with --force; see docs/SINGLE_CARD.md.
 #    Or partial flags (wizard fills the rest):
 #      bash scripts/launch.sh --model qwen3.6-27b --gpus 0,1
 #      bash scripts/launch.sh --tp 2 --pp 1               # override vLLM parallelism
@@ -110,13 +112,14 @@ c3                                              # launch  (also: python -m club3
 
 | You have | Start here |
 |---|---|
-| **1× RTX 3090** | [`docs/SINGLE_CARD.md`](docs/SINGLE_CARD.md) — workload → config → quick start |
-| **2× RTX 3090** (PCIe / NVLink auto-detected) | [`docs/DUAL_CARD.md`](docs/DUAL_CARD.md) — workload → config → quick start |
-| **3+ GPUs** (any class — 4× 3090, 8× A6000, mixed) | [`docs/MULTI_CARD.md`](docs/MULTI_CARD.md) — TP scaling math, derivation from `dual.yml`, valid TP values |
+| **1× RTX 3090** | [`docs/SINGLE_CARD.md`](docs/SINGLE_CARD.md) — every single-card slug, what to pick, what to watch for |
+| **2× RTX 3090** (PCIe / NVLink auto-detected) | [`docs/DUAL_CARD.md`](docs/DUAL_CARD.md) — every dual-card slug, what to pick, what to watch for |
+| **3+ GPUs** (any class — 4× 3090, 8× A6000, mixed) | [`docs/MULTI_CARD.md`](docs/MULTI_CARD.md) — the 4- and 8-card slugs, several copies vs one split, which card counts work |
 | **A model not in the supported list** / any HF safetensors repo | [`docs/PULL.md`](docs/PULL.md) — universal `pull` flow: evaluate against the KV math, honest about confidence |
 | Considering self-host vs cloud APIs | [`docs/COMPARISONS.md`](docs/COMPARISONS.md) — cost crossover + when each wins |
+| **Want to measure a slug yourself** | [`docs/RUN_EVALS.md`](docs/RUN_EVALS.md) — the 8-pack and the health checks, for any slug, and how to post the results |
 
-Each hardware page lists every supported model with the working composes for that card count, plus measured TPS and per-workload pitfalls. Model-specific deep dives (quants, engine internals) live under [`models/<name>/`](models/).
+Each hardware page lists every current slug for that card count (generated from the registry), with its status, a link to its compose file and a link to the announcement thread that has its numbers and caveats. Model-specific deep dives (quants, engine internals) live under [`models/<name>/`](models/).
 
 ---
 
