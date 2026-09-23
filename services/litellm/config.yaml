@@ -59,7 +59,7 @@ model_list:
       api_base: http://host.docker.internal:8119/v1
       api_key: EMPTY
 
-  - model_name: mimo-v2.6-9b  # status: experimental
+  - model_name: mimo-v2.6-9b
     litellm_params:
       model: openai/mimo-v2.6-9b
       api_base: http://host.docker.internal:8094/v1
