@@ -40,7 +40,16 @@
 #   Vision:    ✅ yes, via mmproj-f16. 27.4% of the SFT mixture was visual.
 #   Max ctx:   262144 — the model's full declared context, VALIDATED on one card.
 #   Genesis:   N/A — not a vLLM engine
-#   Status:    🧪 Experimental
+#   Status:    ⚠️ Production w/ caveats — promoted 2026-09-23 (verify-full, verify-stress
+#              ladder 6/6 to 240,785 tok, bench, soak-continuous PASS, full 8-pack).
+#   Caveats:   (1) tool calls depend on the vendored chat template until the llama.cpp
+#              pin moves past ggml-org/llama.cpp#29257 (see below); (2) with NO tools
+#              offered it answers in tool-call XML instead of a requested `<solution>`
+#              block (cli-40 one-shot 0/25, bugfind 2/15) — a model trait, not the
+#              engine; (3) verify-full [7/10] is a known harness false-fail on
+#              adaptive-thinking models (see below); (4) thinking is adaptive: with it
+#              ON, three 8-pack packs reasoned on only 1-4 of 15 responses.
+#   Quality:   8-pack, thinking ON: 79/150 p@1, 94/150 p@3 (2026-09-23; IF/SO v2.0.0).
 #   Best for:  a single-card long-context vision assistant that leaves the second
 #              GPU entirely free for another workload.
 #
