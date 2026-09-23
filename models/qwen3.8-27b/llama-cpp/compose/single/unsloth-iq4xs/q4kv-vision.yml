@@ -51,6 +51,12 @@
 # is no separate q8kv.yml compose anymore — the q8/131K MEASURED ladder (131072
 # boots; 196608/262144 fail on compute-pp / rs-cache) lives in
 # learnings/qwen3.8-27b.md (it was q8kv.yml's header, now removed).
+# ⚠️ That ladder was measured on IQ4_NL (15.22 GiB), NOT this compose's UD-IQ4_XS
+# (~1.95 GiB smaller), so 131072 is the validated q8_0 setting here, not a proven
+# ceiling. Community run #1380 (2026-09-21, 250 W): UD-IQ4_XS, KV_TYPE=q8_0,
+# CTX_SIZE=215000, and the F16 projector kept in system RAM (`--no-mmproj-offload`
+# — no knob in this compose) filled to 197,437 tok with 869 MiB free: it fits, but
+# under verify-stress's 1 GiB margin guard. Not reproduced on the reference rig.
 #
 # ---------------------------------------------------------------------------
 # Qwen3.8-27B on llama.cpp — single 3090, UD-IQ4_XS weights, q4_0 KV, 262K ctx, vision.
