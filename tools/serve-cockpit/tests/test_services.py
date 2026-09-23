@@ -4534,3 +4534,15 @@ class TestBringGgufDownload:
         d._download_runner = R()
         asyncio.run(d.run_bring_download("org/Repo", "vllm/dual"))
         assert cap["cmd"][:2] == ["bash", "scripts/pull.sh"]           # safetensors path unchanged
+
+
+def test_exllamav3_container_is_an_engine_in_the_stack_list():
+    """#1360: the cockpit's container list classifies by ENGINE_PREFIXES, which
+    lacked `tabbyapi-`, so an exllamav3 (TabbyAPI) server never appeared in it."""
+    from club3090_cockpit.services import _classify_container_kind
+
+    assert _classify_container_kind("tabbyapi-qwen38-flash-next-exl3-405") == "engine"
+    assert _classify_container_kind("exl3-custom") == "engine"
+    # Controls: widening the prefixes must not sweep in non-engines.
+    assert _classify_container_kind("open-webui") is None
+    assert _classify_container_kind("some-flask-app") is None

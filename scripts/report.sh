@@ -1569,7 +1569,7 @@ stage_label() {
 
 # Resolve the engine endpoint the same way preflight.sh / soak-test.sh do: by
 # the container's ENGINE-INTERNAL port mapping (vLLM 8000 / llama.cpp 8080 /
-# sglang 30000), never a model-name allowlist. Mirrors, rather than sources,
+# sglang 30000 / TabbyAPI 5000), never a model-name allowlist. Mirrors, rather than sources,
 # preflight.sh — that file executes checks at source time.
 resolve_stage_endpoint() {
   if [[ -n "${URL:-}" ]]; then printf '%s\n' "${URL%/}"; return 0; fi
@@ -1577,7 +1577,7 @@ resolve_stage_endpoint() {
   have docker || return 0
   [[ -n "$CONTAINER" ]] || return 0
   local internal mapped port
-  for internal in 8000 8080 30000; do
+  for internal in 8000 8080 30000 5000; do   # 5000 = TabbyAPI (exllamav3), #1360
     mapped="$(docker port "$CONTAINER" "${internal}/tcp" 2>/dev/null | head -1 || true)"
     if [[ -n "$mapped" ]]; then
       port="${mapped##*:}"

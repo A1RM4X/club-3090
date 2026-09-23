@@ -273,9 +273,8 @@ fi
 
 # Resolve actual served model id — eliminates MODEL=qwen vs MODEL=gemma
 # typos that produce HTTP 404 from served-model-name mismatch.
-DETECTED_MODEL=$(curl -sf -m 5 "$URL/v1/models" 2>/dev/null \
-  | python3 -c "import json,sys; print(json.load(sys.stdin)['data'][0]['id'])" 2>/dev/null \
-  || echo "")
+source "${ROOT_DIR}/scripts/lib/served-model.sh"   # #1360: TabbyAPI-aware served id
+DETECTED_MODEL="$(club_served_model_id "$URL")"
 if [[ -n "$DETECTED_MODEL" && -z "${MODEL:-}" ]]; then
   MODEL="$DETECTED_MODEL"
 fi

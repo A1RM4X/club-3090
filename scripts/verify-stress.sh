@@ -439,6 +439,27 @@ fi
 
 pass() { printf "  \033[32m✓\033[0m %s\n" "$1"; }
 fail() { printf "  \033[31m✗\033[0m %s\n" "$1"; printf "    \033[33m→\033[0m %s\n" "$2"; return 1; }
+
+# completion_tokens_of — read a chat-completion body on stdin and print
+# "<count> <source>": the engine's usage.completion_tokens ("usage"), or, when the
+# engine returned no usage, an estimate from the returned text at ~4 chars/token
+# ("estimated"). #1360: TabbyAPI returns `usage: null` on non-streaming requests
+# unless stream_options.include_usage is set, and the old `d.get('usage', {})`
+# read crashed on null and fell back to 0 — so a full answer read as "0 tokens".
+completion_tokens_of() {
+  python3 -c 'import json,sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    print("0 unparseable"); raise SystemExit
+ct = (d.get("usage") or {}).get("completion_tokens")
+if isinstance(ct, int) and ct > 0:
+    print(ct, "usage")
+else:
+    m = ((d.get("choices") or [{}])[0] or {}).get("message") or {}
+    text = (m.get("content") or "") + (m.get("reasoning_content") or m.get("reasoning") or "")
+    print(len(text) // 4, "estimated" if text else "usage")' 2>/dev/null || echo "0 unparseable"
+}
 _SKIPPED=0
 skip() { printf "  \033[33m⊘\033[0m %s (skipped)\n" "$1"; _SKIPPED=1; }
 
@@ -979,7 +1000,9 @@ PYEOF
       local finish content_chars completion_tokens
       finish="$(echo "$body" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['choices'][0].get('finish_reason') or '?')" 2>/dev/null || echo "?")"
       content_chars="$(echo "$body" | python3 -c "import sys,json; d=json.load(sys.stdin); m=d['choices'][0].get('message') or {}; print(len(m.get('content') or ''))" 2>/dev/null || echo "0")"
-      completion_tokens="$(echo "$body" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('usage',{}).get('completion_tokens', 0))" 2>/dev/null || echo "0")"
+      local token_src
+      read -r completion_tokens token_src < <(printf '%s' "$body" | completion_tokens_of)
+      [[ "$token_src" == "estimated" ]] && completion_tokens="~${completion_tokens} (estimated; engine returned no usage)"
       # The bug we care about (Cliff 1 mech B) crashes the engine — that's
       # HTTP 500. Any HTTP 200 means the inductor compile path actually
       # executed without ICE'ing. Token count low is fine; the model just
@@ -1205,13 +1228,15 @@ PYEOF
   case "$http_code" in
     200)
       body="$(cat "${resp_file}")"
-      local completion_tokens
-      completion_tokens="$(echo "$body" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('usage',{}).get('completion_tokens', 0))" 2>/dev/null || echo "0")"
-      if [[ "$completion_tokens" -lt 500 ]]; then
-        fail "reasoning-heavy returned only ${completion_tokens} tokens (expected >500 for max=8192)" \
+      local completion_tokens token_src shown
+      read -r completion_tokens token_src < <(printf '%s' "$body" | completion_tokens_of)
+      shown="${completion_tokens}"
+      [[ "$token_src" == "estimated" ]] && shown="~${completion_tokens} (estimated from text; engine returned no usage)"
+      if [[ ! "$completion_tokens" =~ ^[0-9]+$ ]] || [[ "$completion_tokens" -lt 500 ]]; then
+        fail "reasoning-heavy returned only ${shown} tokens (expected >500 for max=8192)" \
              "Possible spec-decode AL collapse or early stop. Check finish_reason."
       else
-        pass "reasoning-heavy OK — ${completion_tokens} completion tokens"
+        pass "reasoning-heavy OK — ${shown} completion tokens"
       fi
       ;;
     500)

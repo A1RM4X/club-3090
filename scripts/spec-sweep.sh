@@ -194,7 +194,7 @@ _measure_vllm_arm() {
   for _ in $(seq 1 "$GENS"); do
     local t0 toks dt
     t0=$(date +%s.%N)
-    toks="$(_gen "" "$GEN_TOKENS" "$TEMP" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("usage",{}).get("completion_tokens",0))' 2>/dev/null || echo 0)"
+    toks="$(_gen "" "$GEN_TOKENS" "$TEMP" | python3 -c 'import json,sys;print((json.load(sys.stdin).get("usage") or {}).get("completion_tokens",0))' 2>/dev/null || echo 0)"
     dt="$(awk -v a="$(date +%s.%N)" -v b="$t0" 'BEGIN{print a-b}')"
     tps_list+=("$(awk -v t="$toks" -v d="$dt" 'BEGIN{printf "%.2f", (d>0)?t/d:0}')")
   done

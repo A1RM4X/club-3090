@@ -1490,8 +1490,8 @@ wait_ready() {
   _port="${READY_URL#*://}"; _port="${_port#*:}"; _port="${_port%%/*}"
   # Resolved BEFORE the ready line now: the generation probe needs the served id
   # too, and it must come from the endpoint — never a hardcoded name.
-  _served="$(curl -sf --max-time 3 "${READY_URL}" \
-    | python3 -c 'import json,sys; print(json.load(sys.stdin)["data"][0]["id"])' 2>/dev/null || true)"
+  source "${ROOT_DIR}/scripts/lib/served-model.sh"   # #1360: TabbyAPI-aware served id
+  _served="$(CLUB_MODEL_ID_TIMEOUT_S=3 club_served_model_id "${READY_URL}")"
 
   # #1100 — prove generation works (and warm the moe-cache expert pool) before
   # claiming ready. Only a dead/erroring server fails here; see ready_probe().

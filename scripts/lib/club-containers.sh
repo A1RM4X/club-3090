@@ -120,6 +120,35 @@ club_container_re_loose() {
   printf '%s' "(${CLUB_CONTAINER_PREFIX_RE_FALLBACK#^}${re})"
 }
 
+# Engine-INTERNAL ports, used to find a serving container by its `docker ps`
+# port mapping: vLLM 8000 / llama.cpp 8080 / SGLang 30000 / TabbyAPI (exllamav3)
+# 5000. ⚠️ Mirrored in tools/tui-core/club3090_tui_core/detect.py and
+# scripts/catalog.sh; test-engine-port-set-drift.sh asserts every copy matches.
+CLUB_ENGINE_PORTS_ANY='8000|8080|30000|5000'
+# Ports that identify an engine on their own. 5000 is excluded: it is also a
+# common port for unrelated apps, so it only counts for a container that is ours.
+CLUB_ENGINE_PORTS_SELF_EVIDENT='8000|8080|30000'
+
+# club_engine_port_lines — filter `name|ports` lines (docker ps --format
+# '{{.Names}}|{{.Ports}}') on stdin down to the ones publishing an engine port.
+# 8000/8080/30000 qualify on the port alone; a line that qualifies ONLY via 5000
+# must also be one of our containers by name (#1360: TabbyAPI listens on 5000,
+# and without it every exl3 server was invisible to endpoint autodetection).
+club_engine_port_lines() {
+  local line re
+  re="$(club_container_re_loose)"
+  while IFS= read -r line; do
+    [[ -z "$line" ]] && continue
+    if command grep -qE -- "->(${CLUB_ENGINE_PORTS_SELF_EVIDENT})/tcp" <<<"$line"; then
+      printf '%s\n' "$line"
+    elif command grep -qE -- "->5000/tcp" <<<"$line" \
+        && command grep -qE -- "$re" <<<"${line%%|*}"; then
+      printf '%s\n' "$line"
+    fi
+  done
+  return 0
+}
+
 # club_running_container [fallback_re] — the first RUNNING container that is
 # ours, or empty. Ordering is docker's; callers that need a specific one pass
 # CONTAINER= explicitly (every caller already supports that).

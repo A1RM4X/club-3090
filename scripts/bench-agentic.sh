@@ -131,8 +131,8 @@ fi
 
 # Auto-detect model name from API if not explicitly provided
 if [[ -z "$MODEL" ]]; then
-  MODEL=$(curl -sf "${URL}/v1/models" | python3 -c \
-    "import json,sys; d=json.load(sys.stdin).get('data',[]); print(d[0]['id'] if d else '')" 2>/dev/null || true)
+  source "${ROOT_DIR}/scripts/lib/served-model.sh"   # #1360: TabbyAPI-aware served id
+  MODEL="$(club_served_model_id "${URL}")"
 fi
 if [[ -z "$MODEL" ]]; then
   echo "ERROR: could not detect model name from ${URL}/v1/models — set MODEL=<name>" >&2
