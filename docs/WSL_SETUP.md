@@ -249,7 +249,7 @@ You still do steps **1–3** (WSL + driver/passthrough + `.wslconfig` RAM) and *
 
 ## Diagnostics on WSL2
 
-Filing a bug or sharing cross-rig data? Run [`report.sh`](../README.md#diagnostics). On a minimal WSL2 distro, install `pciutils` first so the hardware section is complete (it's tiny and not bundled by default):
+Filing a bug or sharing cross-rig data? Run [`report.sh`](TROUBLESHOOTING.md#generate-a-report). On a minimal WSL2 distro, install `pciutils` first so the hardware section is complete (it's tiny and not bundled by default):
 
 ```bash
 sudo apt install -y pciutils

@@ -31,6 +31,7 @@ Start here if you want to run a model.
 | [`PCIE_P2P.md`](PCIE_P2P.md) | PCIe-only multi-GPU — read your `topo -m`, and optionally enable P2P over PCIe without NVLink. |
 | [`GLOSSARY.md`](GLOSSARY.md) | TPS / KV / MTP / TP and the rest of the vocabulary. |
 | [`FAQ.md`](FAQ.md) | Common setup and operational questions. |
+| [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md) | Generate a paste-ready report (`report.sh`), and boot a compose directly when the launcher won't. |
 | [`COMPARISONS.md`](COMPARISONS.md) | Self-host vs cloud APIs — cost crossover and when each wins. |
 | [`EXAMPLES.md`](EXAMPLES.md) | Worked end-to-end usage examples. |
 | [`ai-studio/`](ai-studio/README.md) | **Club 3090 AI Studio** — chat-driven, all-modality creative studio (text · image · video · audio) on 2× 3090. **Start here** for the architecture + the full 8-lane matrix. |

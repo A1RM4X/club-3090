@@ -199,7 +199,7 @@ VLLM_ENFORCE_EAGER=1
 
 ## Engine choice
 
-Different trades. vLLM is faster (51-89 TPS depending on config) and has full feature support (vision · tools · MTP spec-decode · streaming · reasoning). As of 2026-04-30 PM **Cliff 1 (25K tool prefills) is closed**. ⚠️ **As of 2026-05-05 Cliff 2 (>50K single-prompts) regressed under Genesis v7.72.2** — PN59 streaming-GDN was advertised as the structural fix but doesn't engage on the chunked-prefill code path that 24 GB single-card configs are forced to take. Filed at [Sandermage/genesis-vllm-patches#22](https://github.com/Sandermage/genesis-vllm-patches/issues/22). For >50K single-prompt or full-262K cold context, **llama.cpp single (~21 TPS, no cliffs at 262K) or vLLM dual TP=2 (88-127 TPS, 262K verified at 237K) are the safe paths**. See the launch frame: [vLLM dual = max throughput, llama.cpp single = max robustness](../README.md#tldr--what-this-is).
+Different trades. vLLM is faster (51-89 TPS depending on config) and has full feature support (vision · tools · MTP spec-decode · streaming · reasoning). As of 2026-04-30 PM **Cliff 1 (25K tool prefills) is closed**. ⚠️ **As of 2026-05-05 Cliff 2 (>50K single-prompts) regressed under Genesis v7.72.2** — PN59 streaming-GDN was advertised as the structural fix but doesn't engage on the chunked-prefill code path that 24 GB single-card configs are forced to take. Filed at [Sandermage/genesis-vllm-patches#22](https://github.com/Sandermage/genesis-vllm-patches/issues/22). For >50K single-prompt or full-262K cold context, **llama.cpp single (~21 TPS, no cliffs at 262K) or vLLM dual TP=2 (88-127 TPS, 262K verified at 237K) are the safe paths**. Current picks per card count: [SINGLE_CARD.md](SINGLE_CARD.md) · [DUAL_CARD.md](DUAL_CARD.md).
 
 ### Why not Ollama?
 
@@ -255,7 +255,7 @@ The **text encoder.** Image models bundle a big one — FLUX.1 → T5-XXL (~5–
 
 ### Why is single-card TPS lower than I expected?
 
-Look at the [TPS chart](../README.md#measured-tps-at-a-glance) — single-card vLLM is 51-55 TPS narrative / 67-70 code at 48K, which beats most consumer-3090 numbers we've seen reported. If you're seeing materially lower, the most common causes are:
+Look at the measured rows in [BENCHMARKS.md](../BENCHMARKS.md) — single-card vLLM is 51-55 TPS narrative / 67-70 code at 48K, which beats most consumer-3090 numbers we've seen reported. If you're seeing materially lower, the most common causes are:
 1. Power cap < 230 W (this rig benches at 230 W; 280 W gives ~+5%, 350 W ~+10%)
 2. Wrong compose for your prompt shape (use the `tq3-mtp.yml` 48K single-card default for chat — don't pick `long-vision.yml` if you don't need 198K)
 3. Engine-pin drift — bumping the vLLM pin between bench runs can move acceptance length. Pin the engine and re-bench both arms in the same session.

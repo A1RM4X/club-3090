@@ -137,6 +137,29 @@ Each of these exists because leaving it out produced a wrong number for us.
   every functional test still passes.
 - **Label anything non-default**: KV type, context, power limit, reasoning effort, sampler overrides.
 
+## Other test commands
+
+Everything above runs against the compose that's currently up. The individual tools:
+
+```bash
+bash scripts/bench.sh                                 # throughput: narrative + code, 3 warm-up + 5 measured
+bash scripts/quality-test.sh --quick                  # 2 packs, ~5-10 min, no Docker
+bash scripts/quality-test.sh                          # --medium: 5 packs, ~15-25 min, no Docker
+bash scripts/quality-test.sh --full                   # the 8-pack (150 scenarios; needs the sandbox images)
+bash scripts/quality-test.sh --pack aider-polyglot-30 # one named pack
+bash scripts/quality-test.sh --reasoning              # HumanEval+/LCB/GPQA/GSM suite, separate from --full
+```
+
+`rebench-full.sh` runs the whole pipeline for one model and writes everything under
+`results/rebench/<tag>/`. It replaces `report.sh --full` rather than adding to it:
+
+```bash
+bash scripts/rebench-full.sh                      # tag derived from the model
+bash scripts/rebench-full.sh --skip soak,concurrency   # skip phases
+bash scripts/rebench-full.sh --resume             # continue an interrupted run
+bash scripts/rebench-full.sh --url http://HOST:PORT --model NAME --engine llama-cpp   # any OpenAI-compatible endpoint
+```
+
 ## 5. Posting
 
 Open **Numbers from your rig** (issue template) and attach: the `report.sh --full` file, the
