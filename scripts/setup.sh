@@ -234,8 +234,8 @@ _picker_hw_mark() {
   printf '%s' "${status}"
 }
 
-model_picker_line() { # <idx> <model> <size-text> <compose-paths>
-  local idx="$1" model="$2" size="$3" paths="$4" status mark reason
+model_picker_line() { # <idx> <model> <label> <size-text> <compose-paths>
+  local idx="$1" model="$2" label="$3" size="$4" paths="$5" status mark reason
   status="$(_picker_hw_mark "$model" "$paths")"
   reason="${status#*|}"
   if [[ "$status" == ok\|* ]]; then
@@ -243,22 +243,39 @@ model_picker_line() { # <idx> <model> <size-text> <compose-paths>
   else
     mark="✗"
   fi
-  printf "  %s. %-14s (%s)  %s %s\n" "$idx" "$(model_label "$model")" "$size" "$mark" "$reason"
+  printf "  %s. %-14s (%s)  %s %s\n" "$idx" "$label" "$size" "$mark" "$reason"
 }
 
 pick_model_interactive() {
   # shellcheck source=lib/compose-meta.sh
   source "${ROOT_DIR}/scripts/lib/compose-meta.sh"
+  # shellcheck source=lib/registry-lookup.sh
+  source "${ROOT_DIR}/scripts/lib/registry-lookup.sh"
+  REGISTRY_LOOKUP_ROOT="${ROOT_DIR}"
 
-  local -a _ids _both=()
-  mapfile -t _ids < <(_catalog_py "[m['id'] for m in data['models']]")
+  # ⚠️ Every picker line renders in a $( ) subshell, and a memo set inside one
+  # dies with it — so each line used to re-run weights.py (twice), nvidia-smi,
+  # and the registry lookups paid a second full emit (#1382). Resolve each input
+  # ONCE here, in the shell those subshells fork from, and they inherit it.
+  compose_hw_detect_gpus >/dev/null 2>&1 || true   # primes _COMPOSE_HW_GPU_CACHE
+  # One catalog read for every row: id, label, default-weights size.
+  local -a _ids _labels _sizes _both=()
+  local _row_id _row_label _row_size
+  while IFS=$'\x1f' read -r _row_id _row_label _row_size; do
+    [[ -n "${_row_id}" ]] || continue
+    _ids+=("${_row_id}")
+    _labels+=("${_row_label}")
+    _sizes+=("${_row_size}")
+  done < <(_catalog_py "[chr(31).join([m['id'], m.get('display_name') or m['id'], str(m.get('size_gb'))]) for m in data['models']]")
   read_both_models _both
 
   # Registry-derived compose paths per model, for the hw-fit fallback above.
-  local _reg_tmp _reg_pick_json="" ; _reg_tmp="$(mktemp)"
-  bash "${ROOT_DIR}/scripts/lib/registry-emit.sh" --json >"${_reg_tmp}" 2>/dev/null && _reg_pick_json=1
+  # ONE registry emit, into registry-lookup's per-process cache, so the
+  # compose_hw_model_status lookups below reuse it instead of emitting again.
+  local _reg_json=""
+  registry_lookup_cache_path 2>/dev/null && _reg_json="${_registry_lookup_cache}"
   local -A _model_composes=()
-  if [[ -n "${_reg_pick_json}" ]]; then
+  if [[ -n "${_reg_json}" ]]; then
     eval "$(python3 -c '
 import json, shlex, sys
 data = json.load(open(sys.argv[1], encoding="utf-8"))
@@ -276,19 +293,21 @@ for v in data.get("variants", []):
 sep = " "
 for m in order:
     print(f"_model_composes[{shlex.quote(m)}]={shlex.quote(sep.join(acc[m]))}")
-' "${_reg_tmp}")"
+' "${_reg_json}")"
   fi
-  rm -f "${_reg_tmp}"
 
   echo "[setup] Which model to download?" >&2
   echo "" >&2
-  local _idx=0 _id _size _both_idx=""
-  for _id in "${_ids[@]}"; do
+  local _idx=0 _i _id _both_idx=""
+  for _i in "${!_ids[@]}"; do
     _idx=$((_idx + 1))
-    # Size of the model's default weight variant, straight from the catalog.
-    _size="$(_catalog_py "str(next((m.get('size_gb') for m in data['models'] if m['id'] == sys.argv[2]), '?'))" "${_id}")"
-    model_picker_line "$_idx" "${_id}" "~${_size} GB default weights" "${_model_composes[${_id}]:-}" >&2
+    _id="${_ids[${_i}]}"
+    # Label + size of the model's default weight variant, from the one catalog read above.
+    model_picker_line "$_idx" "${_id}" "${_labels[${_i}]}" "~${_sizes[${_i}]} GB default weights" "${_model_composes[${_id}]:-}" >&2
   done
+  # The registry was only needed to render the list; don't strand the cache
+  # file for the rest of a (possibly hours-long) download run.
+  registry_lookup_cleanup
   if ((${#_both[@]} >= 2)); then
     _idx=$((_idx + 1))
     _both_idx="${_idx}"
