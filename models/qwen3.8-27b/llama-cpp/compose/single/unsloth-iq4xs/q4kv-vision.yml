@@ -1,11 +1,11 @@
 # ===========================================================================
 # Profile (at-a-glance):
 #   Model:     Qwen3.8-27B (Unsloth Dynamic UD-IQ4_XS GGUF, 14.3 GB) + mmproj-F16
-#   Engine:    llama.cpp (mainline server-cuda-b10236 — the shared llama-cpp-local pin)
+#   Engine:    llama.cpp mainline b10920 (digest-pinned — the shared llama-cpp-local pin)
 #   Topology:  Single 3090 (TP=1)
 #   Drafter:   MTP n=2 built-in (--spec-type draft-mtp; the head is EMBEDDED in this GGUF)
 #              Toggle: SPEC_N=<n> sets depth; SPEC_N=0 (or SPEC=off) disables
-#   KV:        q4_0 K + q4_0 V  ⚠️ SUB-Q8 — below the stack serving KV floor (see "KV choice")
+#   KV:        q4_0 K + q4_0 V  ⚠️ SUB-Q8 — trades KV precision for the full 262K (see "KV choice")
 #   Vision:    YES — mmproj-F16 (928 MB) mounted; multimodal input enabled
 #   Template:  native (GGUF-embedded) via --jinja
 #   Max ctx:   262144 (full n_ctx_train) — reached by halving the KV with q4_0.
@@ -14,13 +14,13 @@
 #   Genesis:   N/A — llama.cpp engine; Genesis is vLLM/Qwen3-Next-specific
 #   Status:    🧪 Experimental
 #   Caveats:   THREE, all disclosed:
-#              (1) ⚠️ q4_0 KV is BELOW the stack serving floor. Stack policy is a
-#                  q8_0-grade KV for anything that serves; q4_0 KLD is ~5.75x worse
+#              (1) ⚠️ q4_0 KV trades precision for context. q4_0 KLD is ~5.75x worse
 #                  than q8_0 and has NEVER been depth-validated on this DeltaNet
 #                  hybrid family. This variant BUYS the full 262K context WITH that
-#                  quality trade — a max-context / vision exhibit, not the
-#                  serving-grade tier. For serving-grade KV override
-#                  KV_TYPE=q8_0 CTX_SIZE=131072 on this compose (q8@131K + vision).
+#                  trade. Whether it costs quality on this model is unmeasured — a
+#                  validation question (8-pack + soak), not a bar to promotion. For
+#                  q8_0 KV, override KV_TYPE=q8_0 CTX_SIZE=131072 on this compose
+#                  (q8@131K + vision).
 #              (2) VISION is untested beyond a single correct image-recognition
 #                  probe (blue-circle + red-7, 2026-08-20). No multi-image, no
 #                  high-res, no grounding-accuracy run. Base carries the vision
@@ -33,11 +33,12 @@
 #                  on a uniform haystack, NOT retrieval quality (#1017) — do not
 #                  quote it beside real NIAH/RULER scores. Full-fidelity retrieval
 #                  NIAH + the fine ladder past 240K still unrun.
-#              Promote to 🧪/⚠️ only after bench + verify-stress NIAH + soak. q4 KV
-#              keeps this off ✅ Production permanently (floor policy).
+#              Promotion needs the standard gates: the full verify-stress ladder,
+#              soak-continuous and the 8-pack. q4 KV does NOT cap it below ✅ —
+#              Production is reachable on evidence (maintainer, 2026-09-23, disc #1385).
 #   Engine-profile: llama-cpp-local
 #   Best for:  single-3090 "max everything" — full 262K context AND vision on one
-#              card, accepting the q4 KV quality trade. NOT serving-grade; see Caveats.
+#              card, accepting the q4 KV precision trade; see Caveats.
 # ---------------------------------------------------------------------------
 # THIS is the ONLY compose for the llamacpp/qwen38-27b-single-iq4xs slug — the
 # single-card slug ships q4/262K/vision as its config (maintainer decision
@@ -45,7 +46,7 @@
 #
 #   Dual-card sibling slug: llamacpp/qwen38-27b-dual-q8kxl (2x 3090, q8_0, 262144).
 #
-# SERVING-GRADE q8_0 KV (131K) stays reachable — override the KV + ctx on THIS
+# q8_0 KV (131K) stays reachable — override the KV + ctx on THIS
 # compose:  KV_TYPE=q8_0 CTX_SIZE=131072  (gives q8@131K; the F16 projector stays
 # mounted but is decode-free, so you also get vision at no throughput cost). There
 # is no separate q8kv.yml compose anymore — the q8/131K MEASURED ladder (131072
@@ -79,11 +80,12 @@
 #   the ONE place the sub-q8 trade is on the table (see KV choice).
 #
 # KV CHOICE — why q4_0 HERE (and only here):
-#   The q8_0 sibling documents the floor: q8_0-grade KV for anything that serves;
-#   sub-q8 is a speed/context exhibit, never the serving default. This compose IS
-#   that exhibit, declared as such (🐣 + Caveat 1). It exists because the product
-#   goal — full 262K + vision on ONE 24 GB card — is unreachable at q8_0. If you
-#   want serving-grade KV, override KV_TYPE=q8_0 CTX_SIZE=131072 (q8@131K + vision).
+#   The stack prefers q8_0-grade KV, and q4_0 is its floor. This compose takes q4_0
+#   because the product goal — full 262K + vision on ONE 24 GB card — is
+#   unreachable at q8_0 (Caveat 1). Whether that costs quality on this model is
+#   unmeasured; it is judged by the same gates as any slug, and q4 alone does not
+#   keep it off ✅ (2026-09-23). For q8_0 KV, override KV_TYPE=q8_0
+#   CTX_SIZE=131072 (q8@131K + vision).
 #
 # MEASURED (fit) — ✅ 2026-08-20, single 3090 (GPU0), this exact compose:
 #   Boot: q4_0 KV @262144 + F16 projector loaded ('multimodal model'),
@@ -117,7 +119,7 @@
 #                    it if a future quant/pin changes the fit)
 #   BATCH_SIZE       llama.cpp -b        (default: 4096)
 #   UBATCH_SIZE      llama.cpp -ub       (default: 512 — the tight-headroom lever)
-#   KV_TYPE          K and V quant type  (default: q4_0 — sub-q8 exhibit; see KV CHOICE)
+#   KV_TYPE          K and V quant type  (default: q4_0 — sub-q8; see KV CHOICE)
 #   IMAGE_MIN_TOKENS min image tokens    (unset by default; set 1024 for grounding)
 #   NP               parallel slots      (default: 1)
 #   SERVED_NAME      --alias value       (default: qwen3.8-27b)
@@ -131,9 +133,11 @@
 #
 # Quick start:
 #   WEIGHT_KEY=qwen3.8-27b:unsloth-iq4xs bash scripts/setup.sh qwen3.8-27b   # + mmproj via the vision slug companion
-#   bash scripts/launch.sh --variant llamacpp/qwen38-27b-single-iq4xs --force
-#   (--force is REQUIRED: 🐣 Incubating slugs are launch-gated and hidden from
-#    `switch.sh --list`; reveal with `--list --all`.)
+#   FORCE=1 bash scripts/launch.sh --variant llamacpp/qwen38-27b-single-iq4xs
+#   (or: bash scripts/switch.sh --force llamacpp/qwen38-27b-single-iq4xs)
+#   FORCE is REQUIRED while the slug is 🧪 Experimental (non-functional statuses
+#   are launch-gated). launch.sh takes it as the env var; `launch.sh … --force`
+#   fails with "Unknown flag".
 
 services:
   llama-cpp-qwen38-27b-single:
