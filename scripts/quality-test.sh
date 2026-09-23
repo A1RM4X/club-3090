@@ -740,9 +740,8 @@ fi
 #                    case: /v1/models returns the first registered model (often
 #                    the wrong one), and clobbering the user's choice routes the
 #                    whole run at the wrong model (see disc #152, @ampersandru).
-DETECTED_MODEL=$(curl -sf -m 5 "${URL}/v1/models" 2>/dev/null \
-  | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['data'][0]['id'])" 2>/dev/null \
-  || echo "")
+source "${ROOT_DIR}/scripts/lib/served-model.sh"   # #1360: TabbyAPI-aware served id
+DETECTED_MODEL="$(club_served_model_id "${URL}")"
 if [[ -n "$DETECTED_MODEL" && "$DETECTED_MODEL" != "$MODEL" ]]; then
   if [[ "$MODEL_EXPLICIT" == "1" ]]; then
     echo "[quality-test] NOTE: endpoint /v1/models reports '${DETECTED_MODEL}', but you set MODEL='${MODEL}' — using YOUR value." >&2

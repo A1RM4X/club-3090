@@ -416,8 +416,8 @@ elif f.cpu_offload_gb and int(f.cpu_offload_gb) > 0:
 # because catalog.sh must run on the launcher's no-extra-deps path;
 # test-catalog-detectability.sh asserts they still match, so a change there
 # cannot silently strand this warning.
-_DETECT_PREFIXES = ("vllm-", "llama-cpp-", "ik-llama-", "sglang-", "beellama-")
-_DETECT_PORTS = ("8000", "8080", "30000")
+_DETECT_PREFIXES = ("vllm-", "llama-cpp-", "ik-llama-", "sglang-", "beellama-", "tabbyapi-", "exl3-", "exllamav3-")
+_DETECT_PORTS = ("8000", "8080", "30000", "5000")
 _undetectable = []
 if f.container_name and not f.container_name.startswith(_DETECT_PREFIXES):
     _undetectable.append(

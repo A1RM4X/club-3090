@@ -29,6 +29,8 @@ export PYTHONUTF8="${PYTHONUTF8:-1}"
 [[ -n "${_PREFLIGHT_LOADED:-}" ]] && return 0
 # shellcheck source=lib/club-containers.sh
 source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/lib/club-containers.sh"
+# shellcheck source=lib/served-model.sh
+source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/lib/served-model.sh"
 # #1247: the canonical engine-family resolver. preflight_compose_deps used to
 # carry its own image regex and was blind to our own fork's image name.
 # shellcheck source=scripts/lib/engine-kind.sh
@@ -1526,7 +1528,8 @@ preflight_autodetect_endpoint() {
   fi
 
   # Detect a running inference container by its ENGINE-INTERNAL port mapping
-  # (vLLM 8000 / llama.cpp 8080 / sglang 30000), NOT a hardcoded model-name
+  # (vLLM 8000 / llama.cpp 8080 / sglang 30000 / TabbyAPI 5000 — the last only
+  # for a container that is ours by name, see club_engine_port_lines), NOT a hardcoded model-name
   # allowlist — so any compose is found regardless of model: gemma-4-12b,
   # qwen-35b-a3b, beellama, a BYO container, etc. (#310: the old allowlist only
   # knew qwen36-27b / gemma-4-31b, so everything else silently fell back to 8020).
@@ -1539,7 +1542,7 @@ preflight_autodetect_endpoint() {
   # before its own "endpoint not responding" path. Empty = the no-container case.
   local engine_lines found_line
   engine_lines=$(docker ps --format '{{.Names}}|{{.Ports}}' 2>/dev/null \
-    | command grep -E '([0-9]{1,3}\.){3}[0-9]{1,3}:[0-9]+->(8000|8080|30000)/tcp' || true)
+    | club_engine_port_lines || true)
   if [[ -z "$engine_lines" ]]; then
     return 0   # nothing serving on an engine port; defaults stand
   fi
@@ -1556,9 +1559,10 @@ preflight_autodetect_endpoint() {
   detected_name="${found_line%%|*}"
   # Extract host port from "0.0.0.0:8011->8000/tcp", "[::]:8011->8000/tcp",
   # or "127.0.0.1:8011->8000/tcp" forms (BIND_HOST=127.0.0.1 produces the last).
-  # llama-cpp container maps to internal 8080, vllm to 8000, sglang to 30000.
+  # llama-cpp container maps to internal 8080, vllm to 8000, sglang to 30000,
+  # TabbyAPI (exllamav3) to 5000.
   detected_port=$(echo "${found_line#*|}" \
-    | command grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}:[0-9]+->(8000|8080|30000)/tcp' \
+    | command grep -oE "([0-9]{1,3}\.){3}[0-9]{1,3}:[0-9]+->(${CLUB_ENGINE_PORTS_ANY})/tcp" \
     | head -1 \
     | sed -E 's|^[^:]+:([0-9]+)->.*|\1|')
 
@@ -1629,12 +1633,12 @@ preflight_autodetect_model() {
   while :; do
     body="$(curl -sf -m 5 "${url%/}/v1/models" 2>/dev/null || true)"
     if [[ -n "$body" ]]; then
-      detected="$(printf '%s' "$body" | python3 -c "import json,sys
-try:
-    d = json.load(sys.stdin).get('data', [])
-    print(d[0]['id'] if d else '')
-except Exception:
-    print('')" 2>/dev/null || true)"
+      # #1360: TabbyAPI (exllamav3) lists EVERY folder in its model directory on
+      # /v1/models, so the first entry is whichever folder the filesystem
+      # returns first (a report got 'modules'). club_served_model_id prefers
+      # its /v1/model (the LOADED model); other engines 404 there and get the
+      # first /v1/models entry, exactly as before.
+      detected="$(club_served_model_id "$url")"
       break
     fi
     (( SECONDS >= deadline )) && break
@@ -1647,7 +1651,7 @@ except Exception:
 
   if [[ -n "$detected" ]]; then
     MODEL="$detected"
-    echo "[autodetect] served model='${MODEL}' (from ${url%/}/v1/models; set MODEL= to override)" >&2
+    echo "[autodetect] served model='${MODEL}' (from ${url%/}/v1/model[s]; set MODEL= to override)" >&2
     return 0
   fi
   if [[ -z "$body" ]]; then

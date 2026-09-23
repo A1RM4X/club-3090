@@ -12,6 +12,8 @@ from club3090_tui_core.detect import (
     GpuInfo,
     PORT_MAP_BROAD_RE,
     PORT_MAP_ANY_RE,
+    ENGINE_INTERNAL_PORTS,
+    ENGINE_PREFIXES,
     _classify_engine,
     _classify_engine_from_container,
     _registry_claims,
@@ -413,3 +415,38 @@ class TestAnyPortRegex:
     def test_broad_regex_still_rejects_arbitrary_internal_port(self):
         """The narrow regex must stay narrow — it gates UNCLAIMED containers."""
         assert not PORT_MAP_BROAD_RE.search("0.0.0.0:20272->9000/tcp")
+
+
+class TestExllamav3Detection:
+    """#1360: an exllamav3 (TabbyAPI) container was invisible to c3.
+
+    TabbyAPI listens on 5000 inside the container and our composes name it
+    ``tabbyapi-…``; neither was in the heuristic sets, so the Doctor tab — which
+    detects without registry rows — and the cockpit's container list both skipped it.
+    """
+
+    TABBY_PS = "tabbyapi-qwen38-flash-next-exl3-405|0.0.0.0:8181->5000/tcp"
+
+    def test_found_without_registry_rows(self):
+        with patch("asyncio.create_subprocess_exec", return_value=_proc(self.TABBY_PS)):
+            target = _run(detect_endpoint())
+        assert target.container == "tabbyapi-qwen38-flash-next-exl3-405"
+        assert target.host_port == 8181
+        assert target.internal_port == 5000
+        assert target.engine == "exllamav3"
+        assert target.url == "http://localhost:8181"
+
+    def test_unrelated_app_on_5000_still_ignored(self):
+        """Negative control: 5000 is a common app port, so the port alone must not admit a container."""
+        ps = "some-flask-app|0.0.0.0:5000->5000/tcp"
+        with patch("asyncio.create_subprocess_exec", return_value=_proc(ps)):
+            target = _run(detect_endpoint())
+        assert target.container != "some-flask-app"
+        assert not target.url
+
+    def test_engine_classifiers(self):
+        assert _classify_engine("5000") == "exllamav3"
+        for name in ("tabbyapi-x", "exl3-x", "exllamav3-x"):
+            assert _classify_engine_from_container(name) == "exllamav3"
+        assert ENGINE_PREFIXES.match("tabbyapi-qwen38-flash-next-exl3-405")
+        assert "5000" in ENGINE_INTERNAL_PORTS

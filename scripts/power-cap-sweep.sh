@@ -847,7 +847,7 @@ import json
 import sys
 try:
     with open(sys.argv[1], encoding="utf-8") as f:
-        print(json.load(f).get("usage", {}).get("prompt_tokens", 0))
+        print((json.load(f).get("usage") or {}).get("prompt_tokens", 0))
 except Exception:
     print(0)
 PY
@@ -929,7 +929,7 @@ PY
   for i in $(seq 1 "$n"); do
     if [ -s "$dir/out-N${n}-${i}.json" ]; then
       local t
-      t=$(python3 -c "import json; print(json.load(open('$dir/out-N${n}-${i}.json')).get('usage',{}).get('completion_tokens',0))" 2>/dev/null || echo 0)
+      t=$(python3 -c "import json; print((json.load(open('$dir/out-N${n}-${i}.json')).get('usage') or {}).get('completion_tokens',0))" 2>/dev/null || echo 0)
       total_tokens=$((total_tokens + t))
     fi
   done

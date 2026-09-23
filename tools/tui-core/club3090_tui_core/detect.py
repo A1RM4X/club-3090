@@ -13,20 +13,25 @@ from typing import Optional
 
 import httpx
 
-# Engine-internal ports: 8000=vLLM, 8080=llama.cpp, 30000=SGLang
-ENGINE_INTERNAL_PORTS = {"8000", "8080", "30000"}
+# Engine-internal ports: 8000=vLLM, 8080=llama.cpp, 30000=SGLang, 5000=TabbyAPI
+# (exllamav3, #1360). Every use applies a name filter first (ENGINE_PREFIXES, a
+# registry claim, or the cockpit's container kind), so 5000 — also a common port
+# for unrelated apps — never admits a container on the port alone.
+# ⚠️ Mirrored in scripts/lib/club-containers.sh and scripts/catalog.sh;
+# scripts/tests/test-engine-port-set-drift.sh asserts every copy matches.
+ENGINE_INTERNAL_PORTS = {"8000", "8080", "30000", "5000"}
 
 # Recognized engine-family container prefixes
-ENGINE_PREFIXES = re.compile(r"^(vllm-|llama-cpp-|ik-llama-|sglang-|beellama-)")
+ENGINE_PREFIXES = re.compile(r"^(vllm-|llama-cpp-|ik-llama-|sglang-|beellama-|tabbyapi-|exl3-|exllamav3-)")
 
 # Port mapping regex: matches 0.0.0.0:8011->8000/tcp, [::]:8011->8000/tcp, 127.0.0.1:8011->8000/tcp
 PORT_MAP_RE = re.compile(
-    r"(?:[0-9]{1,3}(?:\.[0-9]{1,3}){3}|\[::\]):(\d+)->(8000|8080|30000)/tcp"
+    r"(?:[0-9]{1,3}(?:\.[0-9]{1,3}){3}|\[::\]):(\d+)->(8000|8080|30000|5000)/tcp"
 )
 
 # All known engine-port patterns (also match without IP prefix)
 PORT_MAP_BROAD_RE = re.compile(
-    r":(\d+)->(8000|8080|30000)/tcp"
+    r":(\d+)->(8000|8080|30000|5000)/tcp"
 )
 
 # ANY published tcp mapping.  Used ONLY for containers the registry claims by
@@ -128,7 +133,9 @@ class ServingTarget:
 
 def _classify_engine(internal_port: str) -> str:
     """Map internal port to engine family."""
-    return {"8000": "vllm", "8080": "llamacpp", "30000": "sglang"}.get(internal_port, "unknown")
+    return {"8000": "vllm", "8080": "llamacpp", "30000": "sglang", "5000": "exllamav3"}.get(
+        internal_port, "unknown"
+    )
 
 
 def _classify_engine_from_container(name: str) -> str:
@@ -141,6 +148,8 @@ def _classify_engine_from_container(name: str) -> str:
         return "sglang"
     if name.startswith("beellama-"):
         return "beellama"
+    if name.startswith(("tabbyapi-", "exl3-", "exllamav3-")):
+        return "exllamav3"
     return "unknown"
 
 

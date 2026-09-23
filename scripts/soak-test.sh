@@ -308,7 +308,7 @@ auto_container() {
   # take-the-first fallback below, i.e. by luck rather than by recognition.
   local lines name
   lines=$(docker ps --format '{{.Names}}|{{.Ports}}' 2>/dev/null \
-    | command grep -E '([0-9]{1,3}\.){3}[0-9]{1,3}:[0-9]+->(8000|8080|30000)/tcp' || true)
+    | club_engine_port_lines || true)
   [[ -z "$lines" ]] && return 0
   name=$(printf '%s\n' "$lines" \
     | command grep -E "$(club_container_re_loose)" | head -1 || true)
@@ -319,8 +319,9 @@ auto_container() {
 endpoint_from_container() {
   local container="$1"
   local mapped port internal
-  # vllm maps internal 8000, llama.cpp / ik_llama map 8080, sglang maps 30000.
-  for internal in 8000 8080 30000; do
+  # vllm maps internal 8000, llama.cpp / ik_llama map 8080, sglang maps 30000,
+  # TabbyAPI (exllamav3) maps 5000 (#1360). The container is already chosen here.
+  for internal in 8000 8080 30000 5000; do
     mapped="$(docker port "$container" "${internal}/tcp" 2>/dev/null | head -1 || true)"
     if [[ -n "$mapped" ]]; then
       port="${mapped##*:}"
