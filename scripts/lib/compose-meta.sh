@@ -19,25 +19,45 @@ _compose_meta_trim() {
   printf '%s' "$value"
 }
 
+# _compose_meta_norm_key_to <out-var> <key> — trim, '_'/' ' → '-', lowercase,
+# assigned to OUT-VAR IN-PROCESS. ⚠️ Keep key normalisation free of $( ) and
+# `tr`: compose_meta_get applies it (inlined) to every comment line, the
+# CPU-offload composes carry 500+ of them, and the setup.sh picker fit-checks
+# dozens of composes. The old `$(...) | tr` form forked ~4 processes per line —
+# ~2.4 s for ONE header-less compose, ~100 s for the picker on a VM (#1382).
+_compose_meta_norm_key_to() {
+  local _cmn_k="$2"
+  _cmn_k="${_cmn_k#"${_cmn_k%%[![:space:]]*}"}"
+  _cmn_k="${_cmn_k%"${_cmn_k##*[![:space:]]}"}"
+  _cmn_k="${_cmn_k//_/-}"
+  _cmn_k="${_cmn_k// /-}"
+  printf -v "$1" '%s' "${_cmn_k,,}"
+}
+
 _compose_meta_norm_key() {
-  local key="$1"
-  key="$(_compose_meta_trim "$key")"
-  key="${key//_/-}"
-  key="${key// /-}"
-  printf '%s' "$key" | tr '[:upper:]' '[:lower:]'
+  local out
+  _compose_meta_norm_key_to out "$1"
+  printf '%s' "$out"
+}
+
+# _compose_meta_canon_field_to <out-var> <field> — normalised REQUESTED key,
+# with the short aliases (min-vram-gb, tp, …) expanded.
+_compose_meta_canon_field_to() {
+  local _cmc_f
+  _compose_meta_norm_key_to _cmc_f "$2"
+  case "$_cmc_f" in
+    min-vram-gb) _cmc_f="requires-min-vram-gb" ;;
+    min-gpu-count) _cmc_f="requires-min-gpu-count" ;;
+    tp) _cmc_f="tensor-parallel" ;;
+    sm) _cmc_f="requires-sm" ;;
+  esac
+  printf -v "$1" '%s' "$_cmc_f"
 }
 
 _compose_meta_wants_key() {
-  local requested="$(_compose_meta_norm_key "$1")"
-  local candidate="$(_compose_meta_norm_key "$2")"
-
-  case "$requested" in
-    min-vram-gb) requested="requires-min-vram-gb" ;;
-    min-gpu-count) requested="requires-min-gpu-count" ;;
-    tp) requested="tensor-parallel" ;;
-    sm) requested="requires-sm" ;;
-  esac
-
+  local requested candidate
+  _compose_meta_canon_field_to requested "$1"
+  _compose_meta_norm_key_to candidate "$2"
   [[ "$candidate" == "$requested" ]]
 }
 
@@ -47,15 +67,39 @@ compose_meta_get() {
 
   [[ -f "$compose_file" ]] || return 1
 
-  local line key value
+  # The requested key is normalised ONCE, not once per line. Per line: trim the
+  # candidate, then reject on length before paying for the rest — '_'/' ' → '-'
+  # and lowercasing are 1:1 per character, so a length mismatch can never
+  # normalise into a match. (Same result as _compose_meta_wants_key, inlined:
+  # a function call per line is most of the cost on a 500-line header.)
+  local want line key
+  _compose_meta_canon_field_to want "$field"
+
+  # Exact NEGATIVE prefilter — one C-level regex over the whole (lowercased)
+  # file: if the key cannot occur anywhere, no line can match, so skip the
+  # line walk. The header-less offload composes run to ~700 lines and are the
+  # common miss (glm-5.3-flash alone ships 18). Plain [a-z0-9-] keys only —
+  # every real field is one; anything else just takes the full walk.
+  # (Don't "simplify" this to ${text//_/-}: that is quadratic in bash — ~115 ms
+  # on one 45 KB compose.)
+  if [[ "$want" =~ ^[a-z0-9-]+$ ]]; then
+    local text re="${want//-/[-_ ]}"
+    IFS= read -r -d '' text < "$compose_file" || true
+    [[ "${text,,}" =~ $re ]] || return 1
+  fi
+
   while IFS= read -r line; do
     [[ "$line" =~ ^[[:space:]]*# ]] || continue
     line="${line#*\#}"
     [[ "$line" == *:* ]] || continue
     key="${line%%:*}"
-    value="${line#*:}"
-    if _compose_meta_wants_key "$field" "$key"; then
-      _compose_meta_trim "$value"
+    key="${key#"${key%%[![:space:]]*}"}"
+    key="${key%"${key##*[![:space:]]}"}"
+    (( ${#key} == ${#want} )) || continue
+    key="${key//_/-}"
+    key="${key// /-}"
+    if [[ "${key,,}" == "$want" ]]; then
+      _compose_meta_trim "${line#*:}"
       return 0
     fi
   done < "$compose_file"
@@ -263,16 +307,19 @@ compose_hw_requirement_text() {
 
 compose_hw_compose_status() {
   local compose_file="$1"
-  local min_vram_gb min_gpu_count requires_sm
+  local min_vram_gb="" min_gpu_count="" requires_sm=""
 
+  # Bail on the first missing required field: a header-less compose is
+  # `unknown` either way, and each lookup is a full-file scan (the setup.sh
+  # picker walks dozens of header-less composes — #1382).
   min_vram_gb="$(compose_meta_get "$compose_file" requires-min-vram-gb || true)"
-  min_gpu_count="$(compose_meta_get "$compose_file" requires-min-gpu-count || true)"
-  requires_sm="$(compose_meta_get "$compose_file" requires-sm || true)"
-
+  [[ -n "$min_vram_gb" ]] \
+    && min_gpu_count="$(compose_meta_get "$compose_file" requires-min-gpu-count || true)"
   if [[ -z "$min_vram_gb" || -z "$min_gpu_count" ]]; then
     printf 'unknown|metadata unavailable'
     return 2
   fi
+  requires_sm="$(compose_meta_get "$compose_file" requires-sm || true)"
 
   requires_sm="${requires_sm:-0.0}"
   local required_sm_int
