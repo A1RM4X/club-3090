@@ -18,9 +18,10 @@ patches:
       - models/qwen3.8-27b/vllm/patches/fa2-fp8kv-sm86/install_artifact.py
       - models/qwen3.8-27b/vllm/patches/fa2-fp8kv-sm86/check_context.py
       - models/qwen3.8-27b/vllm/patches/fa2-fp8kv-sm86/check_vision_context.py
+      - models/qwen3.8-27b/vllm/patches/fa2-fp8kv-sm86/envelope.sh
     load_bearing_when:
-      - composes: [vllm/qwen38-27b-dual-ultramax]
-        reason: "Stock FA2 cannot consume FP8 KV on SM86. This sidecar uses pinned FA2 E4M3 kernels for target/draft attention and bounded native FA2 prefill."
+      - composes: [vllm/qwen38-27b-dual-ultramax, vllm/qwen38-27b-dual-ultrafast]
+        reason: "Stock FA2 cannot consume FP8 KV on SM86. This sidecar uses pinned FA2 E4M3 kernels for target/draft attention and bounded native FA2 prefill. dual-ultrafast ships fp8 KV through it too (#1274)."
     delivery:
       dockerfile_bake: false
       entrypoint_invoke: true
@@ -34,7 +35,7 @@ patches:
       invoked_before: vllm-serve
     drift_guard:
       kind: boot
-      check: "Installer verifies artifact identity, payload checksums, CUDA/PyTorch/Python ABI, and the FlashAttention metadata/layout interface before installing the prebuilt plugin. No vLLM source files are changed."
+      check: "Installer verifies artifact identity, payload checksums, CUDA/PyTorch/Python ABI, and the FlashAttention metadata/layout interface before installing the prebuilt plugin. No vLLM source files are changed. envelope.sh (sourced before exec) keeps fp8-KV argv inside the kernel's max_q <= 2048 / max_k <= 262144 envelope: with more than one sequence it caps --long-prefill-token-threshold at 2048, and it refuses max-model-len > 262144 (#1358; guarded by test-fa2-envelope)."
     capability: fa2-fp8kv-sm86
     foundational: false
     upstream:
