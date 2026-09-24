@@ -72,8 +72,10 @@ SAFETY
   * `check` is a read-only gate (safe to wire into compose pre-flight).
   * `revert` returns the files to pristine by inverting each edit (NEW->OLD),
     gated on the per-edit marker so it only touches what was actually applied.
-    The transient v1->v2 migration edit is excluded (its NEW text is the
-    pristine tail; inverting it would re-insert the buggy v1 loop). It exits
+    The transient v1->v2 migration edit is the one exception: on a pristine/v2
+    tree it is a no-op (inverting it would re-insert the buggy v1 loop), but on a
+    *v1* tree it IS applied (v1-tail -> pristine) so the v1 tail loop is removed
+    and revert truly reaches pristine for that state class too. It exits
     non-zero on any ABSENT/ambiguous anchor (drift), symmetric with apply;
     reverting a pristine (never-patched) tree is a clean rc-0 no-op.
   * Version-gated: warns if the installed sglang version differs from the
@@ -319,11 +321,25 @@ def run_edits(path, name, edits, direction):
                 all_ok = False  # hold the write for this whole file
         else:  # revert
             if ed.get("revert_noop"):
-                # Transient v1->v2 migration edit: its NEW text is the pristine
-                # tail, so "reverting" it would re-insert the buggy v1 loop.
-                # Revert returns to pristine by inverting the *applied* fix
-                # (A1/A2/B2/C/D); the migration edit is never inverted.
-                per_edit.append((ed["tag"], "migration (no-op on revert)"))
+                # Transient v1->v2 migration edit. Its NEW text is the pristine
+                # tail, so a naive NEW->OLD invert would re-insert the buggy v1
+                # tail loop — wrong for a pristine/v2 tree, where the tail is
+                # ALREADY pristine and must stay. But reverting a *v1* tree (the
+                # tail loop still present, i.e. this edit is PRISTINE) must remove
+                # that loop: the migration edit's apply direction IS
+                # "v1-tail -> pristine", which is exactly the revert-to-pristine
+                # for that state class. Without this, a v1 tree reverts to a
+                # hybrid (v1 tail loop survives with A1/C removed).
+                if is_pristine(text, ed):
+                    if text.count(ed["old"]) != 1:
+                        per_edit.append((ed["tag"], "AMBIGUOUS"))
+                        all_ok = False
+                        continue
+                    text = text.replace(ed["old"], ed["new"], 1)
+                    changed = True
+                    per_edit.append((ed["tag"], "reverted (v1 tail removed)"))
+                else:
+                    per_edit.append((ed["tag"], "migration (no-op on revert)"))
                 continue
             if is_patched(text, ed):
                 if text.count(ed["new"]) != 1:
